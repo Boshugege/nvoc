@@ -45,6 +45,7 @@ This section is the canonical component inventory for the monorepo. `CONTRIBUTIN
 | NVOC-CORE | [core/](./core/) | Core overclocking/domain library shared by Rust components. |
 | NVOC-CLI-COMMON | [cli-common/](./cli-common/) | Shared CLI support layer for Rust command-line components. |
 | NVOC-PYTHON (pynvoc) | [nvoc-python/](./nvoc-python/) | Python bindings and shared Python-side integration surface. |
+| PROBE-MACOS-RM | [probe-macos-rm/](./probe-macos-rm/) | C validation suite probing the NullMoth macOS NVRM kext RM-control surface (telemetry, RUSD page, gated perf writes); macOS-only, builds against OGKM 610.57.04 headers. |
 
 Read the component README before building or running that component. The backend compatibility matrix lives in [cli/README.md](./cli/README.md#compatibility-overview-interface--gpu-generation--basic-functions); the autoscan command reference and scanning theory live in [auto-optimizer/README-en.md](./auto-optimizer/README-en.md) and [auto-optimizer/README.md](./auto-optimizer/README.md).
 
