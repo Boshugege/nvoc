@@ -20,10 +20,28 @@
  *   src/common/sdk/nvidia/inc/class/cl0080.h:36  NV01_DEVICE_0 = 0x80
  *   src/common/sdk/nvidia/inc/class/cl2080.h:36  NV20_SUBDEVICE_0 = 0x2080
  *   NV00DE (RM_USER_SHARED_DATA) = 0xDE, same generated header.
- * cl0080/cl2080 are included directly; the two generated-only ones are here.
+ * cl0080/cl2080 are included directly; the generated-only ones are here.
  */
 #define NVX_CLASS_ROOT_CLIENT  0x41u
 #define NVX_CLASS_USER_SHARED_DATA 0x00DEu
+
+/* Channel-smoke class IDs (verified against OGKM 610.57.04
+ * src/nvidia/generated/g_allclasses.h): */
+#define NVX_CLASS_CONTEXT_DMA        0x02u   /* g_allclasses.h:321 */
+#define NVX_CLASS_MEMORY_SYSTEM      0x3Eu   /* g_allclasses.h:325 */
+#define NVX_CLASS_MEMORY_LOCAL_USER  0x40u   /* g_allclasses.h:345 */
+#define NVX_CLASS_MEMORY_VIRTUAL_NV50 0x50A0u /* g_allclasses.h:879 */
+#define NVX_CLASS_VASPACE_FERMI_A    0x90F1u /* g_allclasses.h:895 */
+#define NVX_CLASS_USERMODE_TURING_A  0xC461u /* g_allclasses.h:587 */
+
+/* USERD GP FIFO get/put registers, byte offsets inside the USERD page.
+ * Source: OGKM class/clc46f.h (Nvc46fControl/TuringAControlGPFifo:
+ * GPGet 0x88, GPPut 0x8C). */
+#define NVX_USERD_GPGET 0x88u
+#define NVX_USERD_GPPUT 0x8Cu
+
+/* Channel engine type. Source: OGKM class/cl2080_notification.h:284. */
+#define NVX_ENGINE_TYPE_GRAPHICS 1u
 
 /*
  * Tier-B legacy RM subdevice controls: stable GSP-RM wire IDs that no longer

@@ -6,8 +6,9 @@
 
 1. 用户态 → `NVRMUserClient` selector 1 → `rm_ioctl` 直通是否可达（报告 §3.3）；
 2. RM 对象链（root client → attach → device → subdevice）是否完整可用；
-3. GSP-RM 对**遥测类** FINN 控制与 **RUSD 遥测页**的接受度（M0）；
-4. GSP-RM 对**写入类**控制（PERF_BOOST / SET_POWERSTATE / UPDATE_EDPP_LIMIT）的接受度与可逆性（M1）；每次写入均为"回读值回写"的零位移往返，退出时恢复。
+3. 内存映射路径（sysmem/VRAM 分配 → MAP_MEMORY → BAR1 读写）与**通道执行路径**（VASPACE → CONTEXT_DMA → GPFIFO → 门铃 → 信号量）是否完整；
+4. GSP-RM 对**遥测类** FINN 控制与 **RUSD 遥测页**的接受度（M0）；
+5. GSP-RM 对**写入类**控制（PERF_BOOST / SET_POWERSTATE / UPDATE_EDPP_LIMIT）的接受度与可逆性（M1）；每次写入均为"回读值回写"的零位移往返，退出时恢复。
 
 ## 前置条件
 
@@ -37,7 +38,8 @@ OGKM=/path/to/ogkm LINT=1 ./build.sh
 
 ```bash
 ./probe-macos-rm --jsonl run1.jsonl                    # 默认阶段 0+1+2，全只读
-./probe-macos-rm --stages 0123 --write --jsonl run2.jsonl   # 含写入测试
+./probe-macos-rm --stages 0125 --jsonl run1.jsonl      # + 通道冒烟（GPU 执行证明，非调频写入）
+./probe-macos-rm --stages 01235 --write --jsonl run2.jsonl  # 全量：含写入测试（建议的单次全测面命令）
 ./probe-macos-rm --stages 4 --sample 30 --jsonl load.jsonl  # 30 s 遥测采样
 ```
 

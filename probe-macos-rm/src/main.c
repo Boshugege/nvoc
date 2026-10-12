@@ -29,7 +29,7 @@ static void usage(void)
         "probe-macos-rm — NullMoth NVRM kext RM-surface validation suite\n"
         "\n"
         "usage: probe-macos-rm [options]\n"
-        "  --stages <set>   stage subset, e.g. 012 (default 012); 3=writes, 4=loop\n"
+        "  --stages <set>   stage subset, e.g. 012 (default 012); 3=writes, 4=loop, 5=channel smoke\n"
         "  --write          allow stage-3 write tests (boost / powerstate / EDPp)\n"
         "  --sample <sec>   run the 1 Hz telemetry loop for <sec> seconds\n"
         "  --jsonl <file>   also write every result/sample as JSON lines\n"
@@ -101,6 +101,10 @@ int main(int argc, char **argv)
             if (sample_sec <= 0) sample_sec = 10;
             if (!g_ctx.hSubdevice && nvx_stage1(&g_ctx, gpuId ? gpuId : g_ctx.gpuId) != 0) { rc = 1; goto out; }
             nvx_stage4(&g_ctx, sample_sec);
+            break;
+        case '5':
+            if (!g_ctx.hSubdevice && nvx_stage1(&g_ctx, gpuId ? gpuId : g_ctx.gpuId) != 0) { rc = 1; goto out; }
+            if (nvx_stage5(&g_ctx) != 0) rc = 1;
             break;
         default:
             fprintf(stderr, "unknown stage '%c'\n", *p);

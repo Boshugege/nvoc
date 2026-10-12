@@ -13,19 +13,29 @@
 
 #include "nvos.h"
 #include "nvstatus.h"
+#include "nvmisc.h"
 #include "nv-ioctl.h"
 #include "nv_escape.h"
 #include "nv-unix-nvos-params-wrappers.h"
 #include "class/cl0080.h"
 #include "class/cl2080.h"
 #include "class/cl00de.h"
+#include "class/clc361.h"
+#include "class/cl2080_notification.h"
 #include "ctrl/ctrl0000/ctrl0000gpu.h"
+#include "ctrl/ctrl0000/ctrl0000client.h"
 #include "ctrl/ctrl0080/ctrl0080gpu.h"
 #include "ctrl/ctrl2080/ctrl2080fb.h"
 #include "ctrl/ctrl2080/ctrl2080clk.h"
 #include "ctrl/ctrl2080/ctrl2080perf.h"
 #include "ctrl/ctrl2080/ctrl2080gpumon.h"
 #include "ctrl/ctrl2080/ctrl2080internal.h"
+#include "ctrl/ctrl2080/ctrl2080bios.h"
+#include "ctrl/ctrl2080/ctrl2080bus.h"
+#include "ctrl/ctrl2080/ctrl2080i2c.h"
+#include "ctrl/ctrla06f/ctrla06fgpfifo.h"
+#include "ctrl/ctrlc36f.h"
+#include "alloc/alloc_channel.h"
 
 /* ------------------------------------------------------------------ */
 /* result plumbing                                                     */
@@ -243,12 +253,78 @@ int nvx_stage0(nvx_ctx *c)
                  st == 0 ? NVX_V_OK : NVX_V_REJECTED,
                  st == 0 ? "device connection bound to ctl fd" : "REGISTER_FD refused");
     }
+
+    /* RM API version handshake (Linux nv.c CHECK_VERSION_STR semantics). */
+    nv_ioctl_rm_api_version_t v;
+    memset(&v, 0, sizeof v);
+    v.cmd = NV_RM_API_VERSION_CMD_QUERY;
+    strncpy(v.versionString, "610.57.04", sizeof v.versionString - 1);
+    if (nvx_esc(c->ctl_fd, NV_ESC_CHECK_VERSION_STR, &v, sizeof v) != 0) {
+        nvx_emit(c, "V0.5", "version-check", 0, NVX_V_TRANSPORT, "esc rejected");
+    } else {
+        nvx_emit(c, "V0.5", "version-check", 0,
+                 v.reply == NV_RM_API_VERSION_REPLY_RECOGNIZED ? NVX_V_OK : NVX_V_REJECTED,
+                 "reply %u, driver reports \"%.64s\"", v.reply, v.versionString);
+    }
     return 0;
 }
 
 /* ------------------------------------------------------------------ */
 /* stage 1 — RM object chain                                           */
 /* ------------------------------------------------------------------ */
+
+/* 64 KB alloc + MAP_MEMORY + pattern write/readback. vidmem=1 exercises the
+ * VRAM path, vidmem=0 the sysmem/BAR1 path. */
+static int mem_smoke(nvx_ctx *c, int vidmem)
+{
+    NvU32 st = 0;
+    NV_MEMORY_ALLOCATION_PARAMS mp;
+    memset(&mp, 0, sizeof mp);
+    mp.owner = c->hClient;
+    mp.type = NVOS32_TYPE_IMAGE;
+    mp.size = 0x10000;
+    mp.alignment = 0x10000;
+    mp.attr = DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _4KB) |
+              (vidmem ? (DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM) |
+                         DRF_DEF(OS32, _ATTR, _COHERENCY, _UNCACHED))
+                      : (DRF_DEF(OS32, _ATTR, _LOCATION, _PCI) |
+                         DRF_DEF(OS32, _ATTR, _COHERENCY, _CACHED)));
+    NvHandle hMem = nvx_rm_alloc(c->ctl_fd, c->hClient, c->hDevice,
+                                 vidmem ? 0xcafe0021 : 0xcafe0020,
+                                 vidmem ? NVX_CLASS_MEMORY_LOCAL_USER
+                                        : NVX_CLASS_MEMORY_SYSTEM,
+                                 &mp, sizeof mp, &st);
+    if (!hMem) {
+        nvx_emit(c, vidmem ? "V1.9b" : "V1.9a",
+                 vidmem ? "mem-smoke-vidmem" : "mem-smoke-sysmem",
+                 st, NVX_V_REJECTED, "alloc rejected");
+        return -1;
+    }
+    NvU64 len = 0;
+    volatile uint8_t *p = nvx_map_memory(c->ctl_fd, c->dev_fd, c->hClient,
+                                         c->hSubdevice, hMem, 0x10000, &len);
+    if (!p) {
+        nvx_emit(c, vidmem ? "V1.9b" : "V1.9a",
+                 vidmem ? "mem-smoke-vidmem" : "mem-smoke-sysmem",
+                 0, NVX_V_REJECTED, "alloc 0x%08x ok, map failed", hMem);
+        nvx_rm_free(c->ctl_fd, c->hClient, c->hDevice, hMem);
+        return -1;
+    }
+    const NvU32 pat = vidmem ? 0xA5A5C3C3u : 0x5A5A3C3Cu;
+    *(volatile NvU32 *)(p + 0x10) = pat;
+    *(volatile NvU32 *)(p + len - 4) = ~pat;
+    NvU32 r0 = *(volatile NvU32 *)(p + 0x10);
+    NvU32 r1 = *(volatile NvU32 *)(p + len - 4);
+    int ok = (r0 == pat && r1 == ~pat);
+    nvx_emit(c, vidmem ? "V1.9b" : "V1.9a",
+             vidmem ? "mem-smoke-vidmem" : "mem-smoke-sysmem",
+             0, ok ? NVX_V_OK : NVX_V_REJECTED,
+             "%lluKB mapped at %p, readback %s",
+             (unsigned long long)(len >> 10), (const void *)p,
+             ok ? "OK" : "MISMATCH");
+    nvx_rm_free(c->ctl_fd, c->hClient, c->hDevice, hMem);
+    return ok ? 0 : -1;
+}
 
 int nvx_stage1(nvx_ctx *c, NvU32 gpuId)
 {
@@ -315,6 +391,44 @@ int nvx_stage1(nvx_ctx *c, NvU32 gpuId)
     nvx_emit(c, "V1.6", "gpu-classlist-v2", st,
              st == 0 ? NVX_V_OK : NVX_V_REJECTED,
              st == 0 ? "%u classes (NVK-proven path)" : "-", st == 0 ? cls.numClasses : 0);
+
+    /* Privilege introspection: which access rights did RM grant our plain
+     * client? On the kext os_check_access() is hard-wired NV_TRUE, so this
+     * shows what the RM face actually hands out. */
+    NV0000_CTRL_CLIENT_GET_ACCESS_RIGHTS_PARAMS ar;
+    memset(&ar, 0, sizeof ar);
+    ar.hObject = cl;
+    ar.hClient = cl;
+    st = nvx_rm_control(c->ctl_fd, cl, cl, NV0000_CTRL_CMD_CLIENT_GET_ACCESS_RIGHTS,
+                        &ar, sizeof ar);
+    nvx_emit(c, "V1.7", "client-access-rights", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             st == 0 ? "mask raw 0x%08x 0x%08x 0x%08x 0x%08x" : "-",
+             st == 0 ? ((NvU32 *)&ar.maskResult)[0] : 0,
+             st == 0 ? ((NvU32 *)&ar.maskResult)[1] : 0,
+             st == 0 ? ((NvU32 *)&ar.maskResult)[2] : 0,
+             st == 0 ? ((NvU32 *)&ar.maskResult)[3] : 0);
+
+    NV0000_CTRL_GPU_GET_ID_INFO_V2_PARAMS idv;
+    memset(&idv, 0, sizeof idv);
+    idv.gpuId = gpuId;
+    st = nvx_rm_control(c->ctl_fd, cl, cl, NV0000_CTRL_CMD_GPU_GET_ID_INFO_V2,
+                        &idv, sizeof idv);
+    nvx_emit(c, "V1.8", "gpu-id-info-v2", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             st == 0 ? "flags 0x%x devInst %u boardId 0x%x numa %d" : "-",
+             st == 0 ? idv.gpuFlags : 0, st == 0 ? idv.deviceInstance : 0,
+             st == 0 ? idv.boardId : 0, st == 0 ? idv.numaId : 0);
+
+    /* Memory smoke: BAR1 mapping of a sysmem + a vidmem allocation with a
+     * write/readback pattern — the NV01_MEMORY_* -> MAP_MEMORY -> mmap path
+     * the channel smoke and any future pushbuffer work depends on. */
+    if (mem_smoke(c, 0) == 0 && mem_smoke(c, 1) == 0)
+        nvx_emit(c, "V1.9", "memory-smoke", 0, NVX_V_OK,
+                 "sysmem+vidmem 64KB mapped, pattern verified");
+    else
+        nvx_emit(c, "V1.9", "memory-smoke", 0, NVX_V_REJECTED,
+                 "see mem-smoke items above");
     return 0;
 }
 
@@ -471,6 +585,66 @@ static void item_legacy_probes(nvx_ctx *c)
              st == 0 ? ((NvU32 *)buf)[2] : 0);
 }
 
+static void item_bios_sku(nvx_ctx *c)
+{
+    NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS p;
+    memset(&p, 0, sizeof p);
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_BIOS_GET_SKU_INFO, &p);
+    nvx_emit(c, "V2.13", "bios-sku-info", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             st == 0 ? "board 0x%x sku \"%.8s\" mod \"%.4s\" project \"%.4s\"" : "-",
+             st == 0 ? p.BoardID : 0, st == 0 ? p.chipSKU : "?",
+             st == 0 ? p.chipSKUMod : "?", st == 0 ? p.project : "?");
+}
+
+static void item_bus(nvx_ctx *c)
+{
+    NV2080_CTRL_BUS_GET_PCI_INFO_PARAMS p;
+    memset(&p, 0, sizeof p);
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_BUS_GET_PCI_INFO, &p);
+    nvx_emit(c, "V2.14", "bus-get-pci-info", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             st == 0 ? "deviceId 0x%08x subsys 0x%08x rev 0x%x ext 0x%x" : "-",
+             st == 0 ? p.pciDeviceId : 0, st == 0 ? p.pciSubSystemId : 0,
+             st == 0 ? p.pciRevisionId : 0, st == 0 ? p.pciExtDeviceId : 0);
+}
+
+static void item_perf_levels(nvx_ctx *c)
+{
+    static NV2080_CTRL_PERF_GET_LEVEL_INFO_V2_PARAMS p;
+    memset(&p, 0, sizeof p);
+    p.level = 0; /* lowest level first; ranges come back per domain */
+    p.perfGetClkInfoListSize = NV2080_CTRL_PERF_CLK_MAX_DOMAINS;
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2, &p);
+    if (st == 0 && p.perfGetClkInfoListSize >= 2) {
+        nvx_emit(c, "V2.15", "perf-level-info-v2", st, NVX_V_OK,
+                 "lvl%u dom%u cur %u kHz (min %u max %u) | dom%u cur %u kHz (min %u max %u)",
+                 p.level,
+                 p.perfGetClkInfoList[0].domain, p.perfGetClkInfoList[0].currentFreq,
+                 p.perfGetClkInfoList[0].minFreq, p.perfGetClkInfoList[0].maxFreq,
+                 p.perfGetClkInfoList[1].domain, p.perfGetClkInfoList[1].currentFreq,
+                 p.perfGetClkInfoList[1].minFreq, p.perfGetClkInfoList[1].maxFreq);
+    } else {
+        nvx_emit(c, "V2.15", "perf-level-info-v2", st,
+                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 st == 0 ? "listSize %u" : "-", st == 0 ? p.perfGetClkInfoListSize : 0);
+    }
+}
+
+static void item_i2c_probe(nvx_ctx *c)
+{
+    /* Dispatch-reachability probe with zeroed params: an I2C transaction on
+     * port 0 with no entries should be rejected by argument validation if the
+     * FINN I2C family is wired up — any well-formed NV_ERR_* is informative,
+     * silence (transport failure) is not expected. READ face only. */
+    NV2080_CTRL_I2C_READ_BUFFER_PARAMS p;
+    memset(&p, 0, sizeof p);
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_I2C_READ_BUFFER, &p);
+    nvx_emit(c, "V2.16", "i2c-read-buffer", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             "zeroed-params probe (fan/sensor I2C reachability)");
+}
+
 static void item_rusd(nvx_ctx *c)
 {
     if (c->dev_fd < 0) {
@@ -514,6 +688,72 @@ static void item_rusd(nvx_ctx *c)
              "NV00DE 0x%08x mapped at %p len %lluKB — poll mask 0x%x (temp/pwr/fan/clock path alive)",
              use, page, (unsigned long long)(len >> 10), NVX_RUSD_POLL_MASK);
 
+    /* Full RUSD readout: every polled section with a stable timestamp. */
+    {
+        NV00DE_SHARED_DATA *sd = (NV00DE_SHARED_DATA *)page;
+        RUSD_CLK_PUBLIC_DOMAIN_INFOS clks;
+        RUSD_PERF_CURRENT_PSTATE pst;
+        RUSD_POWER_LIMITS pl;
+        RUSD_INST_POWER_USAGE ipw;
+        RUSD_AVG_POWER_USAGE apw;
+        RUSD_POWER_POLICY_STATUS pol;
+        RUSD_FAN_COOLER_STATUS fan;
+        RUSD_TEMPERATURE temps[RUSD_TEMPERATURE_TYPE_MAX];
+        char tbuf[96];
+        size_t o = 0;
+        tbuf[0] = 0;
+
+        for (int i = 0; i < RUSD_TEMPERATURE_TYPE_MAX; i++) {
+            if (rusd_copy(&sd->temperatures[i].lastModifiedTimestamp,
+                          &sd->temperatures[i], &temps[i], sizeof temps[i]) != 0)
+                continue;
+            int n = snprintf(tbuf + o, sizeof tbuf - o, "%s%s=%ld.%ldC",
+                             o ? " " : "",
+                             i == RUSD_TEMPERATURE_TYPE_GPU ? "gpu" :
+                             i == RUSD_TEMPERATURE_TYPE_MEMORY ? "mem" :
+                             i == RUSD_TEMPERATURE_TYPE_BOARD ? "board" :
+                             i == RUSD_TEMPERATURE_TYPE_POWER_SUPPLY ? "psu" : "hbm",
+                             (long)temps[i].temperature >> 8,
+                             ((long)temps[i].temperature & 0xff) * 100 / 256);
+            if (n > 0 && o + n < sizeof tbuf) o += (size_t)n;
+        }
+
+        long fanMax = -1, instMW = -1, avgMW = -1, enforcedMW = -1, tgpmW = -1;
+        NvU32 pstate = 0xffffffff;
+        NvU32 gpcKHz = 0, memKHz = 0, smKHz = 0;
+        if (rusd_copy(&sd->fanCoolerStatus.lastModifiedTimestamp,
+                      &sd->fanCoolerStatus, &fan, sizeof fan) == 0)
+            for (unsigned i = 0; i < RUSD_FAN_COOLER_MAX_COOLERS; i++)
+                if ((long)fan.info.rpmCurr[i] > fanMax) fanMax = (long)fan.info.rpmCurr[i];
+        if (rusd_copy(&sd->instPowerUsage.lastModifiedTimestamp,
+                      &sd->instPowerUsage, &ipw, sizeof ipw) == 0)
+            instMW = (long)ipw.info.instGpuPower;
+        if (rusd_copy(&sd->avgPowerUsage.lastModifiedTimestamp,
+                      &sd->avgPowerUsage, &apw, sizeof apw) == 0)
+            avgMW = (long)apw.info.averageGpuPower;
+        if (rusd_copy(&sd->powerLimitGpu.lastModifiedTimestamp,
+                      &sd->powerLimitGpu, &pl, sizeof pl) == 0)
+            enforcedMW = (long)pl.info.enforcedmW;
+        if (rusd_copy(&sd->powerPolicyStatus.lastModifiedTimestamp,
+                      &sd->powerPolicyStatus, &pol, sizeof pol) == 0)
+            tgpmW = (long)pol.info.tgpmW;
+        if (rusd_copy(&sd->perfCurrentPstate.lastModifiedTimestamp,
+                      &sd->perfCurrentPstate, &pst, sizeof pst) == 0)
+            pstate = pst.currentPstate;
+        if (rusd_copy(&sd->clkPublicDomainInfos.lastModifiedTimestamp,
+                      &sd->clkPublicDomainInfos, &clks, sizeof clks) == 0) {
+            gpcKHz = clks.info[RUSD_CLK_PUBLIC_DOMAIN_GRAPHICS].actualClkKHz;
+            memKHz = clks.info[RUSD_CLK_PUBLIC_DOMAIN_MEMORY].actualClkKHz;
+            smKHz  = clks.info[RUSD_CLK_PUBLIC_DOMAIN_SM].actualClkKHz;
+        }
+
+        nvx_emit(c, "V2.12b", "rusd-readout", 0, NVX_V_OK,
+                 "temp[%s] pstate %u gpc %u mem %u sm %u kHz inst %ld avg %ld mW "
+                 "limit %ld tgp %ld mW fan %ld rpm",
+                 tbuf, pstate, gpcKHz, memKHz, smKHz,
+                 instMW, avgMW, enforcedMW, tgpmW, fanMax);
+    }
+
     /* leave both objects alive for stage 3/4 sampling; freed in main teardown */
     if (hRusd2 && hRusd) nvx_rm_free(c->ctl_fd, c->hClient, c->hSubdevice, hRusd);
 }
@@ -532,6 +772,10 @@ int nvx_stage2(nvx_ctx *c)
     item_edpp_get(c, NULL);
     item_gpumon(c);
     item_pmumon(c);
+    item_bios_sku(c);
+    item_bus(c);
+    item_perf_levels(c);
+    item_i2c_probe(c);
     item_legacy_probes(c);
     item_rusd(c);
     return 0;
@@ -572,18 +816,29 @@ int nvx_stage3(nvx_ctx *c)
         return -1;
     }
 
-    /* --- V3.1 PERF_BOOST cycle (the NVK-proven write) --- */
+    /* --- V3.1 PERF_BOOST cycle (the NVK-proven write) ---
+     * One-step boost first, then boost-to-max; every phase is cleared. */
     {
         nvx_emit(c, "V3.1", "perf-boost-cycle", 0, NVX_V_OK, "sampling baseline...");
         nvx_sample_once(c, "pre");
 
         NV2080_CTRL_PERF_BOOST_PARAMS bp;
         memset(&bp, 0, sizeof bp);
-        bp.flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_BOOST_TO_MAX |
+        bp.flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_BOOST_1LEVEL |
                    (NV2080_CTRL_PERF_BOOST_FLAGS_CUDA_YES << 4);
         bp.duration = NV2080_CTRL_PERF_BOOST_DURATION_INFINITE;
         NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_BOOST, &bp);
-        nvx_emit(c, "V3.1", "perf-boost-cycle", st,
+        nvx_emit(c, "V3.1a", "perf-boost-1level", st,
+                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 st == 0 ? "BOOST_1LEVEL accepted" : "-");
+        if (st == 0) { sleep(2); nvx_sample_once(c, "boost1"); boost_clear(c); sleep(1); }
+
+        memset(&bp, 0, sizeof bp);
+        bp.flags = NV2080_CTRL_PERF_BOOST_FLAGS_CMD_BOOST_TO_MAX |
+                   (NV2080_CTRL_PERF_BOOST_FLAGS_CUDA_YES << 4);
+        bp.duration = NV2080_CTRL_PERF_BOOST_DURATION_INFINITE;
+        st = SUBCTL(c, NV2080_CTRL_CMD_PERF_BOOST, &bp);
+        nvx_emit(c, "V3.1b", "perf-boost-to-max", st,
                  st == 0 ? NVX_V_OK : NVX_V_REJECTED,
                  st == 0 ? "BOOST_TO_MAX accepted by GSP — the §3.4 OS-privilege "
                            "question is answered YES" : "-");
@@ -657,4 +912,281 @@ void nvx_stage4(nvx_ctx *c, int seconds)
         nvx_sample_once(c, "loop");
         sleep(1);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* stage 5 — channel smoke: make the GPU execute a pushbuffer          */
+/*                                                                     */
+/* Port of NullMoth's own push_test (kexts/NVRM/push.inc): sysmem/VRAM */
+/* buffers -> FERMI_VASPACE -> NV01_CONTEXT_DMA notifier -> GPFIFO     */
+/* channel -> BIND/SCHEDULE -> semaphore release via USERD GP put +    */
+/* TURING_USERMODE_A doorbell. PASS = the GPU executed work under      */
+/* macOS through our private client.                                   */
+/* ------------------------------------------------------------------ */
+
+struct nvx_buf {
+    NvHandle hPhys, hVirt;
+    NvU64 gpuva;
+    volatile uint8_t *cpu;
+    NvU64 size;
+};
+
+static NvHandle g_smoke_next = 0xcafe0100;
+
+static int smoke_alloc_buf(nvx_ctx *c, NvHandle hVaSpace, int vidmem,
+                           NvU64 size, const char *what, struct nvx_buf *b,
+                           NvU32 *st)
+{
+    memset(b, 0, sizeof *b);
+    b->size = size;
+    NV_MEMORY_ALLOCATION_PARAMS mp;
+    memset(&mp, 0, sizeof mp);
+    mp.owner = c->hClient;
+    mp.type = NVOS32_TYPE_IMAGE;
+    mp.size = size;
+    mp.attr = DRF_DEF(OS32, _ATTR, _PAGE_SIZE, _4KB) |
+              (vidmem ? (DRF_DEF(OS32, _ATTR, _LOCATION, _VIDMEM) |
+                         DRF_DEF(OS32, _ATTR, _COHERENCY, _UNCACHED))
+                      : (DRF_DEF(OS32, _ATTR, _LOCATION, _PCI) |
+                         DRF_DEF(OS32, _ATTR, _COHERENCY, _CACHED)));
+    if (vidmem) mp.flags |= NVOS32_ALLOC_FLAGS_PERSISTENT_VIDMEM;
+    b->hPhys = nvx_rm_alloc(c->ctl_fd, c->hClient, c->hDevice, g_smoke_next++,
+                            vidmem ? NVX_CLASS_MEMORY_LOCAL_USER
+                                   : NVX_CLASS_MEMORY_SYSTEM,
+                            &mp, sizeof mp, st);
+    if (!b->hPhys) return -1;
+
+    b->cpu = nvx_map_memory(c->ctl_fd, c->dev_fd, c->hClient, c->hSubdevice,
+                            b->hPhys, size, NULL);
+    if (!b->cpu) return -1;
+
+    NV_MEMORY_ALLOCATION_PARAMS vp;
+    memset(&vp, 0, sizeof vp);
+    vp.owner = c->hClient;
+    vp.type = NVOS32_TYPE_IMAGE;
+    vp.flags = NVOS32_ALLOC_FLAGS_VIRTUAL;
+    vp.size = size;
+    vp.hVASpace = hVaSpace;
+    b->hVirt = nvx_rm_alloc(c->ctl_fd, c->hClient, c->hDevice, g_smoke_next++,
+                            NVX_CLASS_MEMORY_VIRTUAL_NV50, &vp, sizeof vp, st);
+    if (!b->hVirt) return -1;
+    b->gpuva = vp.offset;   /* RM fills in the allocated VA */
+
+    NVOS46_PARAMETERS d;
+    memset(&d, 0, sizeof d);
+    d.hClient = c->hClient;
+    d.hDevice = c->hDevice;
+    d.hDma = b->hVirt;
+    d.hMemory = b->hPhys;
+    d.offset = 0;
+    d.length = size;
+    d.flags = DRF_DEF(OS46, _FLAGS, _PAGE_KIND, _VIRTUAL) |
+              (vidmem ? DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _DISABLE)
+                      : DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _ENABLE));
+    d.dmaOffset = 0;
+    if (nvx_esc(c->ctl_fd, NV_ESC_RM_MAP_MEMORY_DMA, &d, sizeof d) != 0 || d.status != 0)
+        return -1;
+    return 0;
+}
+
+static void smoke_free_buf(nvx_ctx *c, struct nvx_buf *b)
+{
+    if (b->hVirt) nvx_rm_free(c->ctl_fd, c->hClient, c->hDevice, b->hVirt);
+    if (b->hPhys) nvx_rm_free(c->ctl_fd, c->hClient, c->hDevice, b->hPhys);
+    memset(b, 0, sizeof *b);
+}
+
+int nvx_stage5(nvx_ctx *c)
+{
+    if (!c->hSubdevice || c->dev_fd < 0) {
+        nvx_emit(c, "V5", "channel-smoke", 0, NVX_V_SKIP,
+                 "needs RM chain + device connection");
+        return -1;
+    }
+
+    /* pick the newest GPFIFO channel class from the classlist (0x??6f) */
+    static NV0080_CTRL_GPU_GET_CLASSLIST_V2_PARAMS cls;
+    memset(&cls, 0, sizeof cls);
+    NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hDevice,
+                              NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2, &cls, sizeof cls);
+    NvU32 chanClass = 0;
+    if (st == 0)
+        for (NvU32 i = 0; i < cls.numClasses && i < NV0080_CTRL_GPU_CLASSLIST_MAX_SIZE; i++)
+            if ((cls.classList[i] & 0xff) == 0x6f && cls.classList[i] > chanClass)
+                chanClass = cls.classList[i];
+    if (!chanClass) {
+        nvx_emit(c, "V5.0", "pick-channel-class", st, NVX_V_REJECTED,
+                 "no ??6f GPFIFO class in classlist");
+        return -1;
+    }
+    nvx_emit(c, "V5.0", "pick-channel-class", 0, NVX_V_OK,
+             "channel class 0x%x", chanClass);
+
+    /* usermode doorbell page (subdevice-parented, 4 KB) */
+    NvHandle hUm = nvx_rm_alloc(c->ctl_fd, c->hClient, c->hSubdevice,
+                                g_smoke_next++, NVX_CLASS_USERMODE_TURING_A,
+                                NULL, 0, &st);
+    if (!hUm) {
+        nvx_emit(c, "V5.1", "alloc-usermode", st, NVX_V_REJECTED,
+                 "TURING_USERMODE_A rejected");
+        return -1;
+    }
+    volatile uint8_t *umap = nvx_map_memory(c->ctl_fd, c->dev_fd, c->hClient,
+                                            c->hSubdevice, hUm, 0x1000, NULL);
+    if (!umap) {
+        nvx_emit(c, "V5.1", "alloc-usermode", 0, NVX_V_REJECTED,
+                 "TURING_USERMODE_A 0x%08x alloc ok, map failed", hUm);
+        return -1;
+    }
+    nvx_emit(c, "V5.1", "alloc-usermode", 0, NVX_V_OK,
+             "doorbell page mapped at %p", (const void *)umap);
+
+    /* address space */
+    NV_VASPACE_ALLOCATION_PARAMETERS vap;
+    memset(&vap, 0, sizeof vap);
+    vap.flags = NV_VASPACE_ALLOCATION_FLAGS_RETRY_PTE_ALLOC_IN_SYS;
+    NvHandle hVa = nvx_rm_alloc(c->ctl_fd, c->hClient, c->hDevice,
+                                g_smoke_next++, NVX_CLASS_VASPACE_FERMI_A,
+                                &vap, sizeof vap, &st);
+    if (!hVa) {
+        nvx_emit(c, "V5.2", "alloc-vaspace", st, NVX_V_REJECTED,
+                 "FERMI_VASPACE_A rejected");
+        return -1;
+    }
+    nvx_emit(c, "V5.2", "alloc-vaspace", 0, NVX_V_OK, "handle 0x%08x", hVa);
+
+    /* buffers (push.inc sizes) */
+    struct nvx_buf notifier, userd, gpfifo, cmdbuf, sem;
+    int fail = 0;
+    fail |= smoke_alloc_buf(c, hVa, 0, 0x1000,  "notifier", &notifier, &st) != 0;
+    fail |= smoke_alloc_buf(c, hVa, 1, 0x80000, "userd",    &userd,    &st) != 0;
+    fail |= smoke_alloc_buf(c, hVa, 0, 0x40000, "gpfifo",   &gpfifo,   &st) != 0;
+    fail |= smoke_alloc_buf(c, hVa, 0, 0x10000, "cmdbuf",   &cmdbuf,   &st) != 0;
+    fail |= smoke_alloc_buf(c, hVa, 0, 0x1000,  "sem",      &sem,      &st) != 0;
+    if (fail) {
+        nvx_emit(c, "V5.3", "alloc-buffers", st, NVX_V_REJECTED,
+                 "one or more buffers failed (see kext log)");
+        return -1;
+    }
+    nvx_emit(c, "V5.3", "alloc-buffers", 0, NVX_V_OK,
+             "notifier/userd(vidmem)/gpfifo/cmdbuf/sem mapped, sem VA 0x%llx",
+             (unsigned long long)sem.gpuva);
+    memset((void *)sem.cpu, 0, 0x1000);
+    memset((void *)notifier.cpu, 0, 0x1000);
+
+    /* notifier context DMA */
+    NV_CONTEXT_DMA_ALLOCATION_PARAMS cd;
+    memset(&cd, 0, sizeof cd);
+    cd.flags = DRF_DEF(OS03, _FLAGS, _MAPPING, _KERNEL) |
+               DRF_DEF(OS03, _FLAGS, _HASH_TABLE, _DISABLE);
+    cd.hMemory = notifier.hPhys;
+    cd.offset = 0;
+    cd.limit = notifier.size - 1;
+    NvHandle hCtxDma = nvx_rm_alloc(c->ctl_fd, c->hClient, c->hDevice,
+                                    g_smoke_next++, NVX_CLASS_CONTEXT_DMA,
+                                    &cd, sizeof cd, &st);
+    if (!hCtxDma) {
+        nvx_emit(c, "V5.4", "alloc-ctxdma", st, NVX_V_REJECTED,
+                 "NV01_CONTEXT_DMA rejected");
+        return -1;
+    }
+
+    /* channel */
+    NV_CHANNEL_ALLOC_PARAMS cp;
+    memset(&cp, 0, sizeof cp);
+    cp.hObjectError = hCtxDma;
+    cp.gpFifoOffset = gpfifo.gpuva;
+    cp.gpFifoEntries = 0x8000;
+    cp.flags = 0;
+    cp.hVASpace = hVa;
+    cp.hUserdMemory[0] = userd.hPhys;
+    cp.userdOffset[0] = 0;
+    cp.engineType = NVX_ENGINE_TYPE_GRAPHICS;
+    NvHandle hChan = nvx_rm_alloc(c->ctl_fd, c->hClient, c->hDevice,
+                                  g_smoke_next++, chanClass, &cp, sizeof cp, &st);
+    if (!hChan) {
+        nvx_emit(c, "V5.5", "alloc-channel", st, NVX_V_REJECTED,
+                 "channel class 0x%x rejected", chanClass);
+        return -1;
+    }
+    nvx_emit(c, "V5.5", "alloc-channel", 0, NVX_V_OK,
+             "channel 0x%08x (class 0x%x)", hChan, chanClass);
+
+    NVA06F_CTRL_BIND_PARAMS bp;
+    memset(&bp, 0, sizeof bp);
+    bp.engineType = NVX_ENGINE_TYPE_GRAPHICS;
+    st = nvx_rm_control(c->ctl_fd, c->hClient, hChan, NVA06F_CTRL_CMD_BIND,
+                        &bp, sizeof bp);
+    nvx_emit(c, "V5.6", "channel-bind", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED, "GRAPHICS engine");
+
+    NVA06F_CTRL_GPFIFO_SCHEDULE_PARAMS sp;
+    memset(&sp, 0, sizeof sp);
+    sp.bEnable = NV_TRUE;
+    st = nvx_rm_control(c->ctl_fd, c->hClient, hChan, NVA06F_CTRL_CMD_GPFIFO_SCHEDULE,
+                        &sp, sizeof sp);
+    nvx_emit(c, "V5.7", "gpfifo-schedule", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED, "-");
+    if (st != 0) return -1;
+
+    NVC36F_CTRL_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX_PARAMS ni;
+    memset(&ni, 0, sizeof ni);
+    ni.index = NV_CHANNELGPFIFO_NOTIFICATION_TYPE_WORK_SUBMIT_TOKEN;
+    (void)nvx_rm_control(c->ctl_fd, c->hClient, hChan,
+                         NVC36F_CTRL_CMD_GPFIFO_SET_WORK_SUBMIT_TOKEN_NOTIF_INDEX,
+                         &ni, sizeof ni);
+    NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN_PARAMS tk;
+    memset(&tk, 0, sizeof tk);
+    st = nvx_rm_control(c->ctl_fd, c->hClient, hChan,
+                        NVC36F_CTRL_CMD_GPFIFO_GET_WORK_SUBMIT_TOKEN, &tk, sizeof tk);
+    if (st != 0) {
+        nvx_emit(c, "V5.8", "work-submit-token", st, NVX_V_REJECTED, "-");
+        return -1;
+    }
+    nvx_emit(c, "V5.8", "work-submit-token", 0, NVX_V_OK,
+             "token 0x%08x", tk.workSubmitToken);
+
+    /* pushbuffer: SEMAPHORE method 0x5c releases value 1 at sem.gpuva */
+    volatile uint32_t *pb = (volatile uint32_t *)cmdbuf.cpu;
+    pb[0] = 0x20000000u | (5u << 16) | (0u << 13) | (0x5cu >> 2);
+    pb[1] = (uint32_t)sem.gpuva & ~3u;
+    pb[2] = (uint32_t)(sem.gpuva >> 32) & 0xffu;
+    pb[3] = 1u;
+    pb[4] = 0u;
+    pb[5] = 1u | (1u << 20) | (1u << 24);
+    const uint32_t ndw = 6;
+    volatile uint32_t *gp = (volatile uint32_t *)gpfifo.cpu;
+    gp[0] = (uint32_t)cmdbuf.gpuva & ~3u;
+    gp[1] = ((uint32_t)(cmdbuf.gpuva >> 32) & 0xffu) | (ndw << 10);
+    __sync_synchronize();
+    volatile uint32_t *ud = (volatile uint32_t *)userd.cpu;
+    ud[NVX_USERD_GPPUT / 4] = 1;
+    __sync_synchronize();
+    *(volatile uint32_t *)(umap + NVC361_NOTIFY_CHANNEL_PENDING) = tk.workSubmitToken;
+    printf("  doorbell rung — waiting for the GPU semaphore...\n");
+
+    volatile uint64_t *semv = (volatile uint64_t *)sem.cpu;
+    int ok = 0;
+    for (int i = 0; i < 5000; i++) {
+        if (*semv == 1) { ok = 1; break; }
+        usleep(1000);
+    }
+    nvx_emit(c, "V5.9", "gpu-semaphore", 0,
+             ok ? NVX_V_OK : NVX_V_REJECTED,
+             ok ? "GPU executed the pushbuffer under macOS (semaphore==1, <5s) "
+                  "— engine submission path fully alive"
+                : "timeout: USERD GPGet=%u GPPut=%u",
+             ok ? 0 : ud[NVX_USERD_GPGET / 4], ok ? 0 : ud[NVX_USERD_GPPUT / 4]);
+
+    /* teardown of channel objects (buffers/mappings die with the connection) */
+    nvx_rm_free(c->ctl_fd, c->hClient, c->hDevice, hChan);
+    nvx_rm_free(c->ctl_fd, c->hClient, c->hDevice, hCtxDma);
+    nvx_rm_free(c->ctl_fd, c->hClient, c->hDevice, hVa);
+    nvx_rm_free(c->ctl_fd, c->hClient, c->hSubdevice, hUm);
+    smoke_free_buf(c, &notifier);
+    smoke_free_buf(c, &userd);
+    smoke_free_buf(c, &gpfifo);
+    smoke_free_buf(c, &cmdbuf);
+    smoke_free_buf(c, &sem);
+    return ok ? 0 : -1;
 }

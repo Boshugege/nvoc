@@ -57,6 +57,7 @@ int nvx_stage1(nvx_ctx *c, NvU32 gpuId);       /* RM chain                 */
 int nvx_stage2(nvx_ctx *c);                    /* read-only battery        */
 int nvx_stage3(nvx_ctx *c);                    /* gated writes             */
 void nvx_stage4(nvx_ctx *c, int seconds);      /* sampling loop            */
+int nvx_stage5(nvx_ctx *c);                    /* channel smoke (GPU exec) */
 
 /* Restore path: clear a latched boost if stage3 armed one (atexit/SIGINT). */
 void nvx_restore_arm(nvx_ctx *c);
