@@ -65,7 +65,11 @@ pub(super) fn format_human(execution: &Execution) -> String {
                 false,
             ));
             if let Some(output) = &result.output {
-                lines.extend(render_command_output(execution.command, output));
+                if result.backend == "macos-rm" {
+                    lines.extend(format_macos_rm_output(output));
+                } else {
+                    lines.extend(render_command_output(execution.command, output));
+                }
                 // The wrapper layers soft-fail unsupported surfaces to
                 // {"supported": false} — surface the ORIGINAL NVAPI status
                 // recorded underneath (e.g. "-9 IncompatibleStructVersion"
@@ -89,6 +93,26 @@ pub(super) fn format_human(execution: &Execution) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Keep unavailable reasons as plain text; the generic renderer infers units
+/// from field names and would append kHz / percent to error descriptions.
+fn format_macos_rm_output(output: &Value) -> Vec<String> {
+    let mut data = output.clone();
+    let unavailable = data.as_object_mut().and_then(|map| map.remove("unavailable"));
+    if let Some(pstate) = data.get("pstate").and_then(Value::as_u64) {
+        data["pstate"] = json!(format!("P{pstate}"));
+    }
+    let mut lines = format_value_block(&data, 1);
+    if let Some(Value::Object(reasons)) = unavailable
+        && !reasons.is_empty()
+    {
+        lines.push("  Unavailable:".into());
+        for (field, reason) in reasons {
+            lines.push(format!("    {field}: {}", reason.as_str().unwrap_or("unavailable")));
+        }
+    }
+    lines
 }
 
 /// Per-command human renderer, dispatched through the CommandSpec table
@@ -3440,6 +3464,17 @@ mod tests {
     use super::*;
     use crate::{Command, TargetResult, all_commands};
     use serde_json::json;
+
+    #[test]
+    fn macos_status_formats_missing_values_without_units_on_error_text() {
+        let output = json!({"pstate": 1, "graphics_clock_khz": null,
+            "unavailable": {"graphics_clock_khz": "not yet validated"}});
+        let rendered = format_macos_rm_output(&output).join("\n");
+        assert!(rendered.contains("P1"));
+        assert!(rendered.contains("N/A"));
+        assert!(rendered.contains("graphics_clock_khz: not yet validated"));
+        assert!(!rendered.contains("validated kHz"));
+    }
 
     #[test]
     fn human_output_formats_objects_without_json_dump() {

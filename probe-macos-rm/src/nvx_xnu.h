@@ -32,6 +32,9 @@ int   nvx_esc(int fd, uint32_t cmd, void *data, uint32_t size);
  */
 void *nvx_map_memory(int ctl_fd, int dev_fd, NvHandle hClient, NvHandle hDevice,
                      NvHandle hMemory, NvU64 size, NvU64 *out_len);
+/* Read-only RM mapping; status is RM's result, or UINT32_MAX for transport/IOKit failure. */
+void *nvx_map_memory_readonly(int ctl_fd, int dev_fd, NvHandle hClient, NvHandle hDevice,
+                              NvHandle hMemory, NvU64 size, NvU64 *out_len, NvU32 *status);
 void  nvx_unmap_memory(void *addr, size_t len);
 
 #endif /* NVX_XNU_H */
