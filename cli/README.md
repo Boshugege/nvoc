@@ -4,8 +4,13 @@
 
 On x86_64 macOS with NullMoth, the native `macos-rm` backend is selected by
 default (or explicitly with `--macos-rm`). It currently supports `get-gpu-list`,
-`get-info` and `get-status` (P-state plus RUSD telemetry). Missing telemetry is `null` with
-reasons; settings writes are unavailable. See [build instructions and exact
+`get-info` and `get-status` (P-state plus RUSD telemetry), and
+`get-status --interval SECONDS [--count N]` for continuous monitoring. That mode
+reuses one read-only RM/RUSD session and streams one complete JSON object per
+line (JSONL) with `sequence`, `host_time`, `sample_duration_us`, per-field
+`updated` flags and `unavailable` reasons; Ctrl-C stops an unbounded run
+cleanly. Missing telemetry is `null` with reasons; settings writes are
+unavailable. See [build instructions and exact
 coverage](../docs/design/macos-rm-backend.md). The NVAPI/NVML matrices below do
 not describe macOS RM support.
 

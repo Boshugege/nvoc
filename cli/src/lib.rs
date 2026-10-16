@@ -674,8 +674,8 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
             (
                 Command::GetStatus,
                 CommandSpec {
-                    options: Box::leak(Box::new(["verbose"])),
-                    ..CommandSpec::new("get-status", Group::Info, "Read live GPU status (macOS RM: P-state and RUSD telemetry; unavailable fields include reasons)")
+                    options: Box::leak(Box::new(["verbose", "interval", "count"])),
+                    ..CommandSpec::new("get-status", Group::Info, "Read live GPU status (macOS RM: P-state and RUSD telemetry; unavailable fields include reasons; --interval streams JSONL samples)")
                 },
             ),
             (
@@ -1544,6 +1544,7 @@ fn render_list_invocation(invocation: &Invocation) -> CliResult<RunOutput> {
     Ok(RunOutput {
         rendered,
         exit_code: 0,
+        streamed: false,
     })
 }
 
@@ -1572,6 +1573,9 @@ pub struct Invocation {
 pub struct RunOutput {
     pub rendered: String,
     pub exit_code: i32,
+    /// The command already wrote its own output line by line (continuous
+    /// monitoring); the caller must not print `rendered` again.
+    pub streamed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1937,6 +1941,16 @@ fn command_specific_arg(name: &'static str) -> Arg {
             .long("verbose")
             .action(ArgAction::SetTrue)
             .help("Show verbose status (VFP table, raw power-monitor descriptors, D-Notifier D1-D5 cap table)"),
+        "interval" => Arg::new("interval")
+            .long("interval")
+            .value_name("SECONDS")
+            .action(ArgAction::Set)
+            .help("macOS RM continuous monitoring: sample every SECONDS (fractional allowed) and stream one JSON object per line; implies get-status writes a JSONL stream"),
+        "count" => Arg::new("count")
+            .long("count")
+            .value_name("N")
+            .action(ArgAction::Set)
+            .help("macOS RM continuous monitoring: stop after N samples (0 or omitted = run until Ctrl-C); requires --interval"),
         "bank" => Arg::new("bank")
             .long("bank")
             .value_name("BANK")
@@ -2296,6 +2310,14 @@ pub fn run_invocation(invocation: &Invocation) -> CliResult<RunOutput> {
         return render_list_invocation(invocation);
     }
 
+    // Continuous macOS RM monitoring streams its own output and never builds a
+    // single `Execution`; refused on other backends by `execute_continuous`.
+    if invocation.command == Some(Command::GetStatus)
+        && let Some(options) = macos_rm::continuous_options(invocation)?
+    {
+        return macos_rm::execute_continuous(invocation, options);
+    }
+
     let execution = execute(invocation)?;
     let rendered = match invocation.output {
         OutputFormat::Human => output::format_human(&execution),
@@ -2308,6 +2330,7 @@ pub fn run_invocation(invocation: &Invocation) -> CliResult<RunOutput> {
     Ok(RunOutput {
         rendered,
         exit_code: i32::from(execution.has_errors()),
+        streamed: false,
     })
 }
 

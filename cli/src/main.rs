@@ -37,7 +37,10 @@ fn cli_main() {
 
     match nvoc_cli::run_invocation(&invocation) {
         Ok(run) => {
-            println!("{}", run.rendered);
+            // Continuous monitoring already wrote each sample line by line.
+            if !run.streamed {
+                println!("{}", run.rendered);
+            }
             exit(run.exit_code);
         }
         Err(err) => {

@@ -4624,3 +4624,86 @@ mod tests {
         assert!(!text.contains("MSD"), "{text}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Continuous macOS RM monitoring output
+// ---------------------------------------------------------------------------
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+fn unix_ns(host_time: SystemTime) -> u64 {
+    host_time
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn rfc3339(host_time: SystemTime) -> String {
+    let odt = time::OffsetDateTime::from(host_time);
+    odt.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| odt.to_string())
+}
+
+/// One JSON line (JSONL) for a continuous macOS RM sample. The status block is
+/// flattened and annotated with the host-side sample metadata: sequence, host
+/// sampling time and sample duration. Raw units are unchanged (kHz, mW, C,
+/// rpm, percent).
+pub(super) fn macos_rm_sample_json(
+    sequence: u64,
+    host_time: SystemTime,
+    duration: Duration,
+    gpu_id: u32,
+    info: &nvoc_core::DeviceInfo,
+    sample: &nvoc_core::DeviceSample,
+) -> crate::CliResult<String> {
+    let mut value = serde_json::to_value(sample)?;
+    let object = value.as_object_mut().ok_or_else(|| {
+        crate::CliError::new("macOS RM sample did not serialize to a JSON object")
+    })?;
+    object.insert("schema".into(), json!("nvoc/macos-rm-sample/1"));
+    object.insert("sequence".into(), json!(sequence));
+    object.insert("host_time".into(), json!(rfc3339(host_time)));
+    object.insert("host_time_unix_ns".into(), json!(unix_ns(host_time)));
+    object.insert(
+        "sample_duration_us".into(),
+        json!(duration.as_micros() as u64),
+    );
+    object.insert("backend".into(), json!("macos-rm"));
+    object.insert("gpu_id".into(), json!(gpu_id));
+    object.insert("pci_address".into(), json!(info.pci_address));
+    serde_json::to_string(&value).map_err(crate::CliError::from)
+}
+
+/// Human block for one continuous sample: a header with the sample metadata,
+/// the same engineering-unit body as one-shot `get-status`, and the list of
+/// fields that did not refresh since the previous sample.
+pub(super) fn format_macos_rm_sample_human(
+    sequence: u64,
+    host_time: SystemTime,
+    duration: Duration,
+    gpu_id: u32,
+    info: &nvoc_core::DeviceInfo,
+    sample: &nvoc_core::DeviceSample,
+) -> Vec<String> {
+    let mut lines = vec![format!(
+        "[sample {sequence}] {} · GPU {gpu_id} {} · {:.3} ms",
+        rfc3339(host_time),
+        info.pci_address,
+        duration.as_secs_f64() * 1000.0
+    )];
+    let status = serde_json::to_value(&sample.status).unwrap_or(Value::Null);
+    lines.extend(format_macos_rm_output(&status));
+    let not_updated: Vec<&str> = sample
+        .updated
+        .iter()
+        .filter(|(_, updated)| !**updated)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !not_updated.is_empty() {
+        lines.push(format!(
+            "  Not refreshed since previous sample: {}",
+            not_updated.join(", ")
+        ));
+    }
+    lines
+}
