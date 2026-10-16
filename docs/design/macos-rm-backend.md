@@ -99,6 +99,57 @@ The existing NVAPI-shaped `QueryGpuInfo` / `QueryGpuStatus` output types are
 unchanged. RM callers use the explicitly typed operations above. Python, GUI,
 TUI, the optimizer and service are not yet integrated with this backend.
 
+## Continuous monitoring
+
+`get-status` can stream samples instead of a single reading:
+
+```sh
+nvoc-cli get-status --macos-rm --interval 1 --count 10 -O json  # 10 JSONL lines
+nvoc-cli get-status --macos-rm --interval 0.5                   # until Ctrl-C
+```
+
+- `--interval SECONDS` (fractional) switches `get-status` into continuous mode;
+  `--count N` stops after N samples (0 or omitted = run until Ctrl-C). Both
+  require the macOS RM backend and are refused for NVAPI/NVML.
+- JSON output becomes one complete object per line (JSONL): `sequence`,
+  `host_time` (RFC 3339) and `host_time_unix_ns`, `sample_duration_us`, the
+  telemetry fields in their raw units, `rusd_timestamps`, `updated` and
+  `unavailable`. Human output keeps the engineering-unit block per sample and
+  lists the fields that did not refresh.
+- Ctrl-C stops after the current sample, prints a summary line on stderr and
+  exits 0, unwinding the session (mapping, RM objects, file descriptors).
+- Raw logs stay outside the repository (`<workspace>/outputs/`).
+
+### Session semantics
+
+Continuous mode calls the `nvoc_macos_rm_session_*` ABI
+(`core/native/macos_rm.c`): the connection chain and the read-only RUSD mapping
+are created once and reused for every sample instead of being rebuilt per
+query. The one-shot snapshot ABI is unchanged and still opens/closes per call.
+
+Freshness rules:
+
+- A field is a reading only when its RUSD section was copied coherently (a
+  data-valid sequence whose stamp did not change during the copy). Otherwise it
+  is `null` with an "unstable sequence" reason.
+- `updated[field]` reports whether the section's stamp advanced since the
+  previous sample. A section that legitimately did not refresh keeps its last
+  coherent value with `updated: false`; it is never replaced by a zero.
+- A section that has not advanced for longer than `MONITOR_STALE_AFTER` (5 s)
+  becomes `null` with a "no RUSD update for N ms" reason until it advances
+  again. The window is host monotonic time between our own samples, not the
+  absolute RUSD stamp (see the reverse-engineering note: the driver stamp is in
+  the host real-time domain but lags wall clock by ~1.9 s and drifts).
+- P-State is re-read from RM on every sample because it is a live control, not
+  a RUSD section.
+- On a session-level failure the CLI drops the session and reopens it with a
+  bounded backoff (0/0.5/1/2 s), verifying that the reopened device identity
+  (PCI address, device id, RM GPU id) still matches the discovered target.
+
+P-State, clocks, temperature, power and utilization are not one atomic
+snapshot: sections update on the driver's own ~500 ms schedule and
+`rusd_timestamps` carries each field's own stamp.
+
 ## Validation
 
 ```sh
@@ -106,6 +157,10 @@ cargo test -p nvoc-core -p nvoc-cli --all-targets
 cargo clippy -p nvoc-core -p nvoc-cli --all-targets --no-deps -- -D warnings
 cargo test -p nvoc-core --test macos_rm_readonly -- --ignored --nocapture
 ```
+
+The read-only hardware tests are serialized (a process-wide mutex): the NVOC
+transport and the driver's RUSD poller are process-global, and two concurrent
+read-only clients can starve each other's 1.5 s freshness budget.
 
 The last command requires the initialized GPU and only performs GET queries
 and RM resource allocation/cleanup. It verifies identity, VRAM, refreshed

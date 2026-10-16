@@ -110,3 +110,25 @@ reported field. Observed ranges: 48.75–49.1875 C, 11.385–11.578 W, 1599–16
 graphics 1530 MHz, memory 6000.984 MHz, enforced limit 100 W and utilization 0%
 were steady during that short run. This validates repeated idle reads, not
 GPU-load response or calibration against an independent instrument.
+
+## RUSD stamp clock domain and poll cadence (measured 2026-10-17)
+
+A temporary read-only probe (kept in the workspace `outputs/`, not committed)
+mapped the shared page once and logged every section's `lastModifiedTimestamp`
+next to `clock_gettime(CLOCK_REALTIME)` and `CLOCK_MONOTONIC` for ~6 s.
+
+- The polled stamps are in the **host real-time domain** (nanoseconds since the
+  Unix epoch): e.g. `1792167475704201280` while `CLOCK_REALTIME` read
+  `1792167477545782000`. They are not monotonic-clock values (that read was
+  ~`7167127281000`).
+- All polled sections advanced **together on a ~500 ms cadence**; consecutive
+  temperature stamp deltas measured 500.0, 500.1, 501.1 ms. Within one cycle
+  the sections differ by a few milliseconds (clock ≈ 2.7 ms after temperature).
+- The stamp **lags wall clock by ~1.85–2.35 s, and that offset drifts** by a few
+  hundred milliseconds over seconds, so `now - stamp` is not an accurate age.
+
+Consequence for the monitor: freshness is judged from advancement between our
+own samples (plus a host-monotonic 5 s staleness window), not from the absolute
+stamp. This is what makes `updated` flags and the `no RUSD update` reason
+trustworthy even though the driver's clock is offset from ours.
+
