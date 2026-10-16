@@ -25,5 +25,21 @@ int main(void)
     field.lastModifiedTimestamp = RUSD_TIMESTAMP_WRITE_IN_PROGRESS;
     assert(!nvoc_rusd_read(&field.lastModifiedTimestamp, &field, &copy,
         sizeof copy, 99, &observed));
+
+    /* Coherent copy without an advancement requirement: re-reading unchanged
+     * data still succeeds, but invalid or odd sequences are rejected. */
+    field.temperature = -128;
+    field.lastModifiedTimestamp = 100;
+    assert(nvoc_rusd_copy(&field.lastModifiedTimestamp, &field, &copy,
+        sizeof copy, &observed));
+    assert(copy.temperature == -128 && observed == 100);
+    assert(nvoc_rusd_copy(&field.lastModifiedTimestamp, &field, &copy,
+        sizeof copy, &observed));
+    field.lastModifiedTimestamp = RUSD_TIMESTAMP_INVALID;
+    assert(!nvoc_rusd_copy(&field.lastModifiedTimestamp, &field, &copy,
+        sizeof copy, &observed));
+    field.lastModifiedTimestamp = RUSD_SEQ_START + 1; /* odd: mid-update */
+    assert(!nvoc_rusd_copy(&field.lastModifiedTimestamp, &field, &copy,
+        sizeof copy, &observed));
     puts("RUSD validity, freshness and stable-copy checks passed");
 }
