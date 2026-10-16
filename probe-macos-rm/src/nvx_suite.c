@@ -10,6 +10,7 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdatomic.h>
 
 #include "nvos.h"
 #include "nvstatus.h"
@@ -107,9 +108,11 @@ void nvx_emit(nvx_ctx *c, const char *id, const char *name,
 static int rusd_copy(const volatile NvU64 *ts, const void *field, void *dst, size_t sz)
 {
     NvU64 t0 = *ts;
+    atomic_thread_fence(memory_order_acquire);
     if (t0 == RUSD_TIMESTAMP_INVALID || t0 == RUSD_TIMESTAMP_WRITE_IN_PROGRESS)
         return -1;
     memcpy(dst, (const void *)field, sz);
+    atomic_thread_fence(memory_order_acquire);
     NvU64 t1 = *ts;
     return (t0 == t1 && RUSD_SEQ_DATA_VALID(t0)) ? 0 : -1;
 }
@@ -160,6 +163,13 @@ void nvx_sample_once(nvx_ctx *c, const char *tag)
         RUSD_POWER_LIMITS pl;
         RUSD_FAN_COOLER_STATUS fan;
         RUSD_PERF_DEVICE_UTILIZATION util;
+        RUSD_CLK_PUBLIC_DOMAIN_INFOS clocks;
+        if (rusd_copy(&sd->clkPublicDomainInfos.lastModifiedTimestamp,
+                      &sd->clkPublicDomainInfos, &clocks, sizeof clocks) == 0) {
+            gpc = clocks.info[RUSD_CLK_PUBLIC_DOMAIN_GRAPHICS].actualClkKHz;
+            dram = clocks.info[RUSD_CLK_PUBLIC_DOMAIN_MEMORY].actualClkKHz;
+            s2 = 0;
+        }
         if (rusd_copy(&sd->temperatures[RUSD_TEMPERATURE_TYPE_GPU].lastModifiedTimestamp,
                       &sd->temperatures[RUSD_TEMPERATURE_TYPE_GPU], &t, sizeof t) == 0)
             { tempC_x256 = (long)t.temperature; haveRusd = 1; } /* NvTemp = SFXP24.8 */
@@ -522,21 +532,13 @@ static void item_gpumon(nvx_ctx *c)
     static NV2080_CTRL_PERF_GET_GPUMON_PERFMON_UTIL_SAMPLES_V2_PARAMS p;
     memset(&p, 0, sizeof p);
     p.type = NV2080_CTRL_GPUMON_SAMPLE_TYPE_PERFMON_UTIL;
-    p.bufSize = (NvU32)sizeof(NV2080_CTRL_PERF_GPUMON_PERFMON_UTIL_SAMPLE);
+    p.bufSize = (NvU32)sizeof p.samples;
     p.count = NV2080_CTRL_PERF_GPUMON_SAMPLE_COUNT_PERFMON_UTIL;
     NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_GET_GPUMON_PERFMON_UTIL_SAMPLES_V2, &p);
-    NvU32 grRaw = 0;
-    if (st == 0 && p.tracker > 0 && p.tracker <= p.count) {
-        /* newest entry sits before the tracker in the ring; base(u64) is
-         * dwords 0..1, fb 2..3, gr 4..5 — dword 5 is the GR util value on
-         * the RUSD layout; print raw for on-device confirmation */
-        NvU32 *dw = (NvU32 *)&p.samples[(p.tracker - 1) % p.count];
-        grRaw = dw[5];
-    }
     nvx_emit(c, "V2.6", "gpumon-util-samples-v2", st,
              st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-             st == 0 ? "tracker %u  grRaw=0x%08x" : "-",
-             st == 0 ? p.tracker : 0, st == 0 ? grRaw : 0);
+             st == 0 ? "tracker %u count %u buffer %u bytes (ring interpretation pending; use RUSD for utilization)" : "-",
+             st == 0 ? p.tracker : 0, st == 0 ? p.count : 0, st == 0 ? p.bufSize : 0);
 }
 
 static void item_pmumon(nvx_ctx *c)
@@ -668,7 +670,8 @@ static void item_rusd(nvx_ctx *c)
     }
 
     NvU64 len = 0;
-    void *page = nvx_map_memory_readonly(c->ctl_fd, c->dev_fd, c->hClient, c->hSubdevice,
+    /* RUSD is SYSMEM: RM binds its mapping context to the control fd. */
+    void *page = nvx_map_memory_readonly(c->ctl_fd, c->ctl_fd, c->hClient, c->hSubdevice,
                                          hRusd, sizeof(NV00DE_SHARED_DATA), &len, &st);
     if (!page) {
         nvx_emit(c, "V2.12", "rusd-page", st, NVX_V_REJECTED,

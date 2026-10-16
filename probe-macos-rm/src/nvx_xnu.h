@@ -36,5 +36,7 @@ void *nvx_map_memory(int ctl_fd, int dev_fd, NvHandle hClient, NvHandle hDevice,
 void *nvx_map_memory_readonly(int ctl_fd, int dev_fd, NvHandle hClient, NvHandle hDevice,
                               NvHandle hMemory, NvU64 size, NvU64 *out_len, NvU32 *status);
 void  nvx_unmap_memory(void *addr, size_t len);
+/* Explicitly remove an IOKit mapping before freeing its RM backing object. */
+int nvx_unmap_memory_fd(int fd, void *addr);
 
 #endif /* NVX_XNU_H */

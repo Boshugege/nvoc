@@ -28,7 +28,7 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     if selected.is_empty() {
         return Err(CliError::new("no GPUs matched the selector"));
     }
-    let results = selected.into_iter().map(|target| {
+    let results: Vec<TargetResult> = selected.into_iter().map(|target| {
         let output = target.macos_rm().map_err(CliError::from).and_then(|device| {
             let mut value = match command {
                 Command::GetGpuList => json!({
@@ -45,7 +45,7 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
             if let Some(object) = value.as_object_mut() {
                 object.insert("capabilities".into(), json!({
                     "device_info": true, "pstate_query": true,
-                    "telemetry": false, "performance_writes": false,
+                    "telemetry": true, "performance_writes": false,
                 }));
             }
             Ok(value)
@@ -57,12 +57,20 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 ok: false, output: None, error: Some(error.to_string()) },
         }
     }).collect();
+    let partial = command == Command::GetStatus
+        && results.iter().any(|result: &TargetResult| {
+            result
+                .output
+                .as_ref()
+                .and_then(|v| v["unavailable"].as_object())
+                .is_some_and(|v| !v.is_empty())
+        });
     Ok(Execution {
         function: command.name(),
         command,
         backend: "macos-rm".into(),
-        warnings: if command == Command::GetStatus {
-            vec!["Partial macOS RM status: unvalidated telemetry is null; see unavailable for reasons.".into()]
+        warnings: if partial {
+            vec!["Partial macOS RM status: unavailable telemetry is null; see unavailable for reasons.".into()]
         } else {
             Vec::new()
         },

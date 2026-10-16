@@ -26,9 +26,31 @@ fn native_inventory_and_queries_do_not_initialize_nvapi() {
     for _ in 0..3 {
         let status = run(&target, QueryMacosRmStatus).unwrap().output;
         assert!(status.pstate.is_some());
-        assert_eq!(status.graphics_clock_khz, None);
-        assert_eq!(status.temperature_c, None);
-        assert_eq!(status.power_mw, None);
+        assert!(status.graphics_clock_khz.is_some());
+        assert!(status.temperature_c.is_some());
+        assert!(status.power_mw.is_some());
+        assert!(status.unavailable.is_empty());
     }
     assert!(!nvapi_init_attempted());
+}
+
+#[test]
+#[ignore = "requires a NullMoth GPU with RUSD telemetry"]
+fn rusd_refreshes_across_queries_without_leaking_fds() {
+    let inventory = discover_targets(BackendSet::MacosRm).unwrap();
+    let targets = inventory.targets();
+    let target = targets[0];
+    let count_fds = || std::fs::read_dir("/dev/fd").unwrap().count();
+    let before = count_fds();
+    let mut previous_timestamp = 0;
+    for _ in 0..8 {
+        let status = run(&target, QueryMacosRmStatus).unwrap().output;
+        assert!(status.unavailable.is_empty(), "{:?}", status.unavailable);
+        assert!((-50.0..=150.0).contains(&status.temperature_c.unwrap()));
+        assert!(status.utilization_percent.unwrap() <= 100);
+        let timestamp = status.rusd_timestamps["temperature_c"];
+        assert!(timestamp > previous_timestamp);
+        previous_timestamp = timestamp;
+    }
+    assert!(count_fds() <= before + 1);
 }

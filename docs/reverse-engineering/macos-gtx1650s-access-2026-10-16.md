@@ -21,7 +21,7 @@ The native Rust backend exposes device discovery, information and refreshed
 P-state through core and nvoc-cli. It does not initialize NVAPI/NVML or spawn
 the probe executable. See [backend architecture and usage](../design/macos-rm-backend.md).
 
-## Unresolved or unavailable surfaces
+## Initial unresolved or unavailable surfaces
 
 | Surface | Result | Interpretation |
 | --- | --- | --- |
@@ -68,3 +68,45 @@ The transport currently discovers the first matching service only. Python,
 GUI/TUI, optimizer and service integration, complete telemetry and performance
 control remain future work. No private-memory smoke, channel workload,
 performance SET, driver/EFI change or reboot was performed for Rust integration.
+
+## Same-day update: RUSD telemetry now works
+
+The initial RUSD and GPUMON failures above were caller errors. RM's Unix
+mapping path identifies RUSD as system memory and associates the mapping
+context with the **control device**. The probe had supplied a device fd.
+Using the control fd for both the RM mapping context and IOConnectMapMemory64,
+while retaining the exact allocation size and read-only permissions, succeeds.
+No driver or EFI changes were needed.
+
+GPUMON requires bufSize equal to the entire samples array, not one sample.
+Correcting that changes its result to NV_OK. Its returned tracker is not yet
+interpreted, so no utilization is inferred from that ring. The validated Rust
+path gets utilization from RUSD instead. PMUMON and EDPp failures remain;
+RUSD provides clocks and the enforced power limit through a different path.
+
+The Rust backend now reads temperature, graphics/memory clocks, instantaneous
+GPU power, enforced GPU power limit, maximum reported cooler RPM and GPU
+utilization, together with per-field RUSD timestamps. Polled fields must advance
+within the current session; unstable, unavailable or non-advancing data stays
+null. Valid zero fan/utilization values stay zero. Mapping is explicitly removed
+before object cleanup. Device discovery/info does not allocate a shared page.
+
+Observed desktop-idle examples: temperature 48.5625 C, graphics 1530000 kHz,
+memory 6000984 kHz, GPU power 11368 mW, enforced limit 100000 mW, fan 1603 RPM,
+utilization 0 percent. These are RM-reported values, not an independently
+calibrated power measurement or validation under GPU load. No performance
+settings, polling interval, driver, EFI or reboot was changed for this work.
+
+Follow-up validation: 150 core/CLI regular tests and two explicitly enabled
+read-only hardware tests passed. The latter check repeated timestamp advancement
+and no fd accumulation. CPU C checks cover invalid/in-progress/unchanged
+timestamps, even sequences and stable copying; Rust checks cover fixed-point
+conversion, valid zero readings, missing data and invalid-value rejection.
+Rustfmt, core/CLI Clippy, strict C syntax checking, probe lint/build and its six
+CPU-only regressions passed. The locked CLI build passed.
+
+Six consecutive desktop-idle CLI queries returned fresh timestamps for every
+reported field. Observed ranges: 48.75–49.1875 C, 11.385–11.578 W, 1599–1605 RPM;
+graphics 1530 MHz, memory 6000.984 MHz, enforced limit 100 W and utilization 0%
+were steady during that short run. This validates repeated idle reads, not
+GPU-load response or calibration against an independent instrument.

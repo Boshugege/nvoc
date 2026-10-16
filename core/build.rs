@@ -25,6 +25,10 @@ fn main() {
     for file in &files {
         println!("cargo:rerun-if-changed={}", file.display());
     }
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("native/rusd_read.h").display()
+    );
     for header in ["nvx_xnu.h", "nvx_rm.h", "nvx_defs.h"] {
         println!("cargo:rerun-if-changed={}", probe.join(header).display());
     }

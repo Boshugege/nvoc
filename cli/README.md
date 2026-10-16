@@ -4,7 +4,7 @@
 
 On x86_64 macOS with NullMoth, the native `macos-rm` backend is selected by
 default (or explicitly with `--macos-rm`). It currently supports `get-gpu-list`,
-`get-info` and partial `get-status` (P-state). Missing telemetry is `null` with
+`get-info` and `get-status` (P-state plus RUSD telemetry). Missing telemetry is `null` with
 reasons; settings writes are unavailable. See [build instructions and exact
 coverage](../docs/design/macos-rm-backend.md). The NVAPI/NVML matrices below do
 not describe macOS RM support.

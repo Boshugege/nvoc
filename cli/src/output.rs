@@ -102,6 +102,27 @@ fn format_macos_rm_output(output: &Value) -> Vec<String> {
     let unavailable = data
         .as_object_mut()
         .and_then(|map| map.remove("unavailable"));
+    if let Some(map) = data.as_object_mut() {
+        map.remove("rusd_timestamps"); // raw diagnostics remain in JSON output
+        for (source, label, scale, unit) in [
+            ("graphics_clock_khz", "graphics_clock", 1000.0, "MHz"),
+            ("memory_clock_khz", "memory_clock", 1000.0, "MHz"),
+            ("temperature_c", "temperature", 1.0, "C"),
+            ("power_mw", "power", 1000.0, "W"),
+            ("power_limit_mw", "power_limit", 1000.0, "W"),
+            ("fan_rpm", "fan_speed", 1.0, "rpm"),
+            ("utilization_percent", "gpu_utilization", 1.0, "%"),
+        ] {
+            if let Some(value) = map.remove(source) {
+                map.insert(
+                    label.into(),
+                    value
+                        .as_f64()
+                        .map_or(Value::Null, |v| json!(format!("{:.3} {unit}", v / scale))),
+                );
+            }
+        }
+    }
     if let Some(pstate) = data.get("pstate").and_then(Value::as_u64) {
         data["pstate"] = json!(format!("P{pstate}"));
     }
@@ -3479,6 +3500,22 @@ mod tests {
         assert!(rendered.contains("N/A"));
         assert!(rendered.contains("graphics_clock_khz: not yet validated"));
         assert!(!rendered.contains("validated kHz"));
+    }
+
+    #[test]
+    fn macos_status_renders_engineering_units_without_changing_json() {
+        let output = json!({"graphics_clock_khz": 1530000, "memory_clock_khz": 6000984,
+            "power_mw": 11368, "power_limit_mw": 100000, "fan_rpm": 0,
+            "temperature_c": 48.5625, "utilization_percent": 0,
+            "rusd_timestamps": {"power_mw": 123}, "unavailable": {}});
+        let rendered = format_macos_rm_output(&output).join("\n");
+        assert!(rendered.contains("1530.000 MHz"));
+        assert!(rendered.contains("6000.984 MHz"));
+        assert!(rendered.contains("11.368 W"));
+        assert!(rendered.contains("100.000 W"));
+        assert!(rendered.contains("0.000 rpm"));
+        assert!(!rendered.contains("123"));
+        assert_eq!(output["power_mw"], 11368);
     }
 
     #[test]

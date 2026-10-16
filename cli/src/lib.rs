@@ -675,7 +675,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 Command::GetStatus,
                 CommandSpec {
                     options: Box::leak(Box::new(["verbose"])),
-                    ..CommandSpec::new("get-status", Group::Info, "Read live GPU status (macOS RM currently reports P-state; other telemetry is unavailable)")
+                    ..CommandSpec::new("get-status", Group::Info, "Read live GPU status (macOS RM: P-state and RUSD telemetry; unavailable fields include reasons)")
                 },
             ),
             (

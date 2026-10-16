@@ -154,6 +154,14 @@ void nvx_unmap_memory(void *addr, size_t len)
     (void)addr;
 }
 
+int nvx_unmap_memory_fd(int fd, void *addr)
+{
+    io_connect_t conn = conn_of(fd);
+    if (!conn) return EBADF;
+    return IOConnectUnmapMemory64(conn, 0, mach_task_self(),
+                                  (mach_vm_address_t)(uintptr_t)addr) == KERN_SUCCESS ? 0 : EIO;
+}
+
 #else /* !__APPLE__ || NVX_LINT — off-target stubs, compile-check only */
 
 int nvx_open(int ctl)            { (void)ctl; return -1; }
@@ -171,6 +179,7 @@ void *nvx_map_memory(int ctl_fd, int dev_fd, NvHandle hClient, NvHandle hDevice,
     return NULL;
 }
 void nvx_unmap_memory(void *addr, size_t len) { (void)addr; (void)len; }
+int nvx_unmap_memory_fd(int fd, void *addr) { (void)fd; (void)addr; return EINVAL; }
 
 void *nvx_map_memory_readonly(int ctl_fd, int dev_fd, NvHandle hClient, NvHandle hDevice,
                               NvHandle hMemory, NvU64 size, NvU64 *out_len, NvU32 *status)
