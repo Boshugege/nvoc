@@ -99,7 +99,9 @@ pub(super) fn format_human(execution: &Execution) -> String {
 /// from field names and would append kHz / percent to error descriptions.
 fn format_macos_rm_output(output: &Value) -> Vec<String> {
     let mut data = output.clone();
-    let unavailable = data.as_object_mut().and_then(|map| map.remove("unavailable"));
+    let unavailable = data
+        .as_object_mut()
+        .and_then(|map| map.remove("unavailable"));
     if let Some(pstate) = data.get("pstate").and_then(Value::as_u64) {
         data["pstate"] = json!(format!("P{pstate}"));
     }
@@ -109,7 +111,10 @@ fn format_macos_rm_output(output: &Value) -> Vec<String> {
     {
         lines.push("  Unavailable:".into());
         for (field, reason) in reasons {
-            lines.push(format!("    {field}: {}", reason.as_str().unwrap_or("unavailable")));
+            lines.push(format!(
+                "    {field}: {}",
+                reason.as_str().unwrap_or("unavailable")
+            ));
         }
     }
     lines
