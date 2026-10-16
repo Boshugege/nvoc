@@ -148,7 +148,9 @@ class IdleCli(unittest.TestCase):
     def test_failed_transport_stops_before_chain_and_sampling(self):
         for stage in ("0", "1", "2", "4"):
             with self.subTest(stage=stage):
-                result = self.run_cli("--stages", stage, "--sample", "1", no_driver=True)
+                result = self.run_cli(
+                    "--stages", stage, "--sample", "1", no_driver=True
+                )
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertNotIn("FAKE chain", result.stdout)
                 self.assertNotIn("FAKE sample", result.stdout)
