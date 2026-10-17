@@ -72,6 +72,8 @@ int nvx_stage2_rated_tdp_read(nvx_ctx *c);
 int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action);
 /* Explicit, read-only Thermal System V2 GET batch (public opcode interface). */
 int nvx_stage2_thermal_read(nvx_ctx *c);
+/* Explicit, read-only internal PM/PFM GET probes (PM1, V/P-state, boost). */
+int nvx_stage2_pm_read(nvx_ctx *c);
 int nvx_stage3(nvx_ctx *c);                    /* gated writes             */
 void nvx_stage4(nvx_ctx *c, int seconds);      /* sampling loop            */
 int nvx_stage5(nvx_ctx *c);                    /* channel smoke (GPU exec) */

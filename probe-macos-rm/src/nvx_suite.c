@@ -859,6 +859,79 @@ int nvx_stage2_thermal_read(nvx_ctx *c)
     return 0;
 }
 
+/* Internal PM/PFM read probe (--pm-read).
+ *
+ * ctrl2080internal.h also defines a GSP-internal PFM request-handler family
+ * (INTERNAL_INTERFACE_ID). Only its GET faces run here — the SET/UPDATE twins
+ * (SET_PM1_STATE, SET_VPSTATE, UPDATE_TGPU_LIMIT, CONFIGURE_TGP_MODE,
+ * CONFIGURE_TURBO_V2, UNSET_DYNAMIC_BOOST_LIMIT) are performance writes and
+ * are not sent. The point is to learn whether this family is reachable at all:
+ * a single NOT_SUPPORTED on one command (the earlier EDPp GET) is not proof
+ * that every command in the block is absent. */
+static void item_pm_reads(nvx_ctx *c)
+{
+    /* PM1 state: flag 0 = "PM1 forced off", 1 = "PM1 available". */
+    for (NvU8 flag = 0; flag <= 1; ++flag) {
+        NV2080_CTRL_CMD_INTERNAL_PERF_PFM_REQ_HNDLR_GET_PM1_STATE_PARAMS p;
+        memset(&p, 0, sizeof p);
+        p.flag = flag;
+        NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_INTERNAL_PERF_PFM_REQ_HNDLR_GET_PM1_STATE, &p);
+        nvx_emit(c, "V2.pm", "internal-pm1-state", st,
+                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "flag %u (%s) -> bStatus %u",
+                 flag, flag ? "PM1 available" : "PM1 forced off", p.bStatus);
+    }
+
+    /* V/P-state capability + mapping. */
+    NV2080_CTRL_CMD_INTERNAL_PERF_PFM_REQ_HNDLR_GET_VPSTATE_INFO_PARAMS vi;
+    memset(&vi, 0, sizeof vi);
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_INTERNAL_PERF_PFM_REQ_HNDLR_GET_VPSTATE_INFO, &vi);
+    nvx_emit(c, "V2.pm", "internal-vpstate-info", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             "PS2.0 supported %u, highest vPstate idx %u",
+             vi.bVpsPs20Supported, vi.vPstateIdxHighest);
+
+    if (st == 0) {
+        const NvU32 top = vi.vPstateIdxHighest > 15 ? 15 : vi.vPstateIdxHighest;
+        for (NvU32 ps = 0; ps <= top; ++ps) {
+            NV2080_CTRL_CMD_INTERNAL_PERF_PFM_REQ_HNDLR_GET_VPSTATE_MAPPING_PARAMS m;
+            memset(&m, 0, sizeof m);
+            m.pStateIdx = ps;
+            NvU32 st2 = SUBCTL(c, NV2080_CTRL_CMD_INTERNAL_PERF_PFM_REQ_HNDLR_GET_VPSTATE_MAPPING, &m);
+            nvx_emit(c, "V2.pm", "internal-vpstate-mapping", st2,
+                     st2 == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                     "pState %u -> vPstate %u", ps, m.vPstateIdxMapping);
+        }
+    }
+
+    /* Boost-sync info and auxiliary power state. */
+    NV2080_CTRL_INTERNAL_PERF_GPU_BOOST_SYNC_GET_INFO_PARAMS bi;
+    memset(&bi, 0, sizeof bi);
+    NvU32 st3 = SUBCTL(c, NV2080_CTRL_CMD_INTERNAL_PERF_GPU_BOOST_SYNC_GET_INFO, &bi);
+    nvx_emit(c, "V2.pm", "internal-boost-sync-info", st3,
+             st3 == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             "hysteresis %llu us, hysteresis enable %u, SLI sync %u",
+             (unsigned long long)bi.hysteresisus,
+             bi.bHystersisEnable, bi.bSliGpuBoostSyncEnable);
+
+    NV2080_CTRL_INTERNAL_PERF_GET_AUX_POWER_STATE_PARAMS ap;
+    memset(&ap, 0, sizeof ap);
+    NvU32 st4 = SUBCTL(c, NV2080_CTRL_CMD_INTERNAL_PERF_GET_AUX_POWER_STATE, &ap);
+    nvx_emit(c, "V2.pm", "internal-aux-power-state", st4,
+             st4 == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             "aux powerState %u", ap.powerState);
+}
+
+int nvx_stage2_pm_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.pm", "pm-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_pm_reads(c);
+    return 0;
+}
+
 static void item_bios_sku(nvx_ctx *c)
 {
     NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS p;
