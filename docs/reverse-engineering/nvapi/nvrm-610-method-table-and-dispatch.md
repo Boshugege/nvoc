@@ -191,6 +191,15 @@ Measured on the same host (all GET, read-only, `nvx_known_set_ids` filtered):
 | 0x2080B213 | **1036** | none | none | `NV_OK` | 12 B head (`0xFF`) + 32×32 B zero records |
 | 0x20809019 / 0x2080901b / 0x20809006 / 0x20809062 / 0x20809023 / 0x20809025 / 0x20809026 / 0x2080B202 | documented sizes | documented stamps | documented seeds | `0x1f` | — |
 
+> **Superseded for the clock ids (2026-10-17, later, read-only).** Those `0x1f`
+> results used the *documented NVAPI* sizes. This host's private controls are
+> served by the **GSP**, which validates the parameter block against an exact
+> `paramSize` of its own; retried at the GSP's size, `0x20809019@12336`,
+> `0x2080901b@2108` and `0x20809025@7188` all answer `NV_OK`. `0x2080901b`'s
+> input mask sits at **`+4`** (not the NVAPI caller's `+8`), and
+> `0x20809025@7188` decodes to a per-domain offset **range** of ±18750 kHz.
+> See `gsp-method-table-and-legacy-forwarding.md` §4, §5.1, §5.2.
+
 The `0x20809061` acceptance is *size-dependent* (776 only, out of a 44-step
 ladder from 4 B to 4.3 MB), and the 776 table is **live**: tracked at 1 Hz
 across an original-NVOC Vulkan load, its `0x1` record matched the RUSD

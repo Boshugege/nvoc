@@ -107,6 +107,10 @@ Not present in the GSP table at all: `0x20809006` (CLK_MEASURE_FREQ) and
 Note the two families do **not** share a record size: 0x20809019 uses 384 B
 records, 0x2080901b 64 B, 0x20809025 224 B.
 
+The GET->SET pairs in this table are separated by `+1` in the low byte with the
+category byte moving `0x90`->`0xd0` (`0xb2`->`0xf2` for the VOLT block), and
+each pair carries an **identical `paramSize`**; the full list is in §5.2.
+
 ## 4. `0x2080901b` GET: the input mask is at **+4**, and V1 returns types only
 
 `nvapi-rs` (`clock.rs` `NV_GPU_CLOCK_CLIENT_CLK_DOMAINS_CONTROL_V1`) records the
@@ -152,6 +156,103 @@ All GET, all at the GSP's own size, all with a zeroed input block:
 only container so far that carries an explicit offset **range**. None of them
 has yet been shown to hand back a *current offset* value, and none has been
 written to.
+
+### 5.1 `0x20809025 @7188` decoded: the per-domain offset **range**
+
+Geometry comes from the two independent sources agreeing: the GSP table says
+`7188` and the payload is exactly `20 + 32 x 224`, with the mask at `+4`. The
+zeroed read returns mask `0x7` and **three** populated records (controller bits
+0/1/2). Field values below are read verbatim out of
+`stage-gsp-clkctl-20261017T092536Z/clkctl-hex.txt`:
+
+| record field | live value | reading |
+| --- | --- | --- |
+| head `+0` | `0xff` | u8 info/count byte the driver writes over the zero seed |
+| head `+4` | `0x7` | supported-domain mask — bits 0,1,2 |
+| head `+12` / `+16` | `100` / `0x100` | un-attributed header words |
+| rec `+0` (u32) | `0x01030101` `0x01040101` `0x01050101` | `{u8 1, u8 type=3/4/5, u8 1, u8 1}` |
+| rec `+8` (u32) | `1638400` | **max VF frequency, kHz** (= 1638.4 MHz) |
+| rec `+20` (i32) | `-18750` | **offset floor, kHz** |
+| rec `+24` (i32) | `+18750` | **offset ceiling, kHz** |
+| rec `+28` (u32) | `0x00ff0100` | flags |
+
+The record types 3/4/5 are the NAFLL-style domain ids, so the three offsets
+that this TU116 lets you address are *not* the {0x08,0x09} record types of
+§4 — they are a different (smaller) set, which is why §4's container cannot be
+the range source.
+
+**Cross-check.** `nvapi-rs`'s `clk_freq_ctrl_info_entry` describes the same
+controller tree as reached from Windows (magic `0x10C4C`, `3148 = 76 + 32x76`,
+records `0x60` B) and records, for a TU116 with mask `0x7`, exactly
+*"records carry {1638400 max_kHz, -18750/+18750 offset pair}"*. The three
+values match this box to the digit, and their relative gaps agree in both
+variants (`+8/+20/+24` here vs `+0x2C/+0x38/+0x3C` there is a constant `0x24`
+shift). So the GSP serves a *wider* record of the **same** controller tree: the
+macOS block is not a different control, it is a newer/other revision of the
+same struct.
+
+What this buys the goal: a **believe-your-eyes per-domain offset range**
+(+/-18.75 MHz on three domains) at the exact size the GSP accepts. What it does
+*not* give: the currently applied offset, the write granularity, or any proof
+that `0x2080d01c` accepts the same record. **No SET was sent.**
+
+### 5.3 `0x20809019 @12336` decoded: the domain catalogue
+
+Geometry `48 + 32 x 384`, header `+0` low byte `0xff`, `+4 = 0x3ff` (ten
+domains supported), `+8 = 0x335`. Nine records are populated and they carry
+more than a type byte:
+
+| record | type bytes `rec+0` | `rec+4` domain mask | `rec+28` version-ish pair | other live fields |
+| --- | --- | --- | --- | --- |
+| 0 | `08 08 01 00` | `0x1` | `0x0b0b` | `+40=0x7530`, `+44`, `+48=0x01000103`, `+52=0xffff`, `+76=0x22a` |
+| 1 | `09 09 01 00` | `0x2` | `0x1717` | `+12=0xffffffff`, `+16=0xff00`, `+48=0x01010204` |
+| 2 | `08 08 01 00` | `0x10` | `0x0a06` | `+12=4`, `+16=0x100`, `+44`, `+76=0x100` |
+| 3 | `09 09 01 00` | `0x4` | `0x1919` | `+12=0xffffffff`, `+16=0xff00` |
+| 4 | `09 09 01 00` | `0x8` | `0x110c` | `+12=0xffffffff`, `+72=0x700` |
+| 5 | `09 09 01 00` | `0x100000` | `0x1818` | `+12=0xffffffff` |
+| 6 | `03 03 01 00` | `0x80000` | — | `+16=0x21cff00` |
+| 7 | `08 08 01 00` | `0x40` | `0x0500` | `+76=0x10` |
+| 8 | `09 09 01 00` | `0x200000` | `0x1612` | `+72=0x200` |
+
+The `rec+4` values are single bits of a 22-bit domain mask (bits 0,1,4,2,3,20,
+19,6,21,5), which is the cleanest available mapping from "controller bit N" to
+"domain type" on this part. Whether the `rec+40/+44` kHz-scale words are limits
+or current values is **not** established here and must not be assumed.
+
+### 5.2 GET -> SET pairing inside the legacy CLK block (a table fact)
+
+The GSP export table lists both directions. Across the block the pairs are
+separated by **`+1` in the low byte**, with the category byte moving
+`0x90` (GET) -> `0xd0` (SET); every pair is then corroborated by an
+**identical `paramSize`**, and since the GSP validates the size exactly (§3)
+that equality is strong corroboration rather than a naming guess:
+
+| GET | size | SET | size |
+| --- | --- | --- | --- |
+| `0x2080901b` | 2108 | `0x2080d01c` | 2108 |
+| `0x2080901f` | 19416 | `0x2080d020` | 19416 |
+| `0x20809023` | 66060 | `0x2080d024` | 66060 |
+| `0x20809027` | 6288 | `0x2080d028` | 6288 |
+| `0x2080902c` | 4116 | `0x2080d02d` | 4116 |
+| `0x20809030` | 1544 | `0x2080d031` | 1544 |
+| `0x20809046` | 8264 | `0x2080d047` | 8264 |
+| `0x208090a2` | 524 | `0x2080d0a3` | 524 |
+| `0x208090b2` | 812 | `0x2080d0b3` | 812 |
+| `0x2080b207` | 392 | `0x2080f208` | 392 |
+| `0x2080b211` | 520 | `0x2080f212` | 520 |
+| `0x2080b213` | 1036 | `0x2080f214` | 1036 |
+| `0x2080b218` | 9220 | `0x2080f219` | 9220 |
+
+Two things follow that change the plan:
+
+* `0x20809019` (12336, domains info), `0x20809025` (7188, freq-controller info)
+  and `0x20809026` (5332, freq-controller status) have **no SET twin in this
+  table at all** — they are read-only views of the domain set. So the
+  ClkFreqController `+/-18.75 MHz` value in §5.1 is a *limit* source only.
+* the only write face in the block that pairs with a clock-domain control GET
+  is **`0x2080d01c @2108`**, the SET twin of the §4 GET. That is therefore the
+  single candidate for a domain-offset *write* on this box, and it stays
+  unsent until §4's GET returns a current value and its range (`WRITE-VERIFICATION-PLAN.md`).
 
 ## 6. Safety: a bad private GET can wedge the GSP for the session
 
@@ -228,10 +329,35 @@ python3 tools/extract-gsp-method-table.py \
 
 ## 9. What is still missing
 
-* a container that returns a **current** per-domain offset (not just a range);
+* a container that returns the **current** per-domain offset. Candidates, in
+  the order they should be tried once the GSP is alive again:
+  1. `0x20809026 @5332` (freq-controller **status**, the natural status half of
+     §5.1's info container) — with a **zeroed** block only. Every previous
+     attempt used a `0xA5A5A5A5` background and is therefore void (see §6);
+     `5332 = 84 + 32x164` is the only header/stride split that puts the records
+     on 4-byte boundaries.
+  2. `0x2080901b @2108` re-read with the §4 `+4` mask and a **zeroed**
+     background, to check whether the `08`/`09` records are really
+     "types only" or whether a single-sourced mask leaves fields the `0xA5`
+     sweep could not distinguish from a driver-zeroed word.
+  3. `0x2080901a @2052` (`4 + 32x64`) — same record shape as §4 with a 4-byte
+     head; never read with a zeroed block.
+* the **write** half: `0x2080d01c @2108` (§5.2). Not sent, and not sendable
+  until the GET half yields current/limit/state. The step granularity is still
+  unknown (the `+/-18750 kHz` pair is the *range*, not a step), so the
+  "minimum step" for a first write is not yet defined.
 * the V2 form of the clock-domain control — `nvapi-rs` says the value dwords
   live there, and the GSP table does not offer a second size for
   `0x2080901b`, so V2 is either versioned inside the same 2108 B block or not
   available on this TU116 GSP;
 * confirmation of §4's `+4` mask field with a zeroed background (blocked: the
   GSP is wedged — see §6).
+
+**State recheck 2026-10-17T09:40Z**: `--clkctl-hex` (the two safe blocks only)
+still returns `0x62 NV_ERR_RESET_REQUIRED` for both, so the wedge of §6 has
+held for the whole session. Recovery needs a reboot (or a kext reload, which
+needs root and is outside the standing permission boundary); nothing was
+reloaded, no driver/EFI state was touched. All of `--clkctl-read`,
+`--clkctl-hex`, `--clkctl-offsweep`, `--clkdom-read`, `--clkvf-read`,
+`--reg-read` on this box are **read-only** and refuse the SET ids before
+sending.
