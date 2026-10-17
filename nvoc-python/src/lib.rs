@@ -6064,17 +6064,10 @@ mod tests {
                 !text.contains("NVAPI/NVML are not available"),
                 "{entry} must not blame the platform"
             );
-            // Each reason must name the layer rather than pass a verdict, and
-            // the three must not collapse into one sentence: the earlier
-            // get-settings run showed what a single shared sentence costs (an
-            // unread family reported as a missing one).
+            // Each reason must name the layer rather than pass a verdict.
             assert!(
                 reason.contains(layer),
                 "{entry}'s reason must name the layer: {reason}"
-            );
-            assert!(
-                reason != cases[0].1,
-                "{entry} must not reuse the first family's sentence"
             );
             if cfg!(target_os = "macos") {
                 assert!(refuse_without_source(entry, reason).is_err());
@@ -6082,6 +6075,19 @@ mod tests {
                 assert!(refuse_without_source(entry, reason).is_ok());
             }
         }
+        // ... and no two families may share one sentence: the earlier
+        // get-settings run showed what that costs (an unread family reported as
+        // a missing one). These are top-level constants, so this is an identity
+        // check on the strings the entries quote.
+        let mut reasons: Vec<&str> = cases.iter().map(|(_, reason, _)| *reason).collect();
+        let before = reasons.len();
+        reasons.sort_unstable();
+        reasons.dedup();
+        assert_eq!(
+            before,
+            reasons.len(),
+            "the three families must not share a sentence"
+        );
     }
 
     /// The fan and power-limit entries must reach a backend that exists on the
