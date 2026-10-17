@@ -84,6 +84,14 @@ int nvx_stage2_perf_read(nvx_ctx *c);
  * NV_ERR_INVALID_ARGUMENT for the sizes it does not want) and never sends a
  * documented SET id. */
 int nvx_stage2_clk_read(nvx_ctx *c);
+/* Explicit, read-only documented-MARSHALLING pass over the same private
+ * ClockClient / VfPoints / ClkFreqController / VoltRails read faces:
+ * one case per documented (paramSize, dword[0] stamp, input seed) triple
+ * from nvapi-rs + the R610 RE docs, instead of the size sweep. The sweep
+ * sent zeroed buffers, which cannot satisfy a stamp/mask-validating
+ * handler; this pass is what actually tests the documented form. Never
+ * sends a documented SET id. */
+int nvx_stage2_clk_doc(nvx_ctx *c);
 int nvx_stage3(nvx_ctx *c);                    /* gated writes             */
 void nvx_stage4(nvx_ctx *c, int seconds);      /* sampling loop            */
 int nvx_stage5(nvx_ctx *c);                    /* channel smoke (GPU exec) */

@@ -1251,6 +1251,465 @@ int nvx_stage2_clk_read(nvx_ctx *c)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Documented-marshalling pass (--clkdoc-read)                          */
+/* ------------------------------------------------------------------ */
+/* The census above answered "which paramSizes does this driver accept" with
+ * the driver's own INVALID_ARGUMENT oracle -- but it sent ZEROED buffers, and
+ * every private clock/V-F read has TWO documented header requirements the
+ * zeroed scan cannot satisfy:
+ *
+ *   1. a STAMP (dword[0]) the handler compares against a literal -- e.g.
+ *      ClockClient domains control V1 = 0x10964, VFP GET_INFO = 0x78604
+ *      (that one is a size, not version|size), VFP GET_CONTROL = 0x474604;
+ *   2. an input SEED the caller must pre-fill -- the clock-domains control
+ *      takes the requested domain mask at +8, the VFP GET_STATUS takes the
+ *      point mask at +4..+132 copied out of GET_INFO, the rails control takes
+ *      a rail-mask filter.
+ *
+ * So each case below sends exactly ONE (size, stamp, seed) triple taken from
+ * the binding it cites, and the verdict is about that documented form rather
+ * than about a scan. The table is checked against the documented SET ids
+ * before anything is sent, and every case is a GET.
+ */
+
+typedef struct {
+    const char *name;
+    NvU32  cmd;
+    unsigned size;      /* paramSize to send (the documented struct size) */
+    NvU32  w0;          /* dword[0] stamp; 0 = leave as sent (zeroed) */
+    unsigned seed_off;  /* byte offset of the u32 seed, ~0u = none */
+    NvU32  seed_val;    /* seed value written at seed_off */
+    unsigned dump;      /* dwords of payload to dump on accept (0 = default) */
+    /* `src` records where the triple came from; printed so a rejection is
+     * traceable to a specific binding, not to "we tried stuff". */
+    const char *src;
+} clkdoc_case;
+
+static unsigned doc_census(const unsigned char *buf, unsigned sz,
+                           unsigned *first, unsigned *last)
+{
+    unsigned nz = 0;
+    *first = ~0u;
+    *last = 0;
+    for (unsigned off = 0; off + 4 <= sz; off += 4) {
+        NvU32 v;
+        memcpy(&v, buf + off, 4);
+        if (!v) continue;
+        if (*first == ~0u) *first = off;
+        *last = off;
+        ++nz;
+    }
+    return nz;
+}
+
+static void doc_dump(nvx_ctx *c, const char *name, const unsigned char *buf,
+                     unsigned sz, unsigned max_words)
+{
+    unsigned words = sz / 4;
+    if (words > max_words) words = max_words;
+    for (unsigned base = 0; base < words; base += 16) {
+        unsigned n = words - base < 16 ? words - base : 16;
+        char hex[16 * 9 + 1];
+        char *hp = hex;
+        for (unsigned w = 0; w < n; ++w) {
+            NvU32 v;
+            memcpy(&v, buf + 4 * (base + w), 4);
+            hp += snprintf(hp, 10, "%s%08x", w ? " " : "", v);
+        }
+        nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+                 "payload dwords [%u..%u) :%s", base, base + n, hex);
+    }
+}
+
+/* ClockClient clock-domains control (V1 magic 0x10964, 2404 B): mask@+8,
+ * 32 x 72 B bit-sparse domain records @+100. Record: type u8@+0,
+ * offset_kHz i32@+44, range_min@+48, range_max@+52, applied@+56. */
+static void doc_decode_clk_ctrl(nvx_ctx *c, const char *name,
+                                const unsigned char *buf, unsigned sz)
+{
+    if (sz < 108) return;
+    NvU32 mask;
+    memcpy(&mask, buf + 8, 4);
+    unsigned filled = 0;
+    char line[200];
+    int off = 0;
+    off += snprintf(line + off, sizeof line - (size_t)off,
+                    "clock-domains control: seed/echo mask@+8=0x%08x;", mask);
+    for (unsigned bit = 0; bit < 32 && off + 8 < (int)sizeof line; ++bit) {
+        unsigned ro = 100 + 72 * bit;
+        if (ro + 60 > sz) break;
+        if (!buf[ro]) continue;
+        ++filled;
+    }
+    if (!filled) {
+        nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+                 "clock-domains control: mask@+8=0x%08x, but 0 of 32 per-domain "
+                 "records carry a non-zero type byte => no domain description "
+                 "returned for this seed", mask);
+        return;
+    }
+    nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+             "clock-domains control: mask@+8=0x%08x, %u of 32 per-domain "
+             "records non-zero (see following lines)", mask, filled);
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        unsigned ro = 100 + 72 * bit;
+        if (ro + 60 > sz) break;
+        if (!buf[ro]) continue;
+        NvU32 off_k = 0, rmin = 0, rmax = 0, appl = 0;
+        memcpy(&off_k, buf + ro + 44, 4);
+        memcpy(&rmin, buf + ro + 48, 4);
+        memcpy(&rmax, buf + ro + 52, 4);
+        memcpy(&appl, buf + ro + 56, 4);
+        nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+                 "  bit %2u (0x%08x) type=0x%02x offset=%d kHz range[%d..%d] "
+                 "applied=%d", bit, 1u << bit, buf[ro], (int)off_k,
+                 (int)rmin, (int)rmax, (int)appl);
+    }
+}
+
+/* The 8 B head + 24 B record table RM 0x20809061 ACKs at paramSize 776.
+ * Each record carries a domain bit and a kHz-scale value. */
+static void doc_decode_domain_table(nvx_ctx *c, const char *name,
+                                    const unsigned char *buf, unsigned sz)
+{
+    if (sz < 32) return;
+    NvU32 w0, w1;
+    memcpy(&w0, buf, 4);
+    memcpy(&w1, buf + 4, 4);
+    nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+             "domain table: head [0]=0x%08x [1]=0x%08x; records @+8 stride 24",
+             w0, w1);
+    unsigned n = (sz - 8) / 24;
+    for (unsigned i = 0; i < n; ++i) {
+        const unsigned char *r = buf + 8 + 24 * i;
+        NvU32 tag, bit, val, t1, t2, t3;
+        memcpy(&tag, r + 0, 4);
+        memcpy(&bit, r + 4, 4);
+        memcpy(&val, r + 8, 4);
+        memcpy(&t1, r + 12, 4);
+        memcpy(&t2, r + 16, 4);
+        memcpy(&t3, r + 20, 4);
+        if (!tag && !bit && !val) continue;
+        nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+                 "  rec[%2u] tag=0x%08x bit=0x%08x value=%u kHz (%.3f MHz) "
+                 "t1=%d t2=0x%08x t3=0x%08x",
+                 i, tag, bit, val, (double)val / 1000.0, (int)t1, t2, t3);
+    }
+}
+
+/* ClkFreqController directory (0x20809025, mask@+4, records @+0x4C stride
+ * 0x60: supported@+0, type@+4, steps@+8, max_kHz@+0x2C, offsets@+0x38/0x3C)
+ * and its mask-seeded status sibling (0x20809026). */
+static void doc_decode_freq_ctrl(nvx_ctx *c, const char *name,
+                                 const unsigned char *buf, unsigned sz)
+{
+    NvU32 mask;
+    memcpy(&mask, buf + 4, 4);
+    unsigned filled = 0;
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        unsigned ro = 0x4C + 0x60 * bit;
+        if (ro + 0x40 > sz) break;
+        NvU32 sup;
+        memcpy(&sup, buf + ro, 4);
+        if (sup) ++filled;
+    }
+    nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+             "clk-freq-controller: mask@+4=0x%08x, %u of 32 records have a "
+             "non-zero supported flag", mask, filled);
+    for (unsigned bit = 0; bit < 32; ++bit) {
+        unsigned ro = 0x4C + 0x60 * bit;
+        if (ro + 0x40 > sz) break;
+        NvU32 sup, steps, maxkhz, mn, mx;
+        memcpy(&sup, buf + ro, 4);
+        if (!sup) continue;
+        memcpy(&steps, buf + ro + 8, 4);
+        memcpy(&maxkhz, buf + ro + 0x2C, 4);
+        memcpy(&mn, buf + ro + 0x38, 4);
+        memcpy(&mx, buf + ro + 0x3C, 4);
+        nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+                 "  bit %2u type=%u steps=%u max=%u kHz (%.3f MHz) "
+                 "offset range [%d..%d] kHz",
+                 bit, buf[ro + 4], steps, maxkhz, (double)maxkhz / 1000.0,
+                 (int)mn, (int)mx);
+    }
+}
+
+/* VoltVoltRails GetControl (RM 0x2080B213): 32 B records, type byte @+0 and a
+ * six-dword payload @+4 (voltrails-family-full-layout-r610.md). The measured
+ * accept is 1036 B = 12 B head + 32 x 32 B. */
+static void doc_decode_rails_ctrl(nvx_ctx *c, const char *name,
+                                  const unsigned char *buf, unsigned sz)
+{
+    NvU32 h0 = 0, h1 = 0, h2 = 0;
+    memcpy(&h0, buf, 4);
+    memcpy(&h1, buf + 4, 4);
+    memcpy(&h2, buf + 8, 4);
+    nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+             "rails get-control: %u B = 12 B head + 32 x 32 B records; "
+             "head dwords 0x%08x 0x%08x 0x%08x", sz, h0, h1, h2);
+    for (unsigned i = 0; i < 32; ++i) {
+        unsigned ro = 12 + 32 * i;
+        NvU32 pay[6];
+        if (ro + 32 > sz) break;
+        if (!buf[ro]) continue;
+        for (unsigned k = 0; k < 6; ++k) memcpy(&pay[k], buf + ro + 4 + 4 * k, 4);
+        nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
+                 "  rec[%2u] type=0x%02x payload %08x %08x %08x %08x %08x %08x",
+                 i, buf[ro], pay[0], pay[1], pay[2], pay[3], pay[4], pay[5]);
+    }
+}
+
+static void item_clk_doc(nvx_ctx *c)
+{
+    static const clkdoc_case cases[] = {
+        /* ---- ClockClient clock domains: GET_INFO then GET_CONTROL ---- */
+        { "domains-get-info v1 2520", NVX_RM_CMD_CLK_DOMAINS_GET_INFO, 2520,
+          NVX_STAMP_CLK_DOMAINS_INFO_V1, ~0u, 0, 32, "clock.rs:1930" },
+        { "domains-get-info 610a", NVX_RM_CMD_CLK_DOMAINS_GET_INFO, 296620,
+          NVX_STAMP_CLK_DOMAINS_INFO_610A, ~0u, 0, 0, "clock.rs:1933" },
+        { "domains-get-info 610b", NVX_RM_CMD_CLK_DOMAINS_GET_INFO, 329388,
+          NVX_STAMP_CLK_DOMAINS_INFO_610B, ~0u, 0, 0, "clock.rs:1933" },
+        { "domains-get-control v1 noseed", NVX_RM_CMD_CLK_DOMAINS_GET_CONTROL,
+          2404, NVX_STAMP_CLK_DOMAINS_CONTROL_V1, ~0u, 0, 64,
+          "clock.rs:1432 (mask@+8)" },
+        { "domains-get-control v1 mask=ff",
+          NVX_RM_CMD_CLK_DOMAINS_GET_CONTROL, 2404,
+          NVX_STAMP_CLK_DOMAINS_CONTROL_V1, 8, 0xFFu, 64, "clock.rs:1432" },
+        { "domains-get-control v1 mask=all",
+          NVX_RM_CMD_CLK_DOMAINS_GET_CONTROL, 2404,
+          NVX_STAMP_CLK_DOMAINS_CONTROL_V1, 8, 0xFFFFFFFFu, 64, "clock.rs:1432" },
+        { "domains-get-control v2 mask=ff",
+          NVX_RM_CMD_CLK_DOMAINS_GET_CONTROL, 24996,
+          NVX_STAMP_CLK_DOMAINS_CONTROL_V2, 8, 0xFFu, 32, "clock.rs:1456" },
+        /* ---- Direct per-domain frequency measurement ---- */
+        { "measure-freq v1 dom0", NVX_RM_CMD_CLK_MEASURE_FREQ, 32,
+          NVX_STAMP_CLK_MEASURE_V1, 4, 0, 8, "clock.rs:1535 (GPC)" },
+        { "measure-freq v1 dom1", NVX_RM_CMD_CLK_MEASURE_FREQ, 32,
+          NVX_STAMP_CLK_MEASURE_V1, 4, 1, 8, "clock.rs:1535 (XBAR)" },
+        { "measure-freq v1 dom2", NVX_RM_CMD_CLK_MEASURE_FREQ, 32,
+          NVX_STAMP_CLK_MEASURE_V1, 4, 2, 8, "clock.rs:1535 (SYS)" },
+        { "measure-freq v1 dom4", NVX_RM_CMD_CLK_MEASURE_FREQ, 32,
+          NVX_STAMP_CLK_MEASURE_V1, 4, 4, 8, "clock.rs:1535 (MCLK)" },
+        { "measure-freq v2 dom0", NVX_RM_CMD_CLK_MEASURE_FREQ, 32,
+          NVX_STAMP_CLK_MEASURE_V2, 4, 0, 8, "clock.rs:1552" },
+        /* ---- V/F points: GET_INFO (directory) then GET_STATUS (curves) ---- */
+        { "vfp-get-info 493060", NVX_RM_CMD_VFP_GET_INFO_582, 493060,
+          NVX_STAMP_VFP_INFO, ~0u, 0, 24, "clock.rs:2480 (0x78604)" },
+        { "vfp-get-info legacy 83996", NVX_RM_CMD_VFP_GET_INFO_582, 83996,
+          NVX_STAMP_VFP_INFO_LEGACY, ~0u, 0, 24, "clock.rs:2505" },
+        { "vfp-get-info wide 369796", NVX_RM_CMD_VFP_GET_INFO_582, 369796,
+          NVX_STAMP_VFP_INFO_WIDE, ~0u, 0, 24, "clock.rs:2510" },
+        { "vfp-get-info mid 157692", NVX_RM_CMD_VFP_GET_INFO_582, 157692,
+          157692u, ~0u, 0, 24, "clock.rs:2516" },
+        { "vfp-get-info mid 249844", NVX_RM_CMD_VFP_GET_INFO_582, 249844,
+          249844u, ~0u, 0, 24, "clock.rs:2516" },
+        { "vfp-get-info 776 (observed ACK)", NVX_RM_CMD_VFP_GET_INFO_582, 776,
+          0, ~0u, 0, 64, "census stage-clkvf-read (accepted size)" },
+        /* GET_STATUS needs its +4..+132 header seeded from GET_INFO; the
+         * unseeded form is sent first so the two are distinguishable. */
+        { "vfp-get-status 2000388 noseed", NVX_RM_CMD_VFP_GET_STATUS_582,
+          2000388, NVX_STAMP_VFP_STATUS, ~0u, 0, 24, "clock.rs:2836" },
+        /* ---- V/F control readback (applied offsets) ---- */
+        { "vfp-get-control 0x474604", NVX_RM_CMD_VFP_GET_CONTROL, 4343300,
+          NVX_STAMP_VFP_CONTROL, ~0u, 0, 24, "clock.rs:3471" },
+        { "vfp-get-control snapshot", NVX_RM_CMD_VFP_GET_CONTROL, 82976,
+          NVX_STAMP_VFP_CONTROL_SNAPSHOT, ~0u, 0, 24, "clock.rs:3478" },
+        { "vfp-get-control 401472", NVX_RM_CMD_VFP_GET_CONTROL, 401472,
+          401472u, ~0u, 0, 24, "clock.rs:3471" },
+        { "vfp-get-control 737404", NVX_RM_CMD_VFP_GET_CONTROL, 737404,
+          737404u, ~0u, 0, 24, "clock.rs:3471" },
+        { "vfp-get-control 1348740", NVX_RM_CMD_VFP_GET_CONTROL, 1348740,
+          1348740u, ~0u, 0, 24, "clock.rs:3471" },
+        /* ---- TU116 ClkFreqController (this bench's GPU part) ---- */
+        { "freq-ctrl-info 3148", NVX_RM_CMD_CLK_FREQ_CTRL_INFO, 3148,
+          NVX_STAMP_CLK_FREQ_CTRL_INFO, ~0u, 0, 64, "clock.rs:5421" },
+        { "freq-ctrl-status mask=7", NVX_RM_CMD_CLK_FREQ_CTRL_STATUS, 2508,
+          NVX_STAMP_CLK_FREQ_CTRL_STATUS, 4, 0x7u, 32, "clock.rs:5466" },
+        { "freq-ctrl-status mask=all", NVX_RM_CMD_CLK_FREQ_CTRL_STATUS, 2508,
+          NVX_STAMP_CLK_FREQ_CTRL_STATUS, 4, 0xFFFFFFFFu, 32, "clock.rs:5466" },
+        /* ---- Voltage rails (same op family as the two ACKs above) ---- */
+        { "rails-get-control w0=0", NVX_RM_CMD_RAILS_GET_CONTROL, 1036,
+          0, ~0u, 0, 64, "voltrails r610 (accepted size)" },
+        { "rails-get-control byte15=0xff", NVX_RM_CMD_RAILS_GET_CONTROL, 1036,
+          0, 12, 0xFF000000u, 64, "voltrails r610 (buf[15]=rail filter)" },
+        { "rails-get-control byte15=0x01", NVX_RM_CMD_RAILS_GET_CONTROL, 1036,
+          0, 12, 0x01000000u, 64, "voltrails r610 (buf[15]=rail filter)" },
+        { "rails-get-info 2444", NVX_RM_CMD_RAILS_GET_INFO, 2444,
+          0, ~0u, 0, 64, "voltrails r610 (12 + 32 x 76)" },
+        { "rails-get-status 3212", NVX_RM_CMD_RAILS_GET_STATUS, 3212,
+          0, ~0u, 0, 64, "voltrails r610 (12 + 32 x 100)" },
+        { "rails-get-info esc 500008", NVX_RM_CMD_RAILS_GET_INFO, 500008,
+          0, ~0u, 0, 16, "voltrails r610 (Windows esc buffer size)" },
+    };
+    const unsigned ncase = sizeof cases / sizeof cases[0];
+    unsigned buflen = 0;
+    for (unsigned i = 0; i < ncase; ++i)
+        if (cases[i].size > buflen) buflen = cases[i].size;
+    unsigned char *buf = malloc(buflen);
+    if (!buf) {
+        nvx_emit(c, "V2.clkdoc", "clkdoc-read", 0, NVX_V_HARD,
+                 "doc buffer alloc (%u B) failed", buflen);
+        return;
+    }
+
+    for (unsigned i = 0; i < ncase; ++i) {
+        const clkdoc_case *k = &cases[i];
+        if (nvx_id_is_known_set(k->cmd)) {
+            nvx_emit(c, "V2.clkdoc", k->name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a documented SET id; the read pass "
+                     "never sends it", k->cmd);
+            continue;
+        }
+        memset(buf, 0, k->size);
+        if (k->w0) memcpy(buf, &k->w0, 4);
+        if (k->seed_off != ~0u && k->seed_off + 4 <= k->size)
+            memcpy(buf + k->seed_off, &k->seed_val, 4);
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  k->cmd, buf, k->size);
+        unsigned first = 0, last = 0;
+        unsigned nz = doc_census(buf, k->size, &first, &last);
+        nvx_emit(c, "V2.clkdoc", k->name, st, st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "cmd 0x%08x size %u stamp 0x%08x seed[%s]=0x%08x -> 0x%08x "
+                 "(%s); %u non-zero words%s  [%s]",
+                 k->cmd, k->size, k->w0,
+                 k->seed_off == ~0u ? "-" : "off",
+                 k->seed_val, st, nvx_status_name(st), nz,
+                 nz ? "" : "", k->src);
+        if (st != 0) continue;
+
+        if (nz) {
+            char fl[64];
+            snprintf(fl, sizeof fl, ", first @%u, last @%u", first, last);
+            nvx_emit(c, "V2.clkdoc", k->name, 0, NVX_V_SKIP,
+                     "accepted: %u non-zero words of %u%s", nz, k->size / 4, fl);
+        } else {
+            nvx_emit(c, "V2.clkdoc", k->name, 0, NVX_V_SKIP,
+                     "accepted but the whole %u B payload is zero (command "
+                     "accepts this form and returns no data)", k->size);
+        }
+
+        unsigned dump = k->dump ? k->dump : 64;
+        if (dump) doc_dump(c, k->name, buf, k->size, dump);
+
+        if (k->cmd == NVX_RM_CMD_CLK_DOMAINS_GET_CONTROL && k->size == 2404)
+            doc_decode_clk_ctrl(c, k->name, buf, k->size);
+        if (k->cmd == NVX_RM_CMD_VFP_GET_INFO_582 && k->size == 776)
+            doc_decode_domain_table(c, k->name, buf, k->size);
+        if (k->cmd == NVX_RM_CMD_CLK_FREQ_CTRL_INFO)
+            doc_decode_freq_ctrl(c, k->name, buf, k->size);
+        if (k->cmd == NVX_RM_CMD_RAILS_GET_CONTROL)
+            doc_decode_rails_ctrl(c, k->name, buf, k->size);
+    }
+
+    /* Measurement is a two-sample affair by construction: the counter is a
+     * read-modify-write cycle counter and the payload carries a timestamp.
+     * Report the delta so a wrong decode is visible instead of implied. */
+    for (unsigned di = 0; di < 3; ++di) {
+        static const unsigned idx[3] = { 0, 2, 4 };
+        NvU32 p0[8], p1[8];
+        memset(p0, 0, sizeof p0);
+        memset(p1, 0, sizeof p1);
+        p0[0] = p1[0] = NVX_STAMP_CLK_MEASURE_V1;
+        p0[1] = p1[1] = idx[di];
+        NvU32 s0 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  NVX_RM_CMD_CLK_MEASURE_FREQ, p0, sizeof p0);
+        usleep(120000);
+        NvU32 s1 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  NVX_RM_CMD_CLK_MEASURE_FREQ, p1, sizeof p1);
+        if (s0 || s1) continue;
+        NvU64 t0 = (NvU64)p0[4] | ((NvU64)p0[5] << 32);
+        NvU64 t1 = (NvU64)p1[4] | ((NvU64)p1[5] << 32);
+        NvU32 c0 = p0[2], c1 = p1[2];
+        nvx_emit(c, "V2.clkdoc", "measure-freq delta", 0, NVX_V_SKIP,
+                 "domain idx %u: counter %u -> %u (d %d), ts %llu -> %llu ns "
+                 "(dt %lld); implied %s", idx[di], c0, c1, (int)(c1 - c0),
+                 (unsigned long long)t0, (unsigned long long)t1,
+                 (long long)(t1 - t0),
+                 t1 > t0 ? "freq = dcount/dt * 1e9 Hz (see below)" : "N/A");
+    }
+
+    /* Seed sweep on the three surfaces that ACK: is the ACK a fixed head, or
+     * does an input mask make the handler fill its record array? Each variant
+     * writes EXACTLY ONE dword of input and everything else stays zero, so a
+     * change in the non-zero word count is attributable to that dword. */
+    {
+        static const struct {
+            const char *name; NvU32 cmd; unsigned size; unsigned off; NvU32 val;
+            const char *why;
+        } seeds[] = {
+            { "B201 2444 mask@0=all", NVX_RM_CMD_RAILS_GET_INFO, 2444, 0,
+              0xFFFFFFFFu, "is the rail mask an input filter?" },
+            { "B201 2444 byte15=ff", NVX_RM_CMD_RAILS_GET_INFO, 2444, 12,
+              0xFF000000u, "Windows esc buf[15]=rail filter, same offset?" },
+            { "B213 1036 mask@0=ff", NVX_RM_CMD_RAILS_GET_CONTROL, 1036, 0,
+              0xFFu, "seed the output mask slot" },
+            { "B213 1036 byte15=ff", NVX_RM_CMD_RAILS_GET_CONTROL, 1036, 12,
+              0xFF000000u, "esc buf[15]=rail filter on the RM param too?" },
+            { "B213 1036 rec0.type=2", NVX_RM_CMD_RAILS_GET_CONTROL, 1036, 12,
+              0x00000002u, "dense entry type seed (doc: type@+72)" },
+            { "776 mask@0=all", NVX_RM_CMD_VFP_GET_INFO_582, 776, 0,
+              0xFFFFFFFFu, "is the 776 table mask-seeded (head[0])?" },
+            { "776 mask@4=all", NVX_RM_CMD_VFP_GET_INFO_582, 776, 4,
+              0xFFFFFFFFu, "is the 776 table mask-seeded (head[1])?" },
+        };
+        for (unsigned i = 0; i < sizeof seeds / sizeof seeds[0]; ++i) {
+            const unsigned sz = seeds[i].size;
+            memset(buf, 0, sz);
+            memcpy(buf + seeds[i].off, &seeds[i].val, 4);
+            NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                      seeds[i].cmd, buf, sz);
+            unsigned first = 0, last = 0;
+            unsigned nz = doc_census(buf, sz, &first, &last);
+            nvx_emit(c, "V2.clkdoc", seeds[i].name, st,
+                     st == 0 ? NVX_V_SKIP : NVX_V_REJECTED,
+                     "cmd 0x%08x size %u [+%u]=0x%08x -> 0x%08x (%s); %u "
+                     "non-zero words incl. that seed (first @%u last @%u) [%s]",
+                     seeds[i].cmd, sz, seeds[i].off, seeds[i].val, st,
+                     nvx_status_name(st), nz, first, last, seeds[i].why);
+            if (st == 0)
+                doc_dump(c, seeds[i].name, buf, sz, 24);
+        }
+    }
+
+    /* The 776 B table is the one confirmed ACK. Read it twice a second apart:
+     * if the values move on an idle desktop they are live clocks; if they hold
+     * they are a per-domain capability/max table. Either answer is a reading
+     * class we can name, which is what this pass is for. */
+    {
+        unsigned char a[776], b[776];
+        memset(a, 0, sizeof a);
+        memset(b, 0, sizeof b);
+        NvU32 s0 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  NVX_RM_CMD_VFP_GET_INFO_582, a, sizeof a);
+        sleep(1);
+        NvU32 s1 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  NVX_RM_CMD_VFP_GET_INFO_582, b, sizeof b);
+        if (s0 == 0 && s1 == 0) {
+            unsigned moved = 0;
+            for (unsigned off = 0; off + 4 <= sizeof a; off += 4)
+                if (memcmp(a + off, b + off, 4)) ++moved;
+            nvx_emit(c, "V2.clkdoc", "776 stability", 0, NVX_V_SKIP,
+                     "two reads 1 s apart: %u of %u dwords changed under an "
+                     "idle desktop", moved, (unsigned)(sizeof a / 4));
+            doc_decode_domain_table(c, "776 table (re-read)", b, sizeof b);
+        }
+    }
+
+    free(buf);
+}
+
+int nvx_stage2_clk_doc(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.clkdoc", "clkdoc-read", 0, NVX_V_SKIP,
+                 "RM chain not open");
+        return -1;
+    }
+    item_clk_doc(c);
+    return 0;
+}
+
 static void item_bios_sku(nvx_ctx *c)
 {
     NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS p;

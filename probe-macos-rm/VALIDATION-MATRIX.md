@@ -113,3 +113,4 @@ NullMoth 自家 push_test（`kexts/NVRM/push.inc`）的移植。不含任何调�
 - M3 前置探路 = V2.5 + V3.3 + 后续探针 4
 - 引擎提交路径 = V1.9 + 阶段 5（macOS 压测/推流的前提，对应报告 §8 stressor 落点）
 - 报告 §3.4 特权面问题 = V1.1–V1.8 + V3.1 直接回答
+| V2.clkdoc | 私有 clock/VF 读面的**文档封送 pass**（`--clkdoc-read`）：对同一批面只发**一个**文档三元组 (paramSize, dword[0] 戳, 输入 seed)，逐条标注出处 | 同上 + `nvapi-rs/src/gpu.rs`（`voltrails`/`clkdomains` 中层） | 与 `V2.clkvf` 的尺寸扫描互补：扫描发零填充缓冲，**满足不了**校验 stamp/mask 的 handler（此前 60 档 `0x1f` 满堂正是这一形态），本 pass 才真正检验文档形式。每条 case：来源 / paramSize / stamp / seed / 预期输出 → 实发一次，接受则 dump + 定点解码（域 mask/offset/range、测频两采样 Δcounter/Δt、VFP 目录、ClkFreqController、rails payload）。**只读**：同样过 `nvx_known_set_ids` 黑名单。 |

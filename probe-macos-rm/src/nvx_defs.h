@@ -164,4 +164,46 @@
  * records, type byte @record+0). SET twin is 0x2080F214. */
 #define NVX_RM_CMD_RAILS_GET_CONTROL 0x2080B213u
 
+/* ------------------------------------------------------------------ */
+/* Documented STAMP + SEED values for the same read faces              */
+/* ------------------------------------------------------------------ */
+/* The census above answered "which paramSizes does this driver accept" with
+ * the driver's own INVALID_ARGUMENT oracle. It deliberately sent ZEROED
+ * buffers, which cannot satisfy a handler that validates dword[0] (the
+ * stamp) and/or an input mask seed -- so "0x1f at every size" says the
+ * documented header was missing, not that the command is absent.
+ *
+ * These are the literal stamp values the Windows handlers compare dword[0]
+ * against, per nvapi-rs/sys/src/gpu/clock.rs + power.rs and the R610 RE docs.
+ * NOTE the V/F-points family stamp is NOT (version << 16 | size).
+ */
+#define NVX_STAMP_CLK_DOMAINS_INFO_V1      0x0109D8u /* |2520  clock.rs:1930 */
+#define NVX_STAMP_CLK_DOMAINS_INFO_610A    0x0486ACu /* |296620 clock.rs:1933 */
+#define NVX_STAMP_CLK_DOMAINS_INFO_610B    0x0506ACu /* |329388 clock.rs:1933 */
+#define NVX_STAMP_CLK_DOMAINS_CONTROL_V1   0x010964u /* |2404, mask@+8 */
+#define NVX_STAMP_CLK_DOMAINS_CONTROL_V2   0x0261A4u /* |24996 */
+#define NVX_STAMP_CLK_MEASURE_V1           0x010020u /* 32B, domain@+4 */
+#define NVX_STAMP_CLK_MEASURE_V2           0x020020u /* 32B, u64 counter */
+#define NVX_STAMP_VFP_INFO                 0x078604u /* 493060B, NOT ver|size */
+#define NVX_STAMP_VFP_INFO_LEGACY          83996u    /* 0x1481C */
+#define NVX_STAMP_VFP_INFO_WIDE            0x05A484u /* 369796B */
+#define NVX_STAMP_VFP_STATUS               2000388u  /* 0x1E8604 */
+#define NVX_STAMP_VFP_CONTROL              0x474604u /* 4343300B */
+#define NVX_STAMP_VFP_CONTROL_SNAPSHOT     82976u    /* 0x14420 */
+#define NVX_STAMP_CLK_FREQ_CTRL_INFO       0x010C4Cu /* 3148B  clock.rs:5421 */
+#define NVX_STAMP_CLK_FREQ_CTRL_STATUS     0x0109CCu /* 2508B  clock.rs:5466 */
+
+/* Private ClockClient clock-domains GET_INFO (RM 0x20809019) -- the article's
+ * domain-discovery API (clock.rs:1930). Distinct from GET_CONTROL 0x2080901B
+ * and from the 582.41-numered VFP trio. Read-only. */
+#define NVX_RM_CMD_CLK_DOMAINS_GET_INFO    0x20809019u
+/* ClkFreqController directory + status (clock.rs:5402/5455). RM 0x20809025
+ * carries {max_kHz, -18750/+18750} per domain on TU116 -- and this bench's
+ * GTX 1650 SUPER IS TU116, so it is a first-class candidate here. */
+#define NVX_RM_CMD_CLK_FREQ_CTRL_INFO      0x20809025u
+#define NVX_RM_CMD_CLK_FREQ_CTRL_STATUS    0x20809026u
+/* VoltVoltRails GetInfo/GetStatus (power.rs:61): same op family as B213. */
+#define NVX_RM_CMD_RAILS_GET_INFO          0x2080B201u
+#define NVX_RM_CMD_RAILS_GET_STATUS        0x2080B202u
+
 #endif /* NVX_DEFS_H */

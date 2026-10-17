@@ -71,6 +71,11 @@ int nvx_stage2_clk_read(nvx_ctx *c) {
     puts("FAKE clkvf");
     return 0;
 }
+int nvx_stage2_clk_doc(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE clkdoc");
+    return 0;
+}
 int nvx_stage3(nvx_ctx *c) { (void)c; abort(); }
 int nvx_stage5(nvx_ctx *c) { (void)c; abort(); }
 int nvx_close(int fd) { printf("FAKE close %d\n", fd); return 0; }
@@ -228,6 +233,13 @@ class IdleCli(unittest.TestCase):
         asked = self.run_cli("--stages", "0", "--clkvf-read")
         self.assertEqual(asked.returncode, 0, asked.stderr)
         self.assertEqual(asked.stdout.count("FAKE clkvf"), 1)
+
+    def test_clkdoc_reads_are_explicit_opt_in(self):
+        plain = self.run_cli()
+        self.assertNotIn("FAKE clkdoc", plain.stdout)
+        asked = self.run_cli("--stages", "0", "--clkdoc-read")
+        self.assertEqual(asked.returncode, 0)
+        self.assertEqual(asked.stdout.count("FAKE clkdoc"), 1)
 
     def test_rated_tdp_set_is_gated_like_other_writes(self):
         log = self.directory / "must-not-exist.jsonl"
