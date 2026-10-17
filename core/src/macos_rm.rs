@@ -1151,6 +1151,27 @@ impl SampleFields {
         }
     }
 
+    /// Record a field whose payload lives *inside* the RUSD sample while its
+    /// validity word rides along with the sample: usable only when the snapshot
+    /// itself mapped, so the snapshot-level reason is checked before the field's
+    /// own status word.
+    ///
+    /// That word is precisely what cannot be trusted when the mapping failed: a
+    /// zero-filled sample reads as status 0, i.e. "fine", with a payload of 0.
+    fn publish_snapshot_backed(
+        &mut self,
+        name: &str,
+        status: u32,
+        rusd_map_reason: Option<&str>,
+    ) -> bool {
+        if let Some(reason) = rusd_map_reason {
+            self.freshness.insert(name.into(), FieldState::Unsupported);
+            self.unavailable.insert(name.into(), reason.to_string());
+            return false;
+        }
+        self.publish_live(name, status)
+    }
+
     /// Record a field that comes from a live RM control rather than a RUSD
     /// section: it is new whenever its query succeeded.
     fn publish_live(&mut self, name: &str, status: u32) -> bool {
@@ -1284,6 +1305,7 @@ fn publish_all(
     checks: &[SectionCheck; RUSD_FIELDS],
     scope: FreshnessScope,
     stale_ms: u64,
+    rusd_map_reason: Option<&str>,
 ) -> DeviceStatus {
     // ---- CLOCK: four public domains, one section -------------------------
     let clock = &checks[SEC_CLOCK];
@@ -1543,8 +1565,16 @@ fn publish_all(
     let pstate = fields
         .publish_live("pstate", raw.pstate_status)
         .then_some(raw.pstate);
+    // The byte count is a field of the RUSD sample itself, so a snapshot that
+    // failed to map invalidates it no matter what its own status word says. That
+    // word is the thing that lies when the mapping failed, and the first real
+    // wedged `get-status --macos-rm` is what showed it: fourteen neighbours from
+    // the same failed mapping printed `N/A` with the page reason, while this one
+    // printed `Memory Used: 0.000 MiB` -- a zero-filled sample's status 0 read as
+    // "fine". `pstate` is different and stays on its own status: it comes from a
+    // live RM query that still answers on the wedged driver.
     let memory_used_bytes = fields
-        .publish_live("memory_used_bytes", raw.memory_used_status)
+        .publish_snapshot_backed("memory_used_bytes", raw.memory_used_status, rusd_map_reason)
         .then_some(u64::from(raw.memory_used_kb) * 1024);
 
     DeviceStatus {
@@ -1604,7 +1634,14 @@ fn interpret_oneshot(raw: &RawSample, map_status: u32) -> DeviceStatus {
         epoch_reset: false,
         override_reason: override_reason.clone(),
     });
-    publish_all(&mut fields, raw, &checks, FreshnessScope::InitialQuery, 0)
+    publish_all(
+        &mut fields,
+        raw,
+        &checks,
+        FreshnessScope::InitialQuery,
+        0,
+        override_reason.as_deref(),
+    )
 }
 
 /// Interpret one raw native sample for the continuous monitor. Pure and
@@ -1628,7 +1665,16 @@ fn interpret_sample(
             stale_ns,
         )
     });
-    let status = publish_all(&mut fields, raw, &checks, FreshnessScope::Session, stale_ms);
+    // A monitor session has its mapping by construction; there is no page status
+    // to carry here, so the field's own word is the only gate available.
+    let status = publish_all(
+        &mut fields,
+        raw,
+        &checks,
+        FreshnessScope::Session,
+        stale_ms,
+        None,
+    );
     DeviceSample {
         status,
         updated: fields.updated,
@@ -2588,6 +2634,45 @@ mod tests {
         );
     }
 
+    /// A zero-filled RUSD sample must not be read as a measurement of zero.
+    ///
+    /// Measured on the device: with the mapping refused (`0x62`), fourteen
+    /// RUSD-backed fields printed `N/A` with the page reason while
+    /// `memory_used_bytes` printed `0.000 MiB`, because a zero-filled sample
+    /// carries status 0 for that field, which reads as "fine". The byte count
+    /// lives in that same sample, so the page reason has to win over it.
+    #[test]
+    fn a_failed_rusd_page_does_not_publish_a_zero_memory_measurement() {
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        // The page failed, and the native layer handed back a zero-filled sample:
+        // the section stamps are gone and the field word still says "fine".
+        s.telemetry.status = 0x62;
+        for status in s.telemetry.sample.field_status.iter_mut() {
+            *status = FIELD_UNAVAILABLE;
+        }
+        s.telemetry.sample.memory_used_status = 0;
+        s.telemetry.sample.memory_used_kb = 0;
+
+        let status = status_from_snapshot(&s);
+        assert!(
+            status.memory_used_bytes.is_none(),
+            "a zero-filled page must not report 0 bytes used"
+        );
+        assert!(
+            status.unavailable["memory_used_bytes"].contains("00000062"),
+            "{:?}",
+            status.unavailable["memory_used_bytes"]
+        );
+        // The same page reason the sections carry, not a second wording.
+        assert_eq!(
+            status.unavailable["memory_used_bytes"],
+            status.unavailable["temperature_c"]
+        );
+        // And the live query that still answers is untouched by the page.
+        assert!(status.pstate.is_some());
+    }
+
     #[test]
     fn engine_utilization_is_normalized_from_percent_x100() {
         let mut s = snapshot();
@@ -2617,7 +2702,18 @@ mod tests {
         assert!(status.temperature_c.is_none());
         assert!(status.rusd_timestamps.is_empty());
         assert!(status.unavailable["temperature_c"].contains("0000001f"));
-        // Live controls fail on their own status, not the page status.
+        // The memory byte count is a field *of* the page rather than a live
+        // control, so the failed page suppresses it too -- its own status word
+        // rides in the same sample and cannot outvote the mapping that failed.
+        // (This is what the wedged `get-status --macos-rm` proved: the count
+        // printed as 0.000 MiB while its neighbours printed N/A.)
+        assert!(status.memory_used_bytes.is_none());
+        assert!(status.unavailable["memory_used_bytes"].contains("0000001f"));
+        // A live control really does stand on its own: the pstate query answered.
+        assert!(status.pstate.is_some());
+
+        // With the page mapped, the field's own status word is the gate.
+        s.telemetry.status = 0;
         s.telemetry.sample.memory_used_status = 0x57;
         let status = status_from_snapshot(&s);
         assert!(status.memory_used_bytes.is_none());

@@ -871,3 +871,15 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **三、修正"每个功能族缺的是哪一层"的用户可见表述（本轮的实质改动）**：上述运行暴露出一个真实缺陷——`unavailable` 里除两个偏移族外的**所有**族都共用同一句话 `"no readable RM control for this family on this driver (see notes)"`，而实测下它对**每一个**族都不准确：热族**明明可读**（wedge 前 `0x20800513` 返回过 47 ℃），VF 读半**存在且非特权**只是**从未读过**，写族缺的是**特权**而非控制存在，风扇族缺的是"公开面没有实体＋私有热族 31 条读从未读"。这正是目标明令禁止的"把没读过/没权限说成命令不存在"。现改为**按族给因**：`fan_control`＝公开面确无风扇实体（`ctrl2080fan.h` 空壳、控制头全树 "cooler" 0 次）而私有热读半 31 条未读 ⇒ **调查未知（未定位）**；`vf_curve`＝读半存在非特权但从未读 ⇒ **延后而非缺失**；`pstate_lock`／`power_limit_write`／`settings_restore`＝**需要写且私有 SET 在 root 以下被拒**（追加二十七）；`thermal_limit`＝热族本身可读，缺的是**已配置的限值**这个另一字段 ⇒ 尚未定位；`voltage_boost`＝走 SET，同写门槛。同时新增回归测试 `every_gap_names_its_own_cause_rather_than_a_missing_control`（每个族必须有非空、指向 notes 的理由，**不得**再出现那句被退役的笼统话；写族共用特权理由，其余族不得借用），并让 `nvoc-python` 的测试夹具改用真实常量而非复制字面量（此前它复制的正是那句已退役的话）；`DeviceInfo` 增加 `Default` 派生以便夹具构造（纯增量）。
 
 **验证范围**：`cargo fmt --all -- --check` clean；`cargo clippy -p nvoc-core -p nvoc-cli -p nvoc-auto-optimizer --all-targets -- -D warnings` 通过；`cargo test -p nvoc-core --all-targets` 通过；重建 `nvoc-cli` 后实跑一次，逐族打印出修正后的表述（见 §52 记录）。本轮**访问了设备**：两次只读 `get-settings --macos-rm`（重建前后各一次），**无写入、未提权**。
+
+### 本轮追加三十一（2026-10-18，修正一处**用户可见假值**：wedge 会话里"已用显存"被当作测量值报出）
+
+**实测到的缺陷（不是推断）**：wedge 会话中 `nvoc-cli get-status --macos-rm` 把 **14 个同源字段**正确标为 `N/A` 并在 `unavailable` 里给出 `RUSD allocation/mapping failed: 0x00000062`，却把 `memory_used_bytes` **当作测量值打印为 `Memory Used: 0.000 MiB`**。结构化输出（`-O json`）确证：`memory_used_bytes = 0`，而同一次读取里 `power_mw`/`fan_rpm`/四个时钟/四个温度/`pcie_*`/`average_power_mw`/`engine_utilization_percent` 等全为 `null` 且带上述页级理由。
+
+**根因（代码级定位）**：`memory_used_bytes` 的载荷 `memory_used_kb` 与它的有效字 `memory_used_status` 都在 **RUSD 采样结构体内部**（`RawSample`），但发布时走的是 `publish_live`，只查它**自己的**状态字：页映射失败时原生层交回的是**零填充样本**，状态字读出来正是 `0`（＝"正常"）、载荷是 `0` ⇒ 于是 0 被当成读数发布。对照之下，**RUSD 分节**字段早已有页级门（`FIELD_OK if map_status == 0 && timestamp != 0`，代码注释即写明"没有时间戳说明什么都没采到"），而这条"伪 live"字段**绕过了那道门**。`pstate` 不同且**本就不该**被页级理由压制：它来自一条**真的答复了的** live 查询（wedge 下 `0x2080b201` 仍返回 NV_OK，实测 `P0` 未归零）。
+
+**修法**：新增 `publish_snapshot_backed`——载荷在 RUSD 采样内、有效字随样本而来的字段，先看**页级理由**再看自己的状态字；`publish_all` 显式接收页级理由（one-shot 传页状态理由，monitor 会话按构造已有映射、传 `None` 且保持原行为）。**未改动** `pstate` 的语义。
+
+**同时纠正一处被测试固化的错误前提**：原测试注释写"Live controls fail on their own status, not the page status"，并把 `memory_used_bytes` 当作 live control 断言——那正是本缺陷被"合法化"的地方。现按实测改写：页失败时它随页被压制（理由与分节字段**同一句**），页正常时其自身状态字才是门（`0x57` 用例保留，另加页状态归零前置），并新增回归测试 `a_failed_rusd_page_does_not_publish_a_zero_memory_measurement`（零填充页 + 字段字为 0 ⇒ 必须 `None`、理由与 `temperature_c` **逐字相同**、`pstate` 仍在）。
+
+**验证范围**：`cargo fmt --all -- --check` clean；clippy（core/cli/auto-optimizer，`-D warnings`）通过（仅依赖 `nvapi-sys` 一条既有警告）；`cargo test -p nvoc-core --all-targets` 全绿（88+5+15 等）。**设备级验证**：重建 CLI 后实跑，`Memory Used: N/A` + `RUSD allocation/mapping failed: 0x00000062`，`Pstate: P0` 不受影响，`unavailable` 26 项。本轮**只读**访问设备两次（`get-status` human/json），**无写入、未提权**。
