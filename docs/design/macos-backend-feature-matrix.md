@@ -870,7 +870,7 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 
 **三、修正"每个功能族缺的是哪一层"的用户可见表述（本轮的实质改动）**：上述运行暴露出一个真实缺陷——`unavailable` 里除两个偏移族外的**所有**族都共用同一句话 `"no readable RM control for this family on this driver (see notes)"`，而实测下它对**每一个**族都不准确：热族**明明可读**（wedge 前 `0x20800513` 返回过 47 ℃），VF 读半**存在且非特权**只是**从未读过**，写族缺的是**特权**而非控制存在，风扇族缺的是"公开面没有实体＋私有热族 31 条读从未读"。这正是目标明令禁止的"把没读过/没权限说成命令不存在"。现改为**按族给因**：`fan_control`＝公开面确无风扇实体（`ctrl2080fan.h` 空壳、控制头全树 "cooler" 0 次）而私有热读半 31 条未读 ⇒ **调查未知（未定位）**；`vf_curve`＝读半存在非特权但从未读 ⇒ **延后而非缺失**；`pstate_lock`／`power_limit_write`／`settings_restore`＝**需要写且私有 SET 在 root 以下被拒**（追加二十七）；`thermal_limit`＝热族本身可读，缺的是**已配置的限值**这个另一字段 ⇒ 尚未定位；`voltage_boost`＝走 SET，同写门槛。同时新增回归测试 `every_gap_names_its_own_cause_rather_than_a_missing_control`（每个族必须有非空、指向 notes 的理由，**不得**再出现那句被退役的笼统话；写族共用特权理由，其余族不得借用），并让 `nvoc-python` 的测试夹具改用真实常量而非复制字面量（此前它复制的正是那句已退役的话）；`DeviceInfo` 增加 `Default` 派生以便夹具构造（纯增量）。
 
-**验证范围**：`cargo fmt --all -- --check` clean；`cargo clippy -p nvoc-core -p nvoc-cli -p nvoc-auto-optimizer --all-targets -- -D warnings` 通过；`cargo test -p nvoc-core --all-targets` 通过；重建 `nvoc-cli` 后实跑一次，逐族打印出修正后的表述（见 §52 记录）。本轮**访问了设备**：两次只读 `get-settings --macos-rm`（重建前后各一次），**无写入、未提权**。
+**验证范围**：`cargo fmt --all -- --check` clean；`cargo clippy -p nvoc-core -p nvoc-cli -p nvoc-auto-optimizer --all-targets -- -D warnings` 通过；`cargo test -p nvoc-core --all-targets` 通过；重建 `nvoc-cli` 后实跑一次，逐族打印出修正后的表述（见 §52 记录）。本轮**访问了设备 3 次**：1 次 anchor 轮询 + 2 次只读 `get-settings --macos-rm`（重建前后各一次），**无写入、未提权**。
 
 ### 本轮追加三十一（2026-10-18，修正一处**用户可见假值**：wedge 会话里"已用显存"被当作测量值报出）
 
@@ -882,4 +882,4 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 
 **同时纠正一处被测试固化的错误前提**：原测试注释写"Live controls fail on their own status, not the page status"，并把 `memory_used_bytes` 当作 live control 断言——那正是本缺陷被"合法化"的地方。现按实测改写：页失败时它随页被压制（理由与分节字段**同一句**），页正常时其自身状态字才是门（`0x57` 用例保留，另加页状态归零前置），并新增回归测试 `a_failed_rusd_page_does_not_publish_a_zero_memory_measurement`（零填充页 + 字段字为 0 ⇒ 必须 `None`、理由与 `temperature_c` **逐字相同**、`pstate` 仍在）。
 
-**验证范围**：`cargo fmt --all -- --check` clean；clippy（core/cli/auto-optimizer，`-D warnings`）通过（仅依赖 `nvapi-sys` 一条既有警告）；`cargo test -p nvoc-core --all-targets` 全绿（88+5+15 等）。**设备级验证**：重建 CLI 后实跑，`Memory Used: N/A` + `RUSD allocation/mapping failed: 0x00000062`，`Pstate: P0` 不受影响，`unavailable` 26 项。本轮**只读**访问设备两次（`get-status` human/json），**无写入、未提权**。
+**验证范围**：`cargo fmt --all -- --check` clean；clippy（core/cli/auto-optimizer，`-D warnings`）通过（仅依赖 `nvapi-sys` 一条既有警告）；`cargo test -p nvoc-core --all-targets` 全绿（88+5+15 等）。**设备级验证**：重建 CLI 后实跑，`Memory Used: N/A` + `RUSD allocation/mapping failed: 0x00000062`，`Pstate: P0` 不受影响，`unavailable` 26 项。本轮**只读**访问设备 **5 次**（1 次 anchor 轮询 + 4 次 `get-status`：修复前 human/json 各一、修复后 human/json 各一；一次参数写错的 `--json` 在解析阶段即退出、未开驱动，不计），**无写入、未提权**。
