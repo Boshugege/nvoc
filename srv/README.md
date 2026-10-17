@@ -34,6 +34,7 @@ Platform status:
 |---|---|---|
 | Windows | NVAPI (RMW fan surface, live-verified on 472.12) | Windows SCM (`nvoc-srv-ctl install`) |
 | Linux  | NVAPI via libnvidia-api **(fan write unverified — needs live testing)**; falls back to NVML | systemd unit: [`systemd/nvoc-srv.service`](./systemd/nvoc-srv.service) |
+| macOS  | **Read-only** native backend (`MacosRmBackend` over the NullMoth RM channel): the monitoring loop and `/status`/`/api/status`/`/api/info`/`/api/history` work; there is **no actuator**, so every write route (`/mode?value=pid\|manual`, `/fan`, `/api/oc/*`, `/api/reset`, `/oc_global`) is refused before the driver and the mode stays `Auto` | none yet (foreground only) |
 
 ## Building
 
@@ -45,7 +46,9 @@ cargo test  --package nvoc-srv            # pure logic, no GPU needed
 Bins:
 
 - `nvoc-srv` — the service binary. Windows: SCM launch path by default (service name `nvoc_service`), or
-  `--foreground` in a console. Linux: always foreground.
+  `--foreground` in a console. Linux/macOS: always foreground. On macOS the selected backend is
+  read-only, so the loop observes and never actuates (see the platform table above and
+  `docs/design/macos-rm-backend.md`).
 - `nvoc-srv-ctl` — Windows SCM management: `install` / `uninstall` / `status`
   / `failure-actions`.
 
