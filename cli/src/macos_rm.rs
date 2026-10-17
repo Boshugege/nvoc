@@ -42,8 +42,10 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         Ok(())
     } else if command == Command::GetTemperatureThresholds {
         Err(CliError::new(format!(
-            "get-temp-thresholds is unavailable on macOS RM: {} -- on macOS the live reading \
-             of every sensor this backend knows is reported by get-legacy-temp-sensor instead.",
+            // The constant already ends by naming the entry that does answer
+            // (get-legacy-temp-sensor), so the wrapper adds nothing after it:
+            // the captured text stuttered that sentence twice.
+            "get-temp-thresholds is unavailable on macOS RM: {}",
             nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON
         )))
     } else if command == Command::GetPstateFreqRange {
