@@ -7,7 +7,9 @@
 #
 #   1. --clkctl-hex   full byte dump of every read-only clock block, and the
 #                     AUTHORITATIVE record of their contents: 0x2080901b with
-#                     its mask seeded at +4 (0xFF, then 0x0), 0x20809025,
+#                     its mask seeded at +4 (0xFF, 0x3FF, 0x1, then 0x0 --
+#                     see the PREDICTIONS block in nvx_suite.c, which this
+#                     run is meant to falsify or confirm), 0x20809025,
 #                     0x20809019, and 0x2080901d last (it was only ever read
 #                     with a 0xA5 background, and a timeout on it must not cost
 #                     the other blocks).  The 0xA5 sweep's own delta printout

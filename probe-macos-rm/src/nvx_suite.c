@@ -1652,6 +1652,27 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
      * (every other header dword -> 0x25), which is also why the zero-filled
      * --clkctl-read cases seeded at +8 returned NV_OK with an empty block.
      * The zero-background confirmation of +4 is in the same battery. */
+    /* PREDICTIONS, so this battery tests the model instead of illustrating it.
+     * The 0xA5 sweep reported 106/527 changed dwords for mask@+4 = 0xFF with
+     * its last change at +564.  Both numbers are explained by exactly one
+     * model: the mask selects *domain entries* (not domain bits), each filled
+     * entry is a 64 B record at +60 + 64*i whose handler writes 13 dwords
+     * (rec+0 type, rec+8..rec+44, rec+52, rec+56) and leaves rec+4, rec+48,
+     * rec+60 alone -- so mask 0xFF = 8 entries = 2 + 8*13 = 106 changes, and
+     * the last one is entry 7's rec+56 = 60 + 7*64 + 56 = 564.  The 9019
+     * directory lists 10 entries (domain bits 0,1,4,2,3,20,19,6,21,5) with
+     * record types 08,09,08,09,09,09,03,08,09,09, which is why mask 0xFF must
+     * fill 8 records even though only 7 of its bits name a domain.
+     *
+     * Predicted non-zero bytes in a zeroed block (the type bytes are the only
+     * non-zero output of this handler; everything else it writes is zero):
+     *   mask 0x1   -> one record : +60 = 08 08                     (13+2 changed dwords)
+     *   mask 0xFF  -> eight      : +60 08, +124 09, +188 08, +252 09,
+     *                              +316 09, +380 09, +444 03, +508 08
+     *   mask 0x3FF -> all ten    : the eight above plus +572 09, +636 09
+     * A 0x25 answer would instead mean the value is out of range for this
+     * field, which is a benign rejection (seen many times on this id).
+     */
     static const struct {
         const char *name;
         NvU32 cmd;
@@ -1661,6 +1682,10 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
     } cases[] = {
         { "domains-get-control 0x2080901B @2108 in@4=0xFF", 0x2080901bu, 2108u,
           4u, 0x000000ffu },
+        { "domains-get-control 0x2080901B @2108 in@4=0x3FF", 0x2080901bu, 2108u,
+          4u, 0x000003ffu },
+        { "domains-get-control 0x2080901B @2108 in@4=0x1", 0x2080901bu, 2108u,
+          4u, 0x00000001u },
         { "domains-get-control 0x2080901B @2108 in@4=0",    0x2080901bu, 2108u,
           4u, 0x00000000u },
         { "freq-ctrl-info   0x20809025 @7188",  0x20809025u, 7188u,  ~0u, 0u },

@@ -192,13 +192,55 @@ natural first suspects for a "clock control enabled" precondition, and they are
 why a first write attempt has to re-verify the gates instead of assuming that
 the GET's success implies the SET's.
 
+### 4.2 What the mask selects, and the record shape (falsifiable)
+
+Two numbers in the `0xA5` log pin the geometry down, and one model explains both.
+
+* `0x2080901b` with `mask@+4 = 0xFF`: the header line says `106/527 dwords
+  changed` and `last @564`.
+* `0x20809019`'s directory lists **10 entries** with record types
+  `08,09,08,09,09,09,03,08,09,09` (domain bits `0,1,4,2,3,20,19,6,21,5`). If the
+  901b mask were a *domain-bit* mask, its low 8 bits would name only 7 domains
+  (bit 7 is not in the directory), so `0xFF` would fill 7 records ->
+  `2 + 7*13 = 93` changed dwords, not 106.
+
+The model: the mask selects **domain entries (indices), not domain bits**; each
+selected entry fills one 64-byte record at `+60 + 64*i`, and the handler writes
+exactly 13 dwords per record -- `rec+0` (the type, written as a `u16`), the ten
+dwords `rec+8 … rec+44`, and `rec+52`/`rec+56` -- while leaving `rec+4`,
+`rec+48` and `rec+60` untouched. Those three are the only per-record dwords that
+survive an `0xA5` background, which is how the write set is known at all.
+
+Check: `2 + 8*13 = 106` and entry 7's last written dword is
+`60 + 7*64 + 56 = 564`. Both match the log exactly.
+
+Predictions this makes -- and the reason the §8 battery now seeds `+4` with
+`0x1`, `0xFF` and `0x3FF` and dumps the whole block:
+
+| `mask@+4` | records | non-zero bytes in a zeroed block |
+| --- | --- | --- |
+| `0x1` | 1 | `+60 = 08 08` |
+| `0xFF` | 8 | `+60 08`, `+124 09`, `+188 08`, `+252 09`, `+316 09`, `+380 09`, `+444 03`, `+508 08` |
+| `0x3FF` | 10 | the eight above plus `+572 09`, `+636 09` |
+
+Everything else the handler writes is a zero, which is why a *zeroed*
+background cannot show the record shape at all (a zero write is
+indistinguishable from an untouched byte) and why the shape had to come from the
+`0xA5` sweep. A `0x25` answer to `0x3FF`/`0x1` would mean the value is out of
+range for the field, i.e. that the mask is not an entry selector.
+
+Consequence for the write path: `rec+4`, `rec+48` and `rec+60` are the only
+per-record dwords this GET never overwrites, so they are the first place a SET
+input could live -- to be confirmed against `0x2080d01c`, not assumed.
+
+
 ## 5. Neighbouring containers that *do* carry values
 
 All GET, all at the GSP's own size, all with a zeroed input block:
 
 | id @size | status | what came back |
 | --- | --- | --- |
-| `0x20809019 @12336` | `NV_OK` | 32×384 B record table, 9 records populated; record type bytes `{08,09,08,09,09,09,03,08,09,09}` — i.e. the Turing mix again |
+| `0x20809019 @12336` | `NV_OK` | 48 B head + 32×384 B record table, **10** records populated; per record `+4` is the domain bit (`0,1,4,2,3,20,19,6,21,5`) and `+0` the type bytes `{08,09,08,09,09,09,03,08,09,09}` — the Turing mix of §4.2 |
 | `0x2080901d @32680` | `NV_OK` | 352/8170 dwords written; header `+0` low byte `0xff`, `+4 = 0x07ffffff`; per-record fields at `+56 = 0x00850085`, `+144 = 0x00ff0093`, `+184 = 0x00860086` |
 | `0x20809025 @7188` | `NV_OK` | 20 B head + 32×224 B records, 3 records populated; each record ends `… ffffb6c2 0000493e` = **−18750 / +18750 kHz** around a `0` offset field, i.e. a symmetric ±18.75 MHz *offset* range |
 | `0x20809061 @776` | `NV_OK` | the live per-domain kHz table (already verified against RUSD) |
@@ -422,7 +464,9 @@ printout alone is not a reproducible record of a block.
   1. `0x2080901b @2108` re-read with the §4 `+4` mask and a **zeroed**
      background, to check whether the `08`/`09` records are really
      "types only" or whether a single-sourced mask leaves fields that the
-     `0xA5` sweep could not distinguish from a driver-zeroed word.
+     `0xA5` sweep could not distinguish from a driver-zeroed word. The run now
+     uses `0x1` / `0xFF` / `0x3FF` so it also tests §4.2's entry-selector model
+     against the predicted type bytes at `+60 … +636`.
   2. `0x2080901d @32680` with a zeroed block (it answered `NV_OK` with an
      `0xA5` background; the header is `+0` low byte `0xff`, `+4 = 0x07ffffff`
      and the records carry small fields such as `0x00850085` /
