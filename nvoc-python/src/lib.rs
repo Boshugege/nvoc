@@ -1763,6 +1763,17 @@ fn normalize_supported_app_clocks(target: &GpuTarget<'_>) -> PyResultValue {
 }
 
 fn normalize_power_limits(target: &GpuTarget<'_>) -> PyResultValue {
+    // macOS RM: same dispatch rule as the other families. The enforced wall and
+    // the requested limit are already in the snapshot this backend publishes,
+    // so the entry answers from them instead of failing on the missing NVML
+    // handle; the two range ends come back null with the reason, and the
+    // projection is core's, so this entry cannot state more than the backend.
+    if target.has_macos_rm() {
+        let device = target.macos_rm().map_err(to_py_err)?;
+        let report = device.status().map_err(to_py_err)?.power_limit_report();
+        let value = serde_json::to_value(&report).map_err(to_py_err)?;
+        return Ok(value);
+    }
     let power = run(target, QueryPowerLimits).map_err(to_py_err)?.output;
     Ok(value_object([
         ("min_watt", f64_value(power.min_watts as f64)),

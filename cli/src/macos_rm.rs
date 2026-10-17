@@ -26,11 +26,17 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             // the contract it has no source for (the three percentages) come
             // back null with a reason in `unavailable`, not as a zero.
             | Command::GetFanInfo
+            // The power-limit read is allowed for the same reason. This backend
+            // reads the enforced wall and the requested limit out of the same
+            // snapshot as get-status, so refusing the entry wholesale would read
+            // as "the backend has no power limit", which is not true; the two
+            // range ends it has no source for come back null with the reason.
+            | Command::GetPublicPowerLimit
     ) {
         Ok(())
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, get-fan-info. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, get-fan-info, get-public-power-limit. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
             command.name()
         )))
     }
@@ -110,6 +116,18 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 // after the plausibility filter, which is not the cooler index.
                 Command::GetFanInfo => {
                     serde_json::to_value(run(&target, nvoc_core::QueryMacosRmStatus)?.output.fan_report())?
+                }
+                // The power-limit contract (min/current/max watts). Two of the
+                // three read out of the same snapshot as get-status -- the
+                // enforced wall and the requested limit -- plus the driver's own
+                // policy wattage. The two ends have no source on this path, so
+                // they come back null with the reason attached rather than as a
+                // bound the driver never published; a section that could not be
+                // read yields nulls, never 0 W.
+                Command::GetPublicPowerLimit => {
+                    serde_json::to_value(
+                        run(&target, nvoc_core::QueryMacosRmStatus)?.output.power_limit_report(),
+                    )?
                 }
                 // Decoded by the shared `QueryThrottleReasons` operation (core
                 // serves it from the RM snapshot on macOS), so this surface and
@@ -255,6 +273,31 @@ mod tests {
         let write = validate(Command::SetFanSpeed).unwrap_err().to_string();
         assert!(write.contains("unavailable on macOS RM"), "{write}");
         assert!(!write.contains("rpm"), "{write}");
+    }
+
+    #[test]
+    fn the_power_limit_read_is_allowed_while_its_write_half_stays_refused() {
+        // Stage 11 item 5, power family. The enforced wall and the requested
+        // limit are in the snapshot this backend already publishes, so the entry
+        // answers from them; the two range ends come back null with the reason,
+        // and no power SET is issued on any macOS path.
+        assert!(validate(Command::GetPublicPowerLimit).is_ok());
+        for command in [
+            Command::SetPowerLimit,
+            Command::ResetPowerLimit,
+            Command::SetPublicTgpPercent,
+            Command::GetRatedTdp,
+        ] {
+            let error = validate(command).unwrap_err().to_string();
+            assert!(error.contains("unavailable on macOS RM"), "{error}");
+        }
+        // The rated-TDP read stays refused for a different reason than a
+        // missing field: its route is the NVAPI private trio
+        // (0xED2BEA09/0x87BD35EF/0xFCBDF642), which this path never issues, so
+        // the number is not read -- it is not that the driver lacks it.
+        let rated = validate(Command::GetRatedTdp).unwrap_err().to_string();
+        assert!(rated.contains("unavailable on macOS RM"), "{rated}");
+        assert!(rated.contains("get-public-power-limit"), "{rated}");
     }
 
     #[test]

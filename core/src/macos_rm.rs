@@ -991,6 +991,44 @@ pub struct FanReport {
 /// reports as percentages have no source here, while rpm does.
 pub const FAN_PERCENT_UNREADABLE_REASON: &str = "the RUSD fan section publishes a tachometer reading per cooler slot, with no duty percent and no rpm range, so a percentage would need an invented scale; the rpm reading the driver does publish is reported instead";
 
+/// The public power-limit contract asks for a min/current/max wattage range.
+/// This backend reads a requested limit, an enforced wall and a policy wattage
+/// out of the RUSD power section, and no constraint pair, so the two ends come
+/// back null with this instead of a bound the driver never published.
+///
+/// The named next candidate is a measured negative rather than "not found in a
+/// header": the public-control read that would carry a level range,
+/// `NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2` (`0x2080200B`), answers
+/// `NV_ERR_NOT_SUPPORTED`-era `0x1f` on this driver, and the clock range this
+/// backend does have comes from the clock channel's own block rather than from
+/// the power one.
+pub const POWER_RANGE_UNREAD_REASON: &str = "the RUSD power section publishes the requested limit, the enforced wall and a policy wattage, but no min/max constraint pair, so this backend has no bound to report for this end; which read would carry one is 尚未定位 (0x2080200B PERF_GET_LEVEL_INFO_V2 answers 0x1f on this driver)";
+
+/// The driver's `power_policy_tgp_mw` field, measured rather than assumed: on
+/// the healthy session it read 11.277-11.309 W while `power_limit_mw` read
+/// 100.000 W and instantaneous power read 11.254-11.359 W, so it sits at
+/// instantaneous scale and must not be presented as the card's TGP bound.
+pub const POWER_POLICY_SCALE_NOTE: &str = "policy_tgp_watt is the driver's own power_policy_tgp_mw reported under its field name rather than as a bound: measured on the healthy session it read 11.277-11.309 W against a 100.000 W wall and 11.254-11.359 W instantaneous power, so what quantity the policy field carries is 尚未定位 and it is not used as an upper limit here";
+
+/// One reading of the public power-limit contract.
+///
+/// The shape mirrors the entry this backend feeds (min/current/max watts, the
+/// same keys the NVML plane reports) and adds the two wattages this driver
+/// publishes beyond it. `unavailable` names every field this snapshot could not
+/// fill, including the two ends that have no source at all, so "not read" and
+/// "not published by the driver" are both distinguishable from a zero.
+#[derive(Debug, Clone, Serialize)]
+pub struct PowerLimitReport {
+    pub source: &'static str,
+    pub min_watt: Option<f64>,
+    pub current_watt: Option<f64>,
+    pub max_watt: Option<f64>,
+    pub requested_watt: Option<f64>,
+    pub policy_tgp_watt: Option<f64>,
+    pub unavailable: BTreeMap<String, String>,
+    pub notes: Vec<String>,
+}
+
 impl DeviceStatus {
     /// What this snapshot can say about the fans, and what it cannot.
     pub fn fan_report(&self) -> FanReport {
@@ -1022,6 +1060,69 @@ impl DeviceStatus {
             min_percent: None,
             max_percent: None,
             current_percent: None,
+            unavailable,
+            notes,
+        }
+    }
+
+    /// Projects the wattages this backend reads onto the public power-limit
+    /// contract.
+    ///
+    /// `current_watt` is the enforced wall (`power_limit_mw` in the snapshot):
+    /// the same quantity as NVML's power-management limit, read from the
+    /// driver's own telemetry instead of from NVML. The min/max ends have no
+    /// source on this path (see [`POWER_RANGE_UNREAD_REASON`]), and an unread
+    /// section yields nulls carrying that section's own reason -- never 0 W,
+    /// which would claim the driver enforced a zero-watt wall.
+    pub fn power_limit_report(&self) -> PowerLimitReport {
+        let watts = |mw: Option<u32>| mw.map(|mw| f64::from(mw) / 1000.0);
+        let current_watt = watts(self.power_limit_mw);
+        let requested_watt = watts(self.power_limit_requested_mw);
+        let policy_tgp_watt = watts(self.power_policy_tgp_mw);
+        let mut unavailable: BTreeMap<String, String> = BTreeMap::new();
+        unavailable.insert(
+            "min_watt".to_string(),
+            POWER_RANGE_UNREAD_REASON.to_string(),
+        );
+        unavailable.insert(
+            "max_watt".to_string(),
+            POWER_RANGE_UNREAD_REASON.to_string(),
+        );
+        // One key per contract field whose published field did not survive this
+        // snapshot's checks, with the reason that field itself carries. A field
+        // that was read keeps its number even when a neighbour was not.
+        for (field, published, read) in [
+            ("current_watt", "power_limit_mw", current_watt),
+            ("requested_watt", "power_limit_requested_mw", requested_watt),
+            ("policy_tgp_watt", "power_policy_tgp_mw", policy_tgp_watt),
+        ] {
+            if read.is_none() {
+                unavailable.insert(
+                    field.to_string(),
+                    self.unavailable
+                        .get(published)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{published} was not read in this snapshot")),
+                );
+            }
+        }
+        let notes = vec![
+            "current_watt is the enforced wall the snapshot publishes as power_limit_mw in \
+             milliwatts, converted by /1000; requested_watt is the limit the driver was asked \
+             for (power_limit_requested_mw). On the measured healthy session both read 100.000 W."
+                .to_string(),
+            POWER_POLICY_SCALE_NOTE.to_string(),
+            "the NVAPI plane's TDP percent range (min/default/max) has no counterpart here: the \
+             vocabulary of this section is milliwatts."
+                .to_string(),
+        ];
+        PowerLimitReport {
+            source: "macos-rm",
+            min_watt: None,
+            current_watt,
+            max_watt: None,
+            requested_watt,
+            policy_tgp_watt,
             unavailable,
             notes,
         }
@@ -3652,6 +3753,60 @@ mod tests {
             "{:?}",
             unread.notes
         );
+    }
+
+    #[test]
+    fn the_power_limit_report_gives_the_wall_and_names_the_ends_it_has_no_source_for() {
+        // The healthy fixture: 100 W requested and enforced, and a policy field
+        // at instantaneous scale. The two ends have no source and say so; the
+        // wall is reported as the wall.
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        let report = status_from_snapshot(&s).power_limit_report();
+        assert_eq!(report.source, "macos-rm");
+        assert_eq!(report.current_watt, Some(100.0));
+        assert_eq!(report.requested_watt, Some(100.0));
+        assert_eq!(report.policy_tgp_watt, Some(11.5));
+        assert_eq!(report.min_watt, None);
+        assert_eq!(report.max_watt, None);
+        assert_eq!(report.unavailable.len(), 2);
+        for end in ["min_watt", "max_watt"] {
+            assert_eq!(report.unavailable[end], POWER_RANGE_UNREAD_REASON);
+        }
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("尚未定位") && note.contains("policy")),
+            "{:?}",
+            report.notes
+        );
+
+        // A wattage the checks rejected is null with that field's own reason,
+        // while its neighbours keep their numbers: one unread field must not
+        // blank the family, and it must never come out as 0 W.
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        s.telemetry.sample.power_limit_mw = MAX_POWER_MW + 1;
+        let status = status_from_snapshot(&s);
+        let report = status.power_limit_report();
+        assert_eq!(report.current_watt, None);
+        assert_ne!(report.current_watt, Some(0.0));
+        assert_eq!(report.requested_watt, Some(100.0));
+        assert_eq!(
+            report.unavailable["current_watt"],
+            status.unavailable["power_limit_mw"]
+        );
+        assert_eq!(report.unavailable.len(), 3);
+
+        // A plausible zero is data, not an unread field: 0 mW comes back as
+        // 0.0 W and is absent from `unavailable`.
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        s.telemetry.sample.power_limit_mw = 0;
+        let report = status_from_snapshot(&s).power_limit_report();
+        assert_eq!(report.current_watt, Some(0.0));
+        assert!(!report.unavailable.contains_key("current_watt"));
     }
 
     #[test]

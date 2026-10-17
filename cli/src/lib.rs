@@ -651,7 +651,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 CommandSpec {
                     adapters: &BOTH_BACKENDS,
                     preferred: BackendAdapter::Nvml,
-                    ..CommandSpec::new("get-public-power-limit", Group::Power, "Read the power-limit range: --nvml (auto default) reports the NVML power-management limits in watts (min/current/max); --nvapi reports the ClientPowerPolicies TDP percent range (min/default/max) plus the mobile TGP watt range (tgp_range) when the private ClientTgpWatt family is exposed")
+                    ..CommandSpec::new("get-public-power-limit", Group::Power, "Read the power-limit range: --nvml (auto default) reports the NVML power-management limits in watts (min/current/max); --nvapi reports the ClientPowerPolicies TDP percent range (min/default/max) plus the mobile TGP watt range (tgp_range) when the private ClientTgpWatt family is exposed; macOS RM reports the enforced wall and the requested limit in watts, with the two range ends null and the reason attached (that section publishes no min/max constraint pair)")
                 },
             ),
             (Command::GetPublicTempLimit, CommandSpec::new("get-public-temp-limit", Group::Thermal, "Read the NVAPI public temp-limit range (min/default/max Celsius + throttle curve)")),
