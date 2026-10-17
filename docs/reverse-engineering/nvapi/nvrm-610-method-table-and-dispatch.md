@@ -39,8 +39,12 @@ instead of guessing.
 
 **But this table is not the whole control surface** (corrected 2026-10-17). Any
 id carrying the legacy bit `0x8000` that is *not* in this table is forwarded to
-the **GSP firmware**, which has its own 889-row method table — 169 CLK and 151
-VOLT rows where this table has 1 and 0. Reading this array therefore answers
+the **GSP firmware**, which has its own method table — **1118** rows after the
+2026-10-17 re-extraction (was reported as 889; the extractor's `flags < 0x10000`
+guard dropped 229 real rows, see `gsp-method-table-and-legacy-forwarding.md`
+§16), with **74 CLK read + 19 CLK write** and **13 VOLT read + 4 VOLT write**
+rows where this table has 1 and 0. (The old "169 CLK / 151 VOLT" figures were a
+category mislabel — they are the `0x0a` internal and `0x20` PERF families.) Reading this array therefore answers
 "is this a host-implemented command", not "does this command exist on this
 machine". See `gsp-method-table-and-legacy-forwarding.md`.
 
@@ -117,7 +121,10 @@ non-privileged; `0x2080D0xx`/`0x2080F2xx` are their privileged twins.
 methodId, paramSize, pClassInfo, funcName`) and joins them with the generated
 `g_*_nvoc.c` function names. It is read-only and its output for this box is
 archived outside the repo as
-`outputs/method-table-nvrm-610.57.04.tsv` (604 rows).
+`outputs/method-table-nvrm-610.57.04.tsv` (**608** rows as of the 2026-10-17
+re-extraction; the earlier 604 came from a `flags == 0` guard that dropped four
+real rows — `0x20801350/0x20801351/0x20802204/0x20803124` — none in a private
+clock/voltage family. See §16 of `gsp-method-table-and-legacy-forwarding.md`.)
 
 Category histogram of the registered subdevice controls:
 
@@ -253,7 +260,9 @@ For the record, the earlier "disambiguation steps":
 2. the *object* axis was checked too (`--reg-read`); the GSP forward is
    per-device, not per-object;
 3. the firmware-standing question is settled by the GSP's own export table
-   (889 rows; 169 CLK + 151 VOLT), so no author request is needed for it.
+   (**1118** rows; CLK 74 read + 19 write, VOLT 13 + 4 — see §16 of
+   `gsp-method-table-and-legacy-forwarding.md`), so no author request is needed
+   for it.
 
 `0x20809061@776` is therefore re-attributed to the GSP, not left
 "unattributed"; the private clock/VF/voltage controls remain write-gated.
@@ -377,9 +386,10 @@ Bundles cited here: `stage-clkdoc-20261017T074256Z`,
 
 Answering "fan / power / temperature, investigated separately" with evidence
 rather than a shrug. All of this is a re-read of files already on disk: the
-extracted host table (604 rows, `tools/extract-nvrm-method-table.py` over
-`NVRM.610.57.04`), the extracted GSP table (889 rows) and the OGKM 610.57.04
-SDK headers. **No GPU request.**
+extracted host table (608 rows, `tools/extract-nvrm-method-table.py` over
+`NVRM.610.57.04`), the extracted GSP table (1118 rows — the fan conclusion below
+was re-checked against the corrected extraction and does not change; not one of
+the 229 recovered rows is a fan id) and the OGKM 610.57.04 SDK headers. **No GPU request.**
 
 ### The fan family does not exist as an RM command — on either side
 

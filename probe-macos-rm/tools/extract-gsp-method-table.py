@@ -21,8 +21,14 @@ arrays of 32-byte records with the methodId first::
     +0x04  paramSize    u32
     +0x08  pClassInfo   u64  (image virtual address, base 0x4000000)
     +0x10  pFunc        u64
-    +0x18  flags        u32
+    +0x18  flags        u32   (NOT bounded by 0xFFFF -- see the note in extract())
     +0x1c  accessRight  u32
+
+The ``flags`` field is not a small enum: live rows carry e.g. 0x48, 0x448,
+0x10248, 0x81074a, 0x82004a, 0x83034a.  A ``flags < 0x10000`` guard (which
+this tool used to apply) is therefore a silent row-dropper, not a validity
+test.  Counts from the corrected extraction: 1118 rows total, CLK legacy
+0x90 = 74 + 0xd0 = 19, VOLT 0xb2 = 13 + 0xf2 = 4.
 
 Usage::
 
@@ -66,10 +72,20 @@ def extract(path):
         mid, psz = struct.unpack_from("<II", b, off)
         pcls, pfn = struct.unpack_from("<QQ", b, off + 8)
         fl, ar = struct.unpack_from("<II", b, off + 24)
+        # NOTE (2026-10-17): there used to be two more guards here --
+        # ``fl < 0x10000 and ar < 0x10000``.  They silently dropped 229 real
+        # rows (889 reported instead of 1118), because the ``flags`` field of
+        # a live row routinely carries bits above 16: e.g. 0x20809006 has
+        # flags 0x81074a and 0x20809062 has 0x82004a.  Both of those ids were
+        # therefore reported "absent from the GSP table" while they are in
+        # fact rows with paramSize 8 and 648.  The structural checks below
+        # (id class 0x2080, plausible size, both pointers inside the loaded
+        # image) already reject every non-row: with the guards removed, a
+        # 4-byte-aligned scan and a 32-byte-strided scan find the *same*
+        # 1118 rows, i.e. the relaxed predicate adds no false positives.
         if ((mid >> 16) == 0x2080 and 0 < psz < 8_000_000
                 and lo <= pcls < hi and lo <= pfn < hi
-                and pcls not in NULL_PTRS and pfn not in NULL_PTRS
-                and fl < 0x10000 and ar < 0x10000):
+                and pcls not in NULL_PTRS and pfn not in NULL_PTRS):
             rows.setdefault(mid, (psz, fl, ar, off))
             off += REC
             continue

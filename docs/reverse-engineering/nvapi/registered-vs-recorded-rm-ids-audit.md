@@ -10,7 +10,9 @@ replaces it with a statement about **the loaded driver's own compiled method
 table**, and it is mechanical, so it can be re-run on any host:
 
 1. extract the NVOC export array from the loaded image
-   (`probe-macos-rm/tools/extract-nvrm-method-table.py`, 604 rows);
+   (`probe-macos-rm/tools/extract-nvrm-method-table.py`, 604 rows **at the
+   time of writing; 608 after the 2026-10-17 relaxation of its `flags == 0`
+   guard — see §16 of `gsp-method-table-and-legacy-forwarding.md`**);
 2. collect every `0x2080xxxx` control id *referenced anywhere in this repo*
    (the reverse-engineering notes, `nvapi-rs`, the probe, the backends);
 3. intersect.

@@ -1261,7 +1261,7 @@ python3 probe-macos-rm/tools/dump-gsp-families.py gsp-table.tsv \
 
 | category | family | GET rows | SET rows | in host | examples |
 | --- | --- | --- | --- | --- | --- |
-| `0x10` | **CLK** (`0x90` / `0xd0`) | 69 (68 legacy + 1 public) | 18 | 1 | `0x2080901b@2108`, `0x20809025@7188`, `0x20809061@776`, `0x2080d01c@2108` |
+| `0x10` | **CLK** (`0x90` / `0xd0`) | 75 (74 legacy + 1 public) | 19 | 1 | `0x2080901b@2108`, `0x20809025@7188`, `0x20809061@776`, `0x2080d01c@2108` |
 | `0x32` | **VOLT** (`0xb2` / `0xf2`) | 13 | 4 | 0 | `0x2080b201@2444`, `0x2080b202@3232`, `0x2080b213@1036`, `0x2080f214@1036` |
 | `0x05` | **THERMAL** (`0x85` / `0xc5`) | 30 (29 + the public `0x20800513`) | 6 | 1 | `0x20808501@1036`, `0x20808524@4`, `0x2080852a@1784`, `0x2080852b@3324` |
 | `0x26` | **PMGR** (`0xa6` / `0xe6`) | 35 (34 + the public `0x20802609`) | 12 | 1 | `0x2080a60b@1928`, `0x2080a610@42000`, `0x2080a611@73868` |
@@ -1289,6 +1289,14 @@ NVOC table and **170** are GSP-only. The count that matters for planning is the
 read half of each private family: 13 VOLT + 68 CLK + 29 THERMAL + 34 PMGR +
 114 PERF = **258 private GETs** exist behind the forward — plus the four
 unidentified families above — and none of the 258 is known to the host.
+
+> **Corrected 2026-10-17 (§16): every count in this section was computed with
+> a row-dropping guard in the extractor.** The true figures are **1118** GSP
+> rows, **592** shared with the host table, **526** GSP-only, and **286**
+> private GETs (74 CLK + 31 THERMAL + 39 PMGR + 129 PERF + 13 VOLT). The
+> dispatch argument itself is unaffected — not one row of any private family
+> byte is in the host table — but the family sizes in the table above are the
+> old, under-counted ones.
 
 Three things this settles or sharpens:
 
@@ -1633,3 +1641,118 @@ sizes are known), not a precondition question (the SET's five gates are
 enumerated in §4.4) and not a permissions question (§11.4). Only that body can
 say which of the twelve dwords is `offset_kHz` — or a gated single-step SET
 plus same-field read-back can.
+
+
+## 16. Method-table completeness: the 889-row extraction dropped 229 rows (2026-10-17, static re-extraction)
+
+Every "the GSP's table has N rows" number in §3/§13 came from
+`probe-macos-rm/tools/extract-gsp-method-table.py`, which carried a
+`flags < 0x10000 and accessRight < 0x10000` guard. **The `flags` field of a
+live row is not a bounded enum**, so that guard silently deleted real rows:
+
+| example id | paramSize | flags | family |
+| --- | --- | --- | --- |
+| `0x20809006` | 8 | `0x81074a` | CLK read |
+| `0x20809062` | 648 | `0x82004a` | CLK read |
+| `0x20809063` | 520 | `0x83034a` | CLK read |
+| `0x20809001` | 8 | `0x10248` | CLK read |
+| `0x20809035` | 1164 | `0x10248` | CLK read |
+| `0x2080d055` | 332 | `0x10244` | CLK write |
+| `0x20800102` | 580 | `0x2010a` | device |
+| `0x2080f310` | 12 | `0x5a14438` | VOLT write |
+
+Corrected extraction (tool fixed in the same commit; only the *structural*
+checks remain — id class `0x2080`, `0 < paramSize < 8_000_000`, both
+`pClassInfo` and `pFunc` inside the loaded `.fwimage` range):
+
+* **1118 rows** (was 889): 229 real rows were dropped, in 1118-889 = 229 cases
+  with `flags >= 0x10000`.
+* A **4-byte-aligned scan and a 32-byte-strided scan return the same 1118
+  rows**, i.e. the relaxed predicate adds no false positives; the structural
+  checks alone are sufficient. (The alternative — keeping a magnitude guard and
+  requiring 32-byte alignment — reports the same set, which is how the drop was
+  found.)
+* Family bytes, corrected (legacy read `0x80|cat` / write `0xc0|cat`):
+
+  | family | read rows | write rows |
+  | --- | --- | --- |
+  | CLK `0x90` / `0xd0` | **74** (was 68) | **19** (was 18) |
+  | THERMAL `0x85` / `0xc5` | 31 (was 29) | 6 |
+  | PMGR `0xa6` / `0xe6` | 39 (was 34) | 12 |
+  | PERF `0xa0` / `0xe0` | 129 (was 114) | 32 |
+  | VOLT `0xb2` / `0xf2` | **13** (unchanged) | **4** (unchanged) |
+
+* Private read half behind the forward: 74 CLK + 31 THERMAL + 39 PMGR + 129
+  PERF + 13 VOLT = **286** (the old 258).
+* Host overlap recomputed on the same corrected extraction: GSP **1118** rows,
+  host NVOC **608**, shared ids **592**, GSP-only **526**. **Zero** rows of any
+  private family byte (`0x90/0xd0/0x85/0xc5/0xa6/0xe6/0xa0/0xe0/0xb2/0xf2`) are
+  in the host table, so §2's dispatch conclusion does not rest on the dropped
+  rows.
+
+### 16.1 Retraction: `0x20809006` and `0x20809062` *are* in the GSP table
+
+§3/§13 recorded "`0x20809006` 与 `0x20809062` 根本不在 GSP 表里（此前用的
+8/648 不可推导）". That is an artifact of the dropped rows: both are rows, at
+exactly the sizes that had been used. `0x20809006@8` is therefore a
+**firmware-derived** size for CLK_MEASURE_FREQ (the read-only frequency
+cross-evidence id on the user's list), not a guess — the earlier `0x1f`
+answers came from sending the NVAPI caller's 32 bytes. Same for
+`0x20809062@648`. The probe's `measure-freq 8 (x2, 1 s)` and
+`vfp582 get-status 648` cases are derived from this table entry.
+
+### 16.2 Newly visible rows in the clock family
+
+Read (`0x90`): `0x20809001@8`, `0x20809006@8`, `0x20809035@1164`,
+`0x20809038@4`, `0x20809062@648`, `0x20809063@520`. Write (`0xd0`):
+`0x2080d055@332`. Of these, `0x2080901c@808` was already known (808 = 40 +
+32×24, the same 24-byte record shape as the working `0x20809061@776` = 8 +
+32×24 per-domain kHz table) but had never been read; it is added to the battery
+as the *last* new id, after the size-confirmed anchors.
+
+### 16.3 The GET→SET twin rule is not "same paramSize"
+
+The corrected table makes the pairing explicit: `0x2080901b→0x2080d01c`
+(2108/2108), `901f→d020` (19416), `9023→d024` (66060), `9027→d028` (6288),
+`902c→d02d` (4116), `9030→d031` (1544), `9035→d036` (1164), `9046→d047`
+(8264), `9054→d055` (332), `9072→d073` (14316), `907b→d07c` (392),
+`907f→d080` (44), `9083→d084` (3096), `9087→d088` (136), `90a2→d0a3` (524),
+`90b2→d0b3` (812). Sixteen of seventeen carry equal sizes, but
+`0x20809040@4808` pairs with `0x2080d041@648`: **equal size is the common case,
+not a law**, so a SET twin must never be assumed to take the GET's size. Two
+write rows (`0x2080d067@4`, `0x2080d069@76`) have no read row at index-1.
+
+### 16.4 Registered prediction: `0x2080901d@32680` = 40 B head + 32 × 1020 B
+
+`32680 - 40 = 32640 = 32 × 1020` exactly, and the family's selector is a
+32-bit mask, so 32 records forces the stride: the competing "stride 128"
+reading (`40 + 255×128`) would need a 255-bit selector. Independent support:
+the Windows impl's V2 note (`nvapi-rs/sys/src/gpu/clock.rs`, the
+`clk_ctrl_entry_v2` comment) says the V2 GET copies *internal* dwords
+`[32..36,41..43]` into the caller's eight value slots at `rec+268..296`; those
+internal dwords are bytes `128..148` and `164..176`, which fit a 1020-byte
+record and **cannot** fit the 64-byte record of `0x2080901b`. If so, the "big"
+container carries eight value dwords per record at `rec+128 .. +176`, and the
+`gc-1d 32680 zeroed` battery case is its test. Registered so the post-reboot
+run promotes or kills it — it is a prediction, not a reading.
+
+### 16.5 The same relaxation, applied to the host table
+
+`extract-nvrm-method-table.py` carried a `flags == 0 or flags > 0xFFFFFFF`
+guard. Re-run without it: **608** rows (was 604). The four dropped rows are
+`0x20801350@1`, `0x20801351@544`, `0x20802204@32`, `0x20803124@80` (the first
+with `flags == 0`); none is in a private family. **Zero** rows for any
+`0x208090xx` / `0x2080b2xx` / `0x2080d0xx` id — unchanged. One size
+disagreement exists between the two tables for a *non-legacy* id
+(`0x2080270d`: GSP 20 vs host 12), which is a reminder that the two tables are
+independent sources; for a legacy-bit id the **GSP's** row is the one that
+validates (measured: `0x2080b201`'s size gate), which is precisely why this
+extraction correction matters.
+
+### 16.6 Reproducing
+
+```sh
+# corrected, 1118 rows on the firmware and 608 on the host kext
+probe-macos-rm/tools/extract-gsp-method-table.py  /Users/Shared/nvfw/nvidia/610.57.04/gsp_tu10x.bin
+probe-macos-rm/tools/extract-nvrm-method-table.py /Library/Extensions/NVRM.kext/Contents/MacOS/NVRM
+```

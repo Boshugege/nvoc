@@ -52,8 +52,6 @@ def extract(binary_path):
     limit = len(data)
     seen = {}
     for off in range(0, limit - ENTRY_SIZE, 4):
-        flags = U32.unpack_from(data, off + 8)[0]
-        _access = U32.unpack_from(data, off + 12)[0]
         method_id = U32.unpack_from(data, off + 16)[0]
         param_size = U32.unpack_from(data, off + 20)[0]
         class_ptr = U64.unpack_from(data, off + 24)[0]
@@ -63,8 +61,14 @@ def extract(binary_path):
             continue
         if not 0x1000 <= class_ptr < limit:
             continue
-        if flags == 0 or flags > 0xFFFFFFF:
-            continue
+        # NOTE (2026-10-17): there used to be a ``flags == 0 or flags >
+        # 0xFFFFFFF`` guard here.  It dropped 4 real rows (604 reported
+        # instead of 608 -- 0x20801350/0x20801351/0x20802204/0x20803124, the
+        # first with flags == 0).  None of them is in the private clock /
+        # voltage families, so the "the loaded host table has no row for
+        # 0x20809019/0x2080901b/0x2080b201/..." result is unaffected: a
+        # relaxed scan (no flags guard) still finds exactly ONE CLK row
+        # (0x20801037) and NO row for any 0x208090xx / 0x2080b2xx id.
         seen.setdefault(method_id, (param_size, class_ptr, off))
     return seen
 

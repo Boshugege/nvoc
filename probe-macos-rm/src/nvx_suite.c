@@ -1609,6 +1609,15 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
  *   0x20809023 vfp get-control      66060     0x20809025 freq-ctrl info      7188
  *   0x20809026 freq-ctrl status      5332    0x2080b201 rails get-info      2444
  *   0x2080b202 rails get-status      3232    0x2080b213 rails get-control   1036
+ *   0x20809027 (size only)            6288    0x2080902c                     4116
+ *   0x20809035 (SET twin 0x2080d036) 1164    0x20809063                     520
+ * NOTE (2026-10-17): the first version of the table above was taken from
+ * extract-gsp-method-table.py, which silently dropped 229 rows through a
+ * `flags < 0x10000` guard (the GSP's flags field is not a bounded enum). The
+ * sizes for 0x20809006 (8) and 0x20809062 (648) were in that dropped set --
+ * they are *derived from the firmware*, not guessed, and the earlier "0x1f"
+ * answers to these two ids came from sending the NVAPI caller's 32/2000388
+ * bytes.  See gsp-method-table-and-legacy-forwarding.md section 16.
  * nvapi-rs clock.rs:1424 records the NVAPI *caller* struct as 0x964 = 2404
  * (mask@+8, records @+100 stride 72) -- that is layer L1, not this block.
  * The RM block the GSP validates is 2108 = 60 + 32*64, and the input mask is
@@ -1707,9 +1716,15 @@ static const clkctl_case nvx_clkctl[] = {
     { "gc-1a 2052 (4+32*64)",                0x2080901au, 2052, 0, ~0u, 0, 0 },
     { "gc-1a 2052 counter",                  0x2080901au, 2052, 0, ~0u, 1, 0 },
     /* 0x2080901d@32680 already answered NV_OK with a 0xA5 background (352/8170
-     * dwords written); read it with a zeroed block so the actual values show. */
+     * dwords written); read it with a zeroed block so the actual values show.
+     * Derived shape (section 16.4): 32680 = 40 + 32*1020, so a selected
+     * record's fields should land at 40+1020k+... -- not at 60+64k. */
     { "gc-1d 32680 zeroed",                  0x2080901du, 32680, 0, ~0u, 0, 0 },
-    /* Anchors: the two ids whose sizes were already confirmed empirically. */
+    /* Anchors: the two ids whose sizes were already confirmed empirically.
+     * The battery order is unchanged from the reviewed version: discovery
+     * cases first, then the value containers, then these anchors and the two
+     * negative anchors.  0x2080901c@808 is NOT a case here -- it is held by
+     * nvx_known_wedge_ids (see below). */
     { "anchor vfp582 get-info 776",          0x20809061u, 776, 0, ~0u, 0, 0 },
     { "anchor rails get-info 2444",          0x2080b201u, 2444, 0, ~0u, 0, 0 },
     { "anchor rails get-control 1036",       0x2080b213u, 1036, 0, ~0u, 0, 0 },
@@ -2228,6 +2243,10 @@ int nvx_stage2_clkctl_offsweep(nvx_ctx *c)
     {
         static const offsweep_case more[] = {
             { "gc 0x2080901a @2052", 0x2080901au, 2052u, ~0u, 0u },
+            /* 0x2080901c @808 is KEPT in this list on purpose: the loop
+             * below refuses it via nvx_known_wedge_ids (0x65 timeout in the
+             * 2026-10-17 wedge sweep), so the run records "held" instead of
+             * sending it.  Do not "re-enable" it by deleting the check. */
             { "gc 0x2080901c @808",  0x2080901cu, 808u,  ~0u, 0u },
             { "gc 0x2080901d @32680",0x2080901du, 32680u,~0u, 0u },
             { "gc 0x20809025 @7188", 0x20809025u, 7188u, ~0u, 0u },
@@ -2296,21 +2315,29 @@ static int nvx_id_is_known_set(NvU32 cmd)
     return 0;
 }
 
-/* Ids that took the GSP's legacy path down for the whole session.
+/* Ids that took the GSP's legacy path down, or that timed out immediately
+ * before it went down and therefore cannot be separated from it.
+ *
  * 0x20809026 @5332 (ClkFreqController status) did it on 2026-10-17: the call
  * returned 0x65 NV_ERR_TIMEOUT and every later legacy-forwarded id answered
  * 0x62 NV_ERR_RESET_REQUIRED until a reboot (see
  * docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md §6).
  * That run used an 0xA5A5A5A5-filled block, and no experiment separates "this
  * id" from "that content", so the id is refused regardless of payload instead
- * of being retried with a "safer" background.  0x2080901c @808 also timed out,
- * but that one was survivable; it is not listed here only because nothing in
- * the battery sends it.
+ * of being retried with a "safer" background.
+ *
+ * 0x2080901c @808 timed out (0x65) in that SAME sweep, immediately before the
+ * latch.  It was left out of this list while nothing in the battery sent it --
+ * but the offsweep's zero-background list did send it, which is the same
+ * id/content ambiguity the argument above rejects.  It is held here now:
+ * "survivable once" is not evidence, and a zero background is not a distinct
+ * enough experiment to tell this id from the one that latched.
  *
  * These are refused before the buffer is even built.  A deliberate single
  * attempt is a separate, explicitly-gated action, not a probe case. */
 static const NvU32 nvx_known_wedge_ids[] = {
-    0x20809026u, /* ClkFreqController GET_STATUS @5332 -- wedged the GSP */
+    0x20809026u, /* ClkFreqController GET_STATUS @5332 -- wedged the GSP      */
+    0x2080901cu, /* ClockClient domain container @808 -- timed out just before */
 };
 
 static int nvx_id_is_known_wedge(NvU32 cmd)

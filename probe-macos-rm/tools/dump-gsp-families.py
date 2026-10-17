@@ -57,35 +57,32 @@ def load_gsp(path):
 
 
 def load_host(path):
-    """Host NVOC export table: 40-byte records, walked as contiguous runs so
-    entries with a NULL pClassInfo are not silently dropped."""
+    """Host NVOC export table: 40-byte records, ``methodId`` at +0x10.
+
+    This mirrors ``extract-nvrm-method-table.py`` on purpose (2026-10-17): the
+    two tools disagreed (589 vs 608 rows) because this one used to walk the
+    binary as *contiguous runs* that additionally required ``0 < flags <=
+    0xFFFFFFF`` and ``access & ~0x3FFFF == 0``.  That dropped every row whose
+    ``flags`` is 0 -- e.g. 0x20801350/0x20801351, two adjacent real rows -- and
+    any row that sits next to a non-conforming gap.  A flat 4-byte scan with
+    the structural predicate below finds the same 608 rows the extractor
+    reports, and finds **no** row in any private clock/voltage family (which is
+    the only claim that matters here).  Keep the two tools in step.
+    """
     data = open(path, "rb").read()
     limit = len(data)
-
-    def rec(off):
-        return (U32.unpack_from(data, off + 8)[0], U32.unpack_from(data, off + 12)[0],
-                U32.unpack_from(data, off + 16)[0], U32.unpack_from(data, off + 20)[0],
-                U64.unpack_from(data, off + 24)[0])
-
-    def valid(off):
-        if off + ENTRY > limit:
-            return False
-        flags, access, mid, psize, _cptr = rec(off)
-        return ((mid & 0xFFFF0000) == 0x20800000 and 0 < psize < 8_000_000
-                and 0 < flags <= 0xFFFFFFF and (access & ~0x3FFFF) == 0)
-
-    host, off = {}, 0
-    while off < limit - ENTRY:
-        if valid(off) and all(valid(off + ENTRY * k) for k in (1, 2, 3)):
-            n = 0
-            while valid(off + ENTRY * n):
-                n += 1
-            for k in range(n):
-                _f, _a, mid, psize, _c = rec(off + ENTRY * k)
-                host.setdefault(mid, psize)
-            off += ENTRY * n
-        else:
-            off += 4
+    host = {}
+    for off in range(0, limit - 40, 4):
+        mid = U32.unpack_from(data, off + 16)[0]
+        psize = U32.unpack_from(data, off + 20)[0]
+        cptr = U64.unpack_from(data, off + 24)[0]
+        if (mid & 0xFFFF0000) != 0x20800000:
+            continue
+        if not 0 < psize < 8_000_000:
+            continue
+        if not 0x1000 <= cptr < limit:
+            continue
+        host.setdefault(mid, psize)
     return host
 
 
@@ -132,14 +129,18 @@ def main():
         nh = sum(1 for m in ids if m in host)
         print("  0x%02x %-28s %6d %6d %6d"
               % (c, CATEGORY_NAMES.get(c, "(no public define)"), len(gets), len(sets), nh))
-    print("# totals: %d GSP rows, %d host-registered, %d GSP-only"
-          % (len(gsp), len(host), len(set(host) - set(gsp))))
+    print("# totals: %d GSP rows, %d host rows, %d ids shared, %d GSP-only"
+          % (len(gsp), len(host), len(set(gsp) & set(host)),
+             len(set(gsp) - set(host))))
     print("#")
     print("# %-8s %-20s %6s %6s %6s   %s"
           % ("byte", "role", "rows", "GET", "SET", "examples"))
     for b in sorted(fam):
-        role = ("read half of cat 0x%02x" % (b & 0x3F) if b & 0x80 else
-                "write half of cat 0x%02x" % (b & 0x3F) if b & 0x40 else
+        # the legacy pair lives in bits 15:14: 10 = read (0x80|c), 11 = write
+        # (0xc0|c).  Testing bit 15 first (as this did) labels every 0xc0|c
+        # row a "read half" -- 0xd0 (the clock SET family) included.
+        role = ("write half of cat 0x%02x" % (b & 0x3F) if (b & 0xC0) == 0xC0 else
+                "read half of cat 0x%02x" % (b & 0x3F) if (b & 0xC0) == 0x80 else
                 "public form of cat 0x%02x" % b)
         ids = sorted(fam[b])
         gets = [m for m in ids if not (m & 0x4000)]
