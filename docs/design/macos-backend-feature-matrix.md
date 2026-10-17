@@ -1263,3 +1263,11 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (6) **预订动作（无代码改动）** ✔：`src/nvx_suite.c:2230` **已有** `0x2080901B @2108 in@4=0xFF bg=A5`（另有 `0x3FF`/`0x1`/`0`）但**从未执行**（现有两份 hex 只含 9019/9025）⇒ 健康会话跑一次即可逐槽读出十二值，**仍不发任何 SET**。
 (7) **`0x3FF` 的实测预测** ✔：目录解出 **10 行**（`rows-as-bits 0x3ff`），行序 id **0,1,4,2,3,20,19,6,21,5**；`0xFF` 只到行 0..7 ⇒ 行 8（id 21 MSD）/行 9（id 5 HOST）此前未被任何掩码读到。
 (8) **设备访问** ✔：本轮**仅一次 wedge 轮询**（`0x62`，uptime `1 day, 4 hrs`，同一 boot）⇒ 未重启、未写入、无性能操作 ✔。
+
+### 本轮追加七十（2026-10-18，阶段 10 第一步：**macOS/非 CUDA 构建适配** ＋ 自造缺陷修复）
+
+(1) **缺口（实测）** ✗：`auto-optimizer` 原先三个 bundling feature **都含 CUDA**（`stressor-bundled` 直接带 `cuda`＋`vulkan`，`default`＝cuda12）⇒ macOS（无 NVAPI/NVML、无 CUDA 运行时）只能 `--no-default-features`，**等于不捆绑 stressor** ⇒ 阶段 10 要求的"非 CUDA 构建适配"缺路径。
+(2) **改法** ✔：把"进程内捆绑"与"后端选择"分开 —— `stressor-bundled` 仅 = `dep:cli-stressor-cuda-rs`（源码所有 cfg 门不变）、`stressor-bundled-cuda` 承载 cuda＋vulkan、cuda11/12 基于它、新增 **`stressor-bundled-vulkan`**；`default` 解析结果与改前**完全一致** ⇒ **保留原默认 feature、无既有构建行为改变** ✔。
+(3) **验证** ✔：`cargo metadata` rc0；Linux 上 vulkan-only 路径 rc0 且 `cudarc` 命中 **0**；external 路径 rc0；默认路径 rc0；fmt／clippy `-D warnings` rc0；两路单测 **66 passed 0 failed**；**真机 macOS** `OGKM=… --no-default-features --features stressor-bundled-vulkan` **65 passed 0 failed**（含写入门控测试真实执行 ok）⇒ **macOS 非 CUDA 捆绑构建链已实测可用** ✔；该 stressor 的 **Vulkan 实际运行仍"已实现待实测"**（wedge ✗）。
+(4) **自造缺陷修复** ✗：`macos_write_gate_follows_the_backend_capability`（本分支 `9ff687f`，我自己引入）断言 `refused == mutates` ⇒ 非 macOS 上恒失败（本机三路 feature 均复现），macOS 上又是同义反复 ⇒ 现改为：门控无效时提前返回、先钉"命令集合非空会改设置"、macOS 上断言四条命令均要求提权（真机实测通过）✔。
+(5) **设备访问** ✔：本轮仅 wedge 轮询一次（`0x62`，uptime `1 day, 4 hrs`，同一 boot）；真机 `cargo test` 为**纯单元测试、不访问设备** ⇒ 未重启、未写入、无性能操作。

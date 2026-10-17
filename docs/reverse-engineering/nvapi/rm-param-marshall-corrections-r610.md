@@ -1267,3 +1267,28 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 `probe-macos-rm/src/nvx_suite.c:2230` **已经有** `{ "domains-get-control 0x2080901B @2108 in@4=0xFF bg=A5", 0x2080901b, 2108, 4, 0xff, 0xa5a5a5a5 }` ✔（另有 `in@4=0x3FF` L2232、`in@4=0x1` L2234、`in@4=0` L2236 ✔），但**现有两份 hex 捕获里没有 2108 那一行** ✗（`clkctl-hex-0925.txt` / `clkctl-hex-recheck.txt` 只含 9019 与 9025 ✔）⇒ **该 case 从未被执行** ✗。
 ⇒ **下一步**：健康会话里跑一次 `--clkctl-hex`，即可逐槽读出十二个值 ✔，**仍不发任何 SET** ✔ ⇒ 这是把"哪个 dword 承载偏移"钉死的最短路径 ✔。
 **顺带✔**：该表里的 `in@4=0x3FF` 已有**实测预测**可对照 ✔——`0x20809019` 目录解出 **10 行**（`rows-as-bits 0x3ff` ✔），行序 id 为 **0,1,4,2,3,20,19,6,21,5** ✔，而 `0xFF` 只到 **行 0..7** ✔ ⇒ 行 8（id 21 MSD）/行 9（id 5 HOST）此前**未被任何掩码读到** ✔。
+
+## 36. 阶段 10 的第一步：macOS/非 CUDA 构建适配（含一处自造测试缺陷的修复）2026-10-18
+
+**选择依据** ✔：原目标阶段 10 的首行是"**macOS optimizer/非 CUDA 构建适配**"✗，并写明"缺少条件继续所有独立代码/测试，不以 dry-run 宣称实测完成"✔；本轮据此做**不依赖 GPU** 的构建层工作 ✔。
+
+### 36.1 缺口（实测）✗
+`auto-optimizer/Cargo.toml` 原先的三个 bundling feature **都含 CUDA**：`stressor-bundled = ["dep:cli-stressor-cuda-rs","cli-stressor-cuda-rs/cuda","cli-stressor-cuda-rs/vulkan"]`、`stressor-bundled-cuda11/12`，而 `default = ["stressor-bundled-cuda12"]` ✔。macOS 既无 NVAPI/NVML 也无 CUDA 运行时 ⇒ **在 macOS 上只能 `--no-default-features`，等于完全不捆绑 stressor** ✗ ⇒ 阶段 10 要求的"非 CUDA 构建适配"缺一条可用路径 ✔。
+### 36.2 改法（保留原默认 feature，不改任何 cfg）✔
+把"是否在进程内捆绑 stressor"与"用哪个后端"分开：
+`stressor-bundled = ["dep:cli-stressor-cuda-rs"]`（源码里所有 `#[cfg(feature = "stressor-bundled")]` 门都不变 ✔）、`stressor-bundled-cuda = ["stressor-bundled","cli-stressor-cuda-rs/cuda","cli-stressor-cuda-rs/vulkan"]`、`stressor-bundled-cuda11/12` 基于它、新增 **`stressor-bundled-vulkan = ["stressor-bundled","cli-stressor-cuda-rs/vulkan"]`** ✔ ⇒ `default` 解析出的 feature 集合与改动前**完全相同**（cuda＋vulkan ✔），无任何既有构建行为改变 ✔。
+### 36.3 验证（本机分析侧 ＋ 真机 macOS）✔
+| 检查 | 结果 |
+|---|---|
+| `cargo metadata`（feature 引用合法） | rc 0 ✔ |
+| `cargo check -p nvoc-auto-optimizer --no-default-features --features stressor-bundled-vulkan`（Linux） | rc 0 ✔，`cargo tree` 中 **`cudarc` 命中数 = 0** ✔ |
+| `cargo check -p nvoc-auto-optimizer --no-default-features --features stressor-external` | rc 0 ✔ |
+| `cargo check -p nvoc-auto-optimizer`（默认，cuda＋vulkan） | rc 0 ✔（未回归 ✔） |
+| `cargo fmt --all -- --check` / `cargo clippy -p nvoc-auto-optimizer --all-targets -- -D warnings` | rc 0 ✔ |
+| `cargo test -p nvoc-auto-optimizer --bin nvoc-auto-optimizer`（默认 / vulkan-only 两路） | **66 passed, 0 failed** ✔✔ |
+| **真机 macOS**：`OGKM=… cargo test -p nvoc-auto-optimizer --no-default-features --features stressor-bundled-vulkan --bin nvoc-auto-optimizer` | **65 passed, 0 failed** ✔✔（含 `macos_write_gate_follows_the_backend_capability ... ok` ✔） |
+⇒ macOS 上**非 CUDA 捆绑 stressor 的构建链已实测可用** ✔；**该 stressor 的 Vulkan 实际运行仍为"已实现待实测"**（wedge 未解除，本轮未跑 ✗）。
+### 36.4 顺带修复：我自造的写入门控测试缺陷 ✗
+`auto-optimizer/src/main.rs` 的 `macos_write_gate_follows_the_backend_capability`（由**本分支 `9ff687f`（我自己的提交）**引入 ✗）断言 `refused == mutates`，而 `refused = cfg!(target_os="macos") && mutates && !write_supported` ✗ ⇒ **非 macOS 主机上 `refused` 恒为 false**，断言必然失败（本机 Linux 上三种 feature 路都复现 ✗），尽管注释自称"在其他 target 上是空转的" ✗；而在 macOS 上该断言又退化为**同义反复** ✗（由公式本身构造出相等 ✗）⇒ 两头都没证明什么 ✔。
+修法 ✔：门控无法生效时**提前返回** ✔；先钉住"被固定的命令集合中至少有一条会改设置"（防止命令表过期导致空转通过 ✔）；在 macOS 上改为断言**非平凡事实**——四条命令都要求提权 ✔。真机 macOS 上该测试**真实执行并通过** ✔（见 36.3 表 ✔）。
+**设备访问**：本轮仅 wedge 轮询一次（`0x00000062`，uptime `1 day, 4 hrs`）；真机那次 `cargo test` 是**纯单元测试、不访问设备** ✔ ⇒ 无写入、无性能操作 ✔。
