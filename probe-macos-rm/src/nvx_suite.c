@@ -226,13 +226,16 @@ int nvx_stage0(nvx_ctx *c)
                  "no NVAccel/NVRM user client — driver loaded? (kmutil showloaded | grep nullmoth)");
         return -1;
     }
-    nvx_emit(c, "V0.1", "open-ctl", 0, NVX_V_OK, "ctl connection opened (fd %d)", c->ctl_fd);
+    nvx_emit(c, "V0.1", "open-ctl", 0, NVX_V_OK, "ctl connection opened (fd %d, service %s)",
+             c->ctl_fd, nvx_service_name());
 
     c->dev_fd = nvx_open(0);
     if (c->dev_fd < 0) {
         nvx_emit(c, "V0.2", "open-dev", 0, NVX_V_SKIP, "no device connection; RUSD map tests limited");
     } else {
-        nvx_emit(c, "V0.2", "open-dev", 0, NVX_V_OK, "device connection opened (fd %d)", c->dev_fd);
+        nvx_emit(c, "V0.2", "open-dev", 0, NVX_V_OK,
+                 "device connection opened (fd %d, service %s)", c->dev_fd,
+                 nvx_service_name());
     }
 
     /* NV_ESC_CARD_INFO needs the ctl connection; also proves esc works. */
@@ -988,6 +991,218 @@ int nvx_stage2_perf_read(nvx_ctx *c)
         return -1;
     }
     item_perf_reads(c);
+    return 0;
+}
+
+static int nvx_id_is_known_set(NvU32 cmd);   /* defined with the SET-id list below */
+
+/* ------------------------------------------------------------------ */
+/* Registered-control read pass (--reg-read)                           */
+/* ------------------------------------------------------------------ */
+/* The live NVOC export table of the loaded NVRM 610.57.04 build can be read
+ * straight out of the Mach-O (probe-macos-rm/tools/extract-nvrm-method-table.py;
+ * archived as outputs/method-table-nvrm-610.57.04.tsv).  Every case below is
+ * a *public* control id sent with exactly the paramSize that table registers,
+ * so this is a metadata-driven GET pass and not a size scan.  It serves two
+ * purposes:
+ *   (a) attest the extracted table end to end -- reaching the handler proves the
+ *       recovered paramSize is the one the build registers, because
+ *       rmapiutilGetControlInfo() rejects any other size with 0x1f *before*
+ *       dispatch (control.c:448-458).  A 0x1f that still comes back at the
+ *       registered size is therefore handler-side input rejection (an empty
+ *       info list, a zero sample count), not a bad size -- the discrimination
+ *       the earlier private-id passes could not make;
+ *   (b) record which of the reachable reads can back stages 3-7 (fan /
+ *       thermal / power / clock / topology).
+ * Read-only by construction: every id is a Get/Info/Status/Samples command and
+ * the whole list is checked against nvx_known_set_ids before being sent.
+ */
+typedef struct {
+    const char *name;
+    NvU32 cmd;
+    unsigned size;
+    const char *src;
+} reg_read_case;
+
+static const reg_read_case nvx_reg_reads[] = {
+    /* anchors: already-characterised reads, kept so the run is self-checking */
+    { "gpu-get-info-v2", 0x20800102u, 580, "live table (exact size)" },
+    { "pmgr-get-module-info", 0x20802609u, 8, "known NV_OK anchor" },
+    { "clk-pmumon-domains", 0x20801037u, 6024, "known 0x56 anchor" },
+    { "internal-pm1-state", 0x20800aceu, 2, "known 0x56 anchor" },
+    { "internal-vpstate-info", 0x20800ad4u, 8, "known 0x56 anchor" },
+    { "internal-boost-sync-info", 0x20800a80u, 16, "known 0x56 anchor" },
+    { "internal-edpp-limit-info", 0x20800afdu, 24, "known 0x56 anchor" },
+    /* topology / capability reads: the missing half of the 776 B domain table */
+    { "internal-gpu-chip-info", 0x20800a36u, 88, "topology" },
+    { "internal-device-info-table", 0x20800a40u, 24580, "capability table" },
+    { "internal-memsys-static-config", 0x20800a1cu, 40, "memory topology" },
+    { "internal-gpu-hfrp-info", 0x20800a7au, 40, "PM table" },
+    { "kgr-get-info", 0x20801201u, 32, "graphics topology" },
+    { "kgr-get-gfx-gpc-tpc-info", 0x20801239u, 24, "GPC/TPC topology" },
+    { "kgr-get-gpc-mask", 0x2080122au, 24, "GPC topology" },
+    { "fb-get-info-v2", 0x20801303u, 1028, "FB/memory topology" },
+    { "fb-get-static-bar1-info", 0x20801354u, 24, "BAR1 topology" },
+    { "timer-gpu-cpu-correlation", 0x20800406u, 264, "clock correlation" },
+    /* perf read surface at its registered sizes */
+    { "perf-level-info-v2", 0x2080200bu, 780, "perf levels" },
+    { "perf-get-powerstate", 0x2080205au, 4, "power state" },
+    { "perf-get-current-pstate", 0x20802068u, 4, "P-state" },
+    { "perf-get-vid-eng-perfmon", 0x20802087u, 12, "engine busy meters" },
+    { "perf-get-gpumon-util-samples", 0x20802096u, 55888, "util samples" },
+};
+
+int nvx_stage2_reg_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.reg", "reg-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+
+    unsigned buflen = 0;
+    for (unsigned i = 0; i < sizeof nvx_reg_reads / sizeof nvx_reg_reads[0]; ++i)
+        if (nvx_reg_reads[i].size > buflen) buflen = nvx_reg_reads[i].size;
+    unsigned char *buf = malloc(buflen);
+    if (!buf) {
+        nvx_emit(c, "V2.reg", "reg-read", 0, NVX_V_HARD, "buffer alloc failed");
+        return -1;
+    }
+
+    for (unsigned i = 0; i < sizeof nvx_reg_reads / sizeof nvx_reg_reads[0]; ++i) {
+        const reg_read_case *k = &nvx_reg_reads[i];
+        if (nvx_id_is_known_set(k->cmd)) {
+            nvx_emit(c, "V2.reg", k->name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a documented SET id", k->cmd);
+            continue;
+        }
+        memset(buf, 0, k->size);
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  k->cmd, buf, k->size);
+        unsigned nz = 0, first_nz = 0, last_nz = 0;
+        for (unsigned o = 0; o < k->size; ++o)
+            if (buf[o]) { ++nz; if (!first_nz) first_nz = o; last_nz = o; }
+        nvx_emit(c, "V2.reg", k->name, st,
+                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "cmd 0x%08x size %u (%s) -> non-zero %u B, first @%u last @%u; "
+                 "head %02x %02x %02x %02x %02x %02x %02x %02x",
+                 k->cmd, k->size, k->src, nz, first_nz, last_nz,
+                 buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]);
+    }
+    free(buf);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Perf-level clock-range read (--clklevel-read)                       */
+/* ------------------------------------------------------------------ */
+/* NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2 (0x2080200b) is the one clock-shaped
+ * command the loaded 610.57.04 build *registers* at a fixed size, and that
+ * size is exactly the published parameter block:
+ *
+ *   NV2080_CTRL_PERF_GET_LEVEL_INFO_V2_PARAMS {
+ *       NvU32 level;                     // 0 standard, 1 conservative,
+ *       NvU32 flags;                     // 2 aggressive; TYPE 0:0,
+ *       NV2080_CTRL_PERF_GET_CLK_INFO perfGetClkInfoList[32];  // MODE 2:1
+ *       NvU32 perfGetClkInfoListSize;
+ *   };                                   // 4 + 4 + 32*24 + 4 = 780
+ *   NV2080_CTRL_PERF_GET_CLK_INFO {
+ *       NvU32 flags, domain, currentFreq, defaultFreq, minFreq, maxFreq;
+ *   };                                   // 24 B
+ *
+ * (ctrl2080perf.h:678-696, 651-658.)  The record array has the same
+ * 8 B-header + 32x24 B shape as the unattributed 0x20809061 @776 table, but
+ * here the identity is *proven*: the id is in the driver's own NVOC export
+ * table, so the reply is a first-class RM answer and every record field can be
+ * named from the SDK header instead of guessed.  The pass asks for the three
+ * published levels, one capacity-preset variant, and the TYPE_OVERCLOCK flag
+ * bit, then decodes per-domain current/default/min/max -- the "current value
+ * + range" evidence stages 4/6/7 were still missing.
+ * Read-only: the table registers no SET twin for this id (GET_LEVEL_INFO_V2
+ * only), and the pass writes nothing but the two input dwords.
+ */
+typedef struct {
+    const char *name;
+    NvU32 level;
+    NvU32 flags;
+    NvU32 list_size_in;    /* perfGetClkInfoListSize as sent */
+} clk_level_case;
+
+static const clk_level_case nvx_clk_levels[] = {
+    { "lvl=standard     flags=0",            0, 0x0,  0 },
+    { "lvl=conservative flags=0",            1, 0x0,  0 },
+    { "lvl=aggressive   flags=0",            2, 0x0,  0 },
+    { "lvl=standard     listSize=32",        0, 0x0, 32 },
+    { "lvl=standard     flags=overclock",    0, 0x1,  0 },
+    { "lvl=aggressive   flags=oc|maxperf",   2, 0x1 | 0x4, 0 },
+};
+
+int nvx_stage2_clk_level_read(nvx_ctx *c)
+{
+    const NvU32 cmd = 0x2080200bu;
+    enum { SZ = 780 };
+
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.clklevel", "perf-get-level-info-v2", 0, NVX_V_SKIP,
+                 "RM chain not open");
+        return -1;
+    }
+    if (nvx_id_is_known_set(cmd)) {
+        nvx_emit(c, "V2.clklevel", "perf-get-level-info-v2", 0, NVX_V_HARD,
+                 "REFUSED: 0x%08x is a documented SET id", cmd);
+        return -1;
+    }
+
+    unsigned char buf[SZ];
+    unsigned ncases = sizeof nvx_clk_levels / sizeof nvx_clk_levels[0];
+    for (unsigned k = 0; k < ncases; ++k) {
+        const clk_level_case *q = &nvx_clk_levels[k];
+        memset(buf, 0, sizeof buf);
+        memcpy(buf + 0, &q->level, 4);
+        memcpy(buf + 4, &q->flags, 4);
+        memcpy(buf + 776, &q->list_size_in, 4);
+
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  cmd, buf, sizeof buf);
+
+        NvU32 out_size = 0, out_flags = 0, filled = 0;
+        memcpy(&out_flags, buf + 4, 4);
+        memcpy(&out_size, buf + 776, 4);
+        for (unsigned i = 0; i < 32; ++i) {
+            NvU32 d, cur, def, mn, mx, fl;
+            const unsigned char *r = buf + 8 + 24 * i;
+            memcpy(&fl, r + 0, 4);
+            memcpy(&d, r + 4, 4);
+            memcpy(&cur, r + 8, 4);
+            memcpy(&def, r + 12, 4);
+            memcpy(&mn, r + 16, 4);
+            memcpy(&mx, r + 20, 4);
+            if (!fl && !d && !cur && !def && !mn && !mx) continue;
+            ++filled;
+        }
+        nvx_emit(c, "V2.clklevel", q->name, st,
+                 st == 0 ? (filled ? NVX_V_OK : NVX_V_REJECTED) : NVX_V_REJECTED,
+                 "cmd 0x%08x size %u in(level=%u flags=0x%x listSize=%u) -> "
+                 "out flags 0x%08x listSize %u; %u of 32 clk-info records "
+                 "non-zero", cmd, (unsigned)SZ, q->level, q->flags,
+                 q->list_size_in, out_flags, out_size, filled);
+        if (st != 0) continue;
+
+        for (unsigned i = 0; i < 32; ++i) {
+            NvU32 fl, d, cur, def, mn, mx;
+            const unsigned char *r = buf + 8 + 24 * i;
+            memcpy(&fl, r + 0, 4);
+            memcpy(&d, r + 4, 4);
+            memcpy(&cur, r + 8, 4);
+            memcpy(&def, r + 12, 4);
+            memcpy(&mn, r + 16, 4);
+            memcpy(&mx, r + 20, 4);
+            if (!fl && !d && !cur && !def && !mn && !mx) continue;
+            nvx_emit(c, "V2.clklevel", q->name, st, NVX_V_OK,
+                     "  clk[%2u] flags=0x%08x domain=0x%08x current=%u kHz "
+                     "(%.3f MHz) default=%u min=%u max=%u kHz", i, fl, d, cur,
+                     (double)cur / 1000.0, def, mn, mx);
+        }
+    }
     return 0;
 }
 

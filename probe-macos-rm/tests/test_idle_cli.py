@@ -14,6 +14,11 @@ FAKE_SUITE = r"""
 
 static int transport, chain, telemetry;
 
+/* Transport-selector symbols main.c links against (see --service). */
+int nvx_service_pref;
+const char *nvx_service_name(void) { return "(fake)"; }
+
+
 int nvx_stage0(nvx_ctx *c) {
     if (transport++) abort();
     puts("FAKE transport");
@@ -64,6 +69,16 @@ int nvx_stage2_pm_read(nvx_ctx *c) {
 int nvx_stage2_perf_read(nvx_ctx *c) {
     if (!chain || !c->hSubdevice) abort();
     puts("FAKE perfread");
+    return 0;
+}
+int nvx_stage2_reg_read(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE regread");
+    return 0;
+}
+int nvx_stage2_clk_level_read(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE clklevel");
     return 0;
 }
 int nvx_stage2_clk_read(nvx_ctx *c) {
@@ -236,6 +251,22 @@ class IdleCli(unittest.TestCase):
         self.assertEqual(asked.returncode, 0, asked.stderr)
         self.assertEqual(asked.stdout.count("FAKE perfread"), 1)
 
+    def test_reg_reads_are_explicit_opt_in(self):
+        plain = self.run_cli("--stages", "012")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertNotIn("FAKE regread", plain.stdout)
+        asked = self.run_cli("--stages", "0", "--reg-read")
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        self.assertEqual(asked.stdout.count("FAKE regread"), 1)
+
+    def test_clklevel_reads_are_explicit_opt_in(self):
+        plain = self.run_cli("--stages", "012")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertNotIn("FAKE clklevel", plain.stdout)
+        asked = self.run_cli("--stages", "0", "--clklevel-read")
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        self.assertEqual(asked.stdout.count("FAKE clklevel"), 1)
+
     def test_clkvf_reads_are_explicit_opt_in(self):
         plain = self.run_cli("--stages", "012")
         self.assertEqual(plain.returncode, 0, plain.stderr)
@@ -284,6 +315,18 @@ class IdleCli(unittest.TestCase):
         for spec in ("GLOBAL", "GLOBAL:BOGUS", "BOGUS:EXCEED", "9:1", "1:9", ":"):
             with self.subTest(spec=spec):
                 result = self.run_cli("--write", "--rated-tdp-set", spec)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertNotIn("FAKE", result.stdout)
+
+    def test_service_selector_is_validated_before_transport(self):
+        for value in ("nvrm", "nvaccel", "auto"):
+            with self.subTest(value=value):
+                result = self.run_cli("--stages", "0", "--service", value)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("FAKE transport", result.stdout)
+        for value in ("bogus", "NVRM", ""):
+            with self.subTest(value=value):
+                result = self.run_cli("--stages", "0", "--service", value)
                 self.assertEqual(result.returncode, 2, result.stderr)
                 self.assertNotIn("FAKE", result.stdout)
 

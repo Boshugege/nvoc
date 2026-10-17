@@ -78,6 +78,16 @@ int nvx_stage2_pm_read(nvx_ctx *c);
  * GETs plus explicit SKIPs for the ones this transport cannot or must not
  * send (kernel-pointer v1 level info, the state-changing GPU_IS_IDLE). */
 int nvx_stage2_perf_read(nvx_ctx *c);
+/* Read-only pass over the control ids the loaded NVRM *actually registers*,
+ * each sent at exactly the paramSize recovered from its NVOC export table
+ * (probe-macos-rm/tools/extract-nvrm-method-table.py).  Metadata-driven, so
+ * it is not a size scan; SET ids are refused before sending. */
+int nvx_stage2_reg_read(nvx_ctx *c);
+/* Read-only PERF_GET_LEVEL_INFO_V2 (0x2080200b @780) pass: the one
+ * clock-shaped command this build *registers*, queried across the three
+ * published levels and the TYPE_OVERCLOCK flag, decoded as per-domain
+ * {current, default, min, max} kHz so the clock range has a named source. */
+int nvx_stage2_clk_level_read(nvx_ctx *c);
 /* Explicit, read-only private ClockClient / VfPoints / PerfVfe GET census:
  * the read half of the same wires the Windows backend uses for clock-domain
  * and V/F reads. Scans candidate paramSize values (the driver answers

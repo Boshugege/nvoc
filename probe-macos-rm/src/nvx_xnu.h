@@ -20,6 +20,17 @@
 #include <stddef.h>
 #include "nvtypes.h"
 
+/*
+ * Which user client the transport opens: 0 = auto (NVAccel first, NVRM
+ * fallback, the nvrm_xnu_open() order), 1 = NVRM only, 2 = NVAccel only.
+ * Distinct kexts answer the same RM control, so pinning one is how the
+ * *answerer* of an id is compared (see the method-table note).  Set from
+ * --service by main.c.
+ */
+extern int nvx_service_pref;
+/* Name of the service the last successful nvx_open() bound to. */
+const char *nvx_service_name(void);
+
 /* fds returned by nvx_open are small integers usable as array indexes. */
 int   nvx_open(int ctl);            /* ctl != 0 -> "ctl" connection */
 int   nvx_close(int fd);

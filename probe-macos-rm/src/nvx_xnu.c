@@ -4,6 +4,8 @@
 #include <string.h>
 #include <errno.h>
 
+int nvx_service_pref;   /* 0 auto, 1 NVRM, 2 NVAccel; set by --service */
+
 #if defined(__APPLE__) && !defined(NVX_LINT)
 
 #include <IOKit/IOKitLib.h>
@@ -18,11 +20,14 @@
 enum { SEL_GO = 0, SEL_ESC = 1, SEL_GETFD = 2, SEL_BINDFD = 3 };
 
 static io_connect_t gConn[NVX_MAX_FD];
+static const char  *g_service = "(none)";
 
 static io_connect_t conn_of(int fd)
 {
     return (fd >= 0 && fd < NVX_MAX_FD) ? gConn[fd] : 0;
 }
+
+const char *nvx_service_name(void) { return g_service; }
 
 static int open_service(const char *name, uint32_t type, io_connect_t *out)
 {
@@ -37,17 +42,26 @@ int nvx_open(int ctl)
 {
     uint32_t type = ctl ? 0u : 1u;   /* 0 = ctl-equivalent, 1 = device-equivalent */
     io_connect_t conn = 0;
+    const char *which = NULL;
 
-    /* NVAccel first (0x4E560000|type), NVRM fallback (plain type) — the
-     * exact preference order nvrm_xnu_open() uses. */
-    if (open_service("NVAccel", 0x4E560000u | type, &conn) ||
-        open_service("NVRM", type, &conn)) {
-        /* fall through */
-    } else {
+    /* Default: NVAccel first (0x4E560000|type), NVRM fallback (plain type) —
+     * the exact preference order nvrm_xnu_open() uses.  --service pins one so
+     * the two kexts can be compared on the same control id. */
+    if (nvx_service_pref == 1) {
+        if (open_service("NVRM", type, &conn)) which = "NVRM";
+    } else if (nvx_service_pref == 2) {
+        if (open_service("NVAccel", 0x4E560000u | type, &conn)) which = "NVAccel";
+    } else if (open_service("NVAccel", 0x4E560000u | type, &conn)) {
+        which = "NVAccel";
+    } else if (open_service("NVRM", type, &conn)) {
+        which = "NVRM";
+    }
+    if (!conn) {
         fprintf(stderr, "nvx: no NVAccel and no NVRM service is present\n");
         errno = ENODEV;
         return -1;
     }
+    g_service = which;
 
     int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
     if (fd < 0 || fd >= NVX_MAX_FD) {
@@ -164,6 +178,7 @@ int nvx_unmap_memory_fd(int fd, void *addr)
 
 #else /* !__APPLE__ || NVX_LINT — off-target stubs, compile-check only */
 
+const char *nvx_service_name(void) { return "(off-target)"; }
 int nvx_open(int ctl)            { (void)ctl; return -1; }
 int nvx_close(int fd)            { (void)fd; return 0; }
 int nvx_esc(int fd, uint32_t cmd, void *data, uint32_t size)

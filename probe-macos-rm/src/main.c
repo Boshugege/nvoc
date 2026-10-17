@@ -106,6 +106,15 @@ static void usage(void)
         "                   mapping, boost-sync info; SET twins are not sent)\n"
         "  --thermal-read   read-only THERMAL_SYSTEM_EXECUTE_V2 GET batch\n"
         "                   (sensor count/readings/ranges; public opcodes)\n"
+        "  --service S      pin the user client: nvrm | nvaccel | auto (default\n"
+        "                   auto = NVAccel first, NVRM fallback); read-only, picks\n"
+        "                   which kext answers the same control id\n"
+        "  --reg-read       read-only pass over the ids the loaded NVRM really\n"
+        "                   registers, each at its live NVOC paramSize (exact\n"
+        "                   metadata, not a size scan; SET ids refused)\n"
+        "  --clklevel-read  read-only PERF_GET_LEVEL_INFO_V2 (0x2080200b\n"
+        "                   @780) across levels/overclock flag; decodes\n"
+        "                   per-domain current/default/min/max kHz\n"
         "  --perf-read      read-only perf/pmgr read-surface census: remaining\n"
         "                   public GETs (module info, video-engine perfmon) plus\n"
         "                   explicit skips for the ones that cannot be sent\n"
@@ -137,7 +146,8 @@ int main(int argc, char **argv)
     const char *jsonl_path = NULL;
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
-    int thermal_read = 0, pm_read = 0, perf_read = 0, clkvf_read = 0;
+    int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
+    int clklevel_read = 0, clkvf_read = 0;
     int clkdoc_read = 0;
     int clkobj_read = 0;
     int clk_track_sec = 0;
@@ -168,6 +178,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--thermal-read")) thermal_read = 1;
         else if (!strcmp(argv[i], "--pm-read")) pm_read = 1;
         else if (!strcmp(argv[i], "--perf-read")) perf_read = 1;
+        else if (!strcmp(argv[i], "--clklevel-read")) clklevel_read = 1;
+        else if (!strcmp(argv[i], "--reg-read")) reg_read = 1;
         else if (!strcmp(argv[i], "--clkvf-read")) clkvf_read = 1;
         else if (!strcmp(argv[i], "--clkdoc-read")) clkdoc_read = 1;
         else if (!strcmp(argv[i], "--clkobj-read")) clkobj_read = 1;
@@ -182,6 +194,13 @@ int main(int argc, char **argv)
                 return 2;
             }
             rated_tdp_set = 1;
+        }
+        else if (!strcmp(argv[i], "--service") && i + 1 < argc) {
+            const char *v = argv[++i];
+            if (!strcmp(v, "nvrm")) nvx_service_pref = 1;
+            else if (!strcmp(v, "nvaccel")) nvx_service_pref = 2;
+            else if (!strcmp(v, "auto")) nvx_service_pref = 0;
+            else { fprintf(stderr, "invalid --service (want nvrm|nvaccel|auto)\n"); return 2; }
         }
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
         else if (!strcmp(argv[i], "--help")) { usage(); return 0; }
@@ -284,6 +303,16 @@ int main(int argc, char **argv)
     if (perf_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_perf_read(&g_ctx) != 0) rc = 1;
+    }
+
+    if (reg_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_reg_read(&g_ctx) != 0) rc = 1;
+    }
+
+    if (clklevel_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_clk_level_read(&g_ctx) != 0) rc = 1;
     }
 
     if (clkvf_read) {
