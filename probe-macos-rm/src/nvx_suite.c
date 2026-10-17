@@ -1568,9 +1568,9 @@ int nvx_stage2_clkctl_read(nvx_ctx *c)
         }
         if (nvx_id_is_known_wedge(k->cmd)) {
             nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_HARD,
-                     "REFUSED: 0x%08x latched the GSP wedge on 2026-10-17 "
-                     "(all-zero block was enough); single deliberate action "
-                     "only, never part of a battery", k->cmd);
+                     "REFUSED: 0x%08x latched the GSP wedge on 2026-10-17; "
+                     "id and payload cannot be separated, so it is never sent "
+                     "by a battery (single deliberate action only)", k->cmd);
             continue;
         }
 
@@ -1886,14 +1886,16 @@ static int nvx_id_is_known_set(NvU32 cmd)
     return 0;
 }
 
-/* Ids whose *request* takes the GSP's legacy path down for the whole session,
- * independently of the payload.  0x20809026 @5332 (ClkFreqController status)
- * did exactly that on 2026-10-17 with an all-zero 5332-byte block: the call
+/* Ids that took the GSP's legacy path down for the whole session.
+ * 0x20809026 @5332 (ClkFreqController status) did it on 2026-10-17: the call
  * returned 0x65 NV_ERR_TIMEOUT and every later legacy-forwarded id answered
  * 0x62 NV_ERR_RESET_REQUIRED until a reboot (see
  * docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md §6).
- * 0x2080901c @808 also timed out, but that one was survivable, so it is not
- * listed here -- it is simply never sent by a battery either.
+ * That run used an 0xA5A5A5A5-filled block, and no experiment separates "this
+ * id" from "that content", so the id is refused regardless of payload instead
+ * of being retried with a "safer" background.  0x2080901c @808 also timed out,
+ * but that one was survivable; it is not listed here only because nothing in
+ * the battery sends it.
  *
  * These are refused before the buffer is even built.  A deliberate single
  * attempt is a separate, explicitly-gated action, not a probe case. */

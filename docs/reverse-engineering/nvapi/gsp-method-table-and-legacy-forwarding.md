@@ -256,16 +256,37 @@ Two things follow that change the plan:
 
 ## 6. Safety: a bad private GET can wedge the GSP for the session
 
-Observed 2026-10-17, in order, all read-only, same user client:
+Observed 2026-10-17, in order, all read-only, same user client. The run used
+the **pre-hardening** `--clkctl-offsweep`, whose part (b) filled every block
+with `0xA5A5A5A5` (the `seed@+-1` in the log means "no seed offset", not "zero
+background"; the `a5a5a5a5 > ...` dumps on the `0x2080901d`/`0x20809025` lines
+are that background):
 
 ```
-0x2080901c @808   (0xA5 background) -> 0x65 NV_ERR_TIMEOUT
-0x20809026 @5332  (0xA5 background) -> 0x65 NV_ERR_TIMEOUT
-then, for the rest of the session:
+0x2080901a @2052   (0xA5) -> 0x1f NV_ERR_INVALID_ARGUMENT
+0x2080901c @808    (0xA5) -> 0x65 NV_ERR_TIMEOUT          <- survives
+0x2080901d @32680  (0xA5) -> NV_OK                        <- still fine
+0x20809025 @7188   (0xA5) -> NV_OK                        <- still fine
+0x20809026 @5332   (0xA5) -> 0x65 NV_ERR_TIMEOUT          <- latches the wedge
+then, for the rest of the session, every legacy-forwarded id:
 0x20809019 @12336 -> 0x62 NV_ERR_RESET_REQUIRED
 0x20809061 @776   -> 0x62 NV_ERR_RESET_REQUIRED
 NV00DE RUSD page  -> 0x62 NV_ERR_RESET_REQUIRED
 ```
+
+Two lessons, both of which change the runbook:
+
+* the `0x65 TIMEOUT` of `0x2080901c @808` was **survivable** — the next two
+  private GETs answered `NV_OK` after it. A timeout is therefore not always
+  fatal, which is exactly why the rule has to be "stop at the first one"
+  rather than "one more try is fine".
+* the fatal request was `0x20809026 @5332` **with an `0xA5`-filled block**, and
+  there is **no experiment that separates "this id" from "this content"**:
+  `0x20809026` has never been read with a zeroed block, and `0x20809025` (its
+  info sibling) is perfectly happy with `0xA5` *and* with zeros. Safety-wise
+  the ambiguity is resolved the conservative way — the id is treated as a
+  hazard **regardless of payload** and refused outright, rather than being
+  retried with a "safer" background.
 
 The state did not clear on its own over 40+ minutes and with new user clients.
 Only a driver reload / reboot resets it; both are **out of bounds** for this
@@ -275,9 +296,11 @@ effort, so no attempt was made. The host stayed healthy throughout
 Because of this, `--clkctl-offsweep` no longer fills any id except `0x2080901b`
 with a non-zero background (the one id that provably rejects bad content with
 `0x25` instead of timing out), and the value containers are read with a zeroed
-block only.
+block only. Ids whose size is accepted with *either* background so far:
+`0x20809019`, `0x20809025`, `0x20809061` (zeroed), and `0x2080901b`, `0x2080901d`,
+`0x20809025` (`0xA5`).
 
-**This is a hard safety boundary for the whole clock-offset campaign**: three
+**This is a hard safety boundary for the whole clock-offset campaign**: two
 read-only GETs were enough to take the GSP's legacy path down for the session,
 without any SET being sent. Any further probe of this family has to treat a
 `0x65 TIMEOUT` as "stop immediately", not "retry with a different size".
@@ -331,17 +354,24 @@ python3 tools/extract-gsp-method-table.py \
 
 * a container that returns the **current** per-domain offset. Candidates, in
   the order they should be tried once the GSP is alive again:
-  1. `0x20809026 @5332` (freq-controller **status**, the natural status half of
-     §5.1's info container) — with a **zeroed** block only. Every previous
-     attempt used a `0xA5A5A5A5` background and is therefore void (see §6);
-     `5332 = 84 + 32x164` is the only header/stride split that puts the records
-     on 4-byte boundaries.
-  2. `0x2080901b @2108` re-read with the §4 `+4` mask and a **zeroed**
+  1. `0x2080901b @2108` re-read with the §4 `+4` mask and a **zeroed**
      background, to check whether the `08`/`09` records are really
-     "types only" or whether a single-sourced mask leaves fields the `0xA5`
-     sweep could not distinguish from a driver-zeroed word.
-  3. `0x2080901a @2052` (`4 + 32x64`) — same record shape as §4 with a 4-byte
-     head; never read with a zeroed block.
+     "types only" or whether a single-sourced mask leaves fields that the
+     `0xA5` sweep could not distinguish from a driver-zeroed word.
+  2. `0x2080901d @32680` with a zeroed block (it answered `NV_OK` with an
+     `0xA5` background; the header is `+0` low byte `0xff`, `+4 = 0x07ffffff`
+     and the records carry small fields such as `0x00850085` /
+     `0x00ff0093`), to see the actual values rather than the A5 overlay.
+  3. *Not* a candidate: `0x20809026 @5332`. It latched the wedge of §6, and
+     because "the id" cannot be separated from "the `0xA5` content" (see §6)
+     it must not be sent as part of a read battery at all. If it is ever tried
+     again it has to be a single, deliberate, last request of a session, with
+     the user told that the private path may die for the rest of the session.
+     `0x2080901a @2052` is also out of the battery: an `0xA5` block returned
+     `0x1f`, and the zeroed form has never been tried, so its size alone is
+     evidently not what the GSP wants.
+  4. `0x2080901c @808` is likewise *not* a battery case: it timed out once
+     (survivably), and removing it costs nothing.
 * the **write** half: `0x2080d01c @2108` (§5.2). Not sent, and not sendable
   until the GET half yields current/limit/state. The step granularity is still
   unknown (the `+/-18750 kHz` pair is the *range*, not a step), so the
