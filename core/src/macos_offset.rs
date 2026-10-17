@@ -46,11 +46,24 @@ pub const OFFSET_CONTROL_BYTES: usize = 2_108;
 const OFFSET_CONTROL_HEAD_BYTES: usize = 60;
 const OFFSET_CONTROL_RECORD_BYTES: usize = 64;
 const OFFSET_CONTROL_RECORDS: usize = 32;
-/// Dword index of the selection mask inside the control header. Seeding this
-/// field is what makes the handler report `NV_OK`; seeding it with anything
-/// else yields `NV_ERR_INVALID_DATA`, so it is the one header field whose
-/// meaning is confirmed by experiment rather than by inspection.
-const OFFSET_CONTROL_MASK_DWORD: usize = 1;
+/// Dword index of the selection mask inside the control header.
+///
+/// This is an *input*: the handler reads it, writes only the records whose bit
+/// is set, and does not write the field back. Two consequences. First, the value
+/// is load-bearing rather than informational -- seeding `0xFF` here is what
+/// makes the handler answer `NV_OK` with records in it, while seeding `0xFF` at
+/// the neighbouring dwords yields `NV_ERR_INVALID_DATA` (measured by the probe's
+/// seed sweep). Second, a zeroed block asks for nothing, so a caller that wants
+/// the current values must seed this field before the call; the native read path
+/// does (`NVOC_RM_OFFSET_CONTROL_MASK` in `core/native/macos_rm.c`).
+///
+/// The bits select *directory entries by index*, not domains by their stamped
+/// bit: a mask of `0xFF` selects the eight entries at indices 0..7 and the
+/// recorded run writes 106 dwords, which is exactly the 14 header dwords plus
+/// seven 13-dword records plus the one stamp-only record at index 6. Reading the
+/// mask as domain bits instead would select seven value-carrying entries
+/// (indices 0,1,2,3,4,5,7 for bits 0..6) and predict 105.
+pub const OFFSET_CONTROL_MASK_DWORD: usize = 1;
 /// Byte offsets, inside a control record, of the twelve dwords the handler
 /// writes. The gaps (`+4`, `+48`, `+60`) are never written and are therefore
 /// not carried: a 0xA5 pre-seed left them untouched.
@@ -363,6 +376,26 @@ mod tests {
         assert_eq!(parsed.records.len(), 1);
         assert_eq!(parsed.records[0].index, 0);
         assert_eq!(parsed.records[0].type_stamp, 0);
+    }
+
+    #[test]
+    fn a_block_whose_mask_was_never_seeded_reports_no_record() {
+        // The shape a caller gets from a zeroed buffer: the handler writes only
+        // the records the mask selects, and this block's mask says "none". The
+        // record bytes are filled anyway, because a driver that wrote everything
+        // regardless would look identical here -- which is the point: with no
+        // selection there is no way to tell a real value from a filler byte, so
+        // reporting nothing is the only honest answer. This is why the native
+        // read path seeds the mask instead of sending a zeroed block.
+        let mut writes = vec![(4, 0)];
+        let at = OFFSET_CONTROL_HEAD_BYTES;
+        writes.push((at, 0x0808));
+        for (n, off) in OFFSET_VALUE_BYTES.iter().enumerate() {
+            writes.push((at + off, 0x2000 + n as u32));
+        }
+        let parsed = parse_control(&block(OFFSET_CONTROL_BYTES, &writes)).unwrap();
+        assert_eq!(parsed.mask, 0);
+        assert!(parsed.records.is_empty(), "{:?}", parsed.records);
     }
 
     #[test]

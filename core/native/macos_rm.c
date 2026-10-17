@@ -598,9 +598,25 @@ static const struct {
     {0x2080901bu, 2108u},  /* domain control: the current values */
 };
 
+/* Byte offset of the control block's record-selection mask. The handler does not
+ * fill this field: it *reads* it and writes back only the records the mask
+ * selects, leaving the caller's value in place. A zeroed buffer therefore asks
+ * for nothing and a zero status can still come back with no record at all, which
+ * is exactly the shape that would make "the offset is zero" unfalsifiable.
+ * 0xFF is the value the probe measured: it selects the eight entries at
+ * directory indices 0..7 and returns 106 written dwords (14 header + 7x13 value
+ * dwords + 1 stamp-only), while seeding any other offset with 0xFF returns
+ * 0x25 (NV_ERR_INVALID_DATA). The device lists ten entries, so this selection
+ * deliberately stops at index 7 -- that extent is what has been measured; a
+ * wider mask has not. */
+#define NVOC_RM_OFFSET_CONTROL_MASK_OFFSET 4u
+#define NVOC_RM_OFFSET_CONTROL_MASK 0xffu
+
 uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *s, uint32_t kind, void *out, size_t size,
                                       char *error, size_t cap)
 {
+    uint32_t status;
+
     if (!s || !out) return failure(error, cap, "session offset without buffers", UINT32_MAX);
     if (kind >= NVOC_RM_OFFSET_KINDS) return failure(error, cap, "session offset kind", UINT32_MAX);
     if (size != offset_commands[kind].bytes)
@@ -608,8 +624,11 @@ uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *s, uint32_t kind, void *o
     /* The caller reads the payload only on a zero return, so a refusal must not
      * leave a stale or half-filled block where a parser could find one. */
     memset(out, 0, size);
-    return nvx_rm_control(s->ctl, s->client, s->subdevice, offset_commands[kind].cmd, out,
-                          offset_commands[kind].bytes);
+    if (kind == NVOC_RM_OFFSET_CONTROL)
+        *(uint32_t *) ((char *) out + NVOC_RM_OFFSET_CONTROL_MASK_OFFSET) = NVOC_RM_OFFSET_CONTROL_MASK;
+    status = nvx_rm_control(s->ctl, s->client, s->subdevice, offset_commands[kind].cmd, out,
+                            offset_commands[kind].bytes);
+    return status;
 }
 
 uint32_t nvoc_macos_rm_session_close(nvoc_rm_session *s, char *error, size_t cap)

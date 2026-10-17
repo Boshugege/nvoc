@@ -251,3 +251,87 @@ fn native_and_rust_abi_layouts_agree() {
     // the extern declaration in core/src/macos_rm.rs cannot drift silently.
     assert_eq!(native_abi_layout().unwrap(), abi_layout());
 }
+
+/// The offset channel, as the hardware actually answers it. This is the test to
+/// run first after a restart, because it is the only one that can produce the
+/// current-offset reading rather than a plausible zero, and because it exercises
+/// the seeded selection mask: the handler writes back only the records the mask
+/// selects, so a read path that sent a zeroed block would come back `NV_OK` with
+/// nothing in it.
+///
+/// It asserts the *shape* a live answer must have, not the numbers: the values
+/// are printed, so a capture of this test is the evidence and a changed constant
+/// cannot hide inside an assertion.
+#[test]
+#[ignore = "requires a NullMoth GPU whose GSP is not in the reset-required state"]
+fn the_offset_channel_reports_domains_records_and_its_own_window() {
+    use nvoc_core::macos_offset::OffsetBlockRead;
+
+    let _serial = serial();
+    let mut session = MacosRmSession::open().expect(
+        "open an RM session (0x62 here is a GSP that wants a reset, not a missing command)",
+    );
+    let snapshot = session
+        .read_offset_channel()
+        .expect("one refused block must not refuse the channel");
+    println!("{snapshot:#?}");
+    let refused = |what: &str, status: u32| {
+        println!("{what} refused with {status:#010x} (0x62 = the GSP needs a reset)");
+    };
+
+    match &snapshot.directory {
+        OffsetBlockRead::Parsed(directory) => {
+            assert!(
+                !directory.entries.is_empty(),
+                "a parsed directory lists the domains it has"
+            );
+            assert_eq!(
+                directory
+                    .entries
+                    .iter()
+                    .map(|entry| entry.index)
+                    .collect::<Vec<_>>(),
+                (0..directory.entries.len()).collect::<Vec<_>>(),
+                "entries are reported in index order"
+            );
+        }
+        OffsetBlockRead::Refused(status) => refused("directory 0x20809019", *status),
+        OffsetBlockRead::Malformed(err) => panic!("directory malformed: {err:?}"),
+    }
+
+    match &snapshot.range {
+        OffsetBlockRead::Parsed(range) => {
+            for record in &range.records {
+                println!(
+                    "range record {}: {}..{} kHz (tag {:#010x})",
+                    record.index, record.min_khz, record.max_khz, record.tag
+                );
+            }
+        }
+        OffsetBlockRead::Refused(status) => refused("range 0x20809025", *status),
+        OffsetBlockRead::Malformed(err) => panic!("range malformed: {err:?}"),
+    }
+
+    match &snapshot.control {
+        OffsetBlockRead::Parsed(control) => {
+            // Non-zero because the read path seeds it; the handler does not
+            // write this field, so it is the caller's request echoed back.
+            assert_ne!(
+                control.mask, 0,
+                "the read path must ask for records, not read a zeroed block"
+            );
+            assert!(
+                !control.records.is_empty(),
+                "a mask the handler accepted must come back with the records it selected"
+            );
+            for record in &control.records {
+                println!(
+                    "control record {} stamp {:#06x}: {:?}",
+                    record.index, record.type_stamp, record.value_dwords
+                );
+            }
+        }
+        OffsetBlockRead::Refused(status) => refused("control 0x2080901b", *status),
+        OffsetBlockRead::Malformed(err) => panic!("control malformed: {err:?}"),
+    }
+}
