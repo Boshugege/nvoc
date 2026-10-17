@@ -142,9 +142,7 @@ CANDIDATES = {
     },
 }
 
-BLOCK_RE = re.compile(
-    r"0x([0-9a-fA-F]{8})\s+@(\d+)\s+status\s+0x([0-9a-fA-F]{8})"
-)
+BLOCK_RE = re.compile(r"0x([0-9a-fA-F]{8})\s+@(\d+)\s+status\s+0x([0-9a-fA-F]{8})")
 DUMP_RE = re.compile(r"\s(\d{5}):((?:\s+[0-9a-f]{2}){1,16})\s*$")
 
 
@@ -202,7 +200,7 @@ def mask_consistency(buf: bytes, header: int, stride: int) -> list[str]:
     rows = []
     for index in range(32):
         base = header + index * stride
-        record = buf[base:base + stride]
+        record = buf[base : base + stride]
         if len(record) < stride or not any(record):
             continue
         rows.append((index, struct.unpack_from("<I", record, 4)[0]))
@@ -213,33 +211,41 @@ def mask_consistency(buf: bytes, header: int, stride: int) -> list[str]:
     for index, bit in rows:
         index_mask |= 1 << index  # row bit must correspond to the row's place
         domain_mask |= bit
-    head = [struct.unpack_from("<I", buf, off)[0] if len(buf) >= off + 4 else 0
-            for off in (4, 12, 20)]
-    out = [f"  mask check: {len(rows)} rows; rows-as-bits 0x{index_mask:08x}, "
-           f"union of their domain bits 0x{domain_mask:08x}"]
+    head = [
+        struct.unpack_from("<I", buf, off)[0] if len(buf) >= off + 4 else 0
+        for off in (4, 12, 20)
+    ]
+    out = [
+        f"  mask check: {len(rows)} rows; rows-as-bits 0x{index_mask:08x}, "
+        f"union of their domain bits 0x{domain_mask:08x}"
+    ]
     for off, value in zip((4, 12, 20), head):
         want = index_mask if off == 4 else domain_mask
         verdict = "MATCH" if value == want else f"mismatch (0x{value:08x})"
         out.append(f"    head +{off} = 0x{value:08x}: {verdict}")
-    out.append("    rows: " + " ".join(f"{i}:id{bit.bit_length() - 1}"
-                                      for i, bit in rows))
+    out.append(
+        "    rows: " + " ".join(f"{i}:id{bit.bit_length() - 1}" for i, bit in rows)
+    )
     # Which rows the seed the recorded run used actually reached, read as row
     # bits -- the reading the 0x2080901b write-set arithmetic requires and the
     # header cross-check above confirms. This is what bounds any "zero measured"
     # claim: the dwords of a row the seed did not reach were never written.
     covered = [i for i, _ in rows if (MEASURED_SEED >> i) & 1]
-    beyond = [(i, bit.bit_length() - 1) for i, bit in rows
-              if not (MEASURED_SEED >> i) & 1]
-    reach = (f"rows {covered[0]}..{covered[-1]}" if covered and
-             covered == list(range(covered[0], covered[-1] + 1))
-             else f"rows {covered}")
+    beyond = [
+        (i, bit.bit_length() - 1) for i, bit in rows if not (MEASURED_SEED >> i) & 1
+    ]
+    reach = (
+        f"rows {covered[0]}..{covered[-1]}"
+        if covered and covered == list(range(covered[0], covered[-1] + 1))
+        else f"rows {covered}"
+    )
     if beyond:
         far = "; ".join(f"row {i} id {bit}" for i, bit in beyond)
-        out.append(f"    seed {MEASURED_SEED:#04x} reaches {reach}, "
-                   f"beyond it: {far}")
+        out.append(f"    seed {MEASURED_SEED:#04x} reaches {reach}, beyond it: {far}")
     else:
-        out.append(f"    seed {MEASURED_SEED:#04x} reaches {reach} and "
-                   "every listed row")
+        out.append(
+            f"    seed {MEASURED_SEED:#04x} reaches {reach} and every listed row"
+        )
     return out
 
 
@@ -269,9 +275,16 @@ def mask_consistency(buf: bytes, header: int, stride: int) -> list[str]:
 # The two type bytes of a stamp are the only part of rec+0 that is written, which
 # is why a written stamp still leaves the upper half of that dword at a5a5.
 RECORDED_ROWS = (
-    (1, 0x0808), (2, 0x0909), (16, 0x0808), (4, 0x0909), (8, 0x0909),
-    (1_048_576, 0x0909), (524_288, 0x0303), (64, 0x0808),
-    (2_097_152, 0x0909), (32, 0x0909),
+    (1, 0x0808),
+    (2, 0x0909),
+    (16, 0x0808),
+    (4, 0x0909),
+    (8, 0x0909),
+    (1_048_576, 0x0909),
+    (524_288, 0x0303),
+    (64, 0x0808),
+    (2_097_152, 0x0909),
+    (32, 0x0909),
 )
 WRITE_SET_HEAD = 14
 WRITE_SET_PER_TYPE = {0x08: 13, 0x09: 13, 0x03: 1}
@@ -287,8 +300,7 @@ def write_set_model(mask, rows=RECORDED_ROWS, header=60, stride=64):
     Returns (None, None) when a selected row carries a type the model has no
     per-type rule for: an unknown type is never silently counted as zero.
     """
-    selected = [(i, stamp) for i, (_bit, stamp) in enumerate(rows)
-                if (mask >> i) & 1]
+    selected = [(i, stamp) for i, (_bit, stamp) in enumerate(rows) if (mask >> i) & 1]
     count = WRITE_SET_HEAD
     last = None
     for index, stamp in selected:
@@ -340,61 +352,89 @@ def write_set_check(buf: bytes, header: int, stride: int) -> list[str]:
     exhaust -- the model's own largest mask writes 132 of 527 dwords.
     """
     seed = 0xA5A5A5A5
-    if not any(struct.unpack_from("<I", buf, off)[0] == seed
-               for off in range(0, len(buf) - 3, 4)):
-        return ["  write-set: no dword still holds 0xa5a5a5a5, so this is not "
-                "the 0xA5 case and the write set is not observable here -- on a "
-                "zeroed block a written zero looks exactly like an untouched "
-                "dword; read the record line above instead"]
-    changed = [off for off in range(0, len(buf) - 3, 4)
-               if struct.unpack_from("<I", buf, off)[0] != seed]
+    if not any(
+        struct.unpack_from("<I", buf, off)[0] == seed
+        for off in range(0, len(buf) - 3, 4)
+    ):
+        return [
+            "  write-set: no dword still holds 0xa5a5a5a5, so this is not "
+            "the 0xA5 case and the write set is not observable here -- on a "
+            "zeroed block a written zero looks exactly like an untouched "
+            "dword; read the record line above instead"
+        ]
+    changed = [
+        off
+        for off in range(0, len(buf) - 3, 4)
+        if struct.unpack_from("<I", buf, off)[0] != seed
+    ]
     if not changed:
-        return ["  write-set: the A5 background is intact, so the handler wrote "
-                "nothing for this mask"]
-    out = [f"  write-set: {len(changed)} of {len(buf) // 4} dwords differ from "
-           f"the 0xA5 seed, first @{changed[0]} last @{changed[-1]}"]
+        return [
+            "  write-set: the A5 background is intact, so the handler wrote "
+            "nothing for this mask"
+        ]
+    out = [
+        f"  write-set: {len(changed)} of {len(buf) // 4} dwords differ from "
+        f"the 0xA5 seed, first @{changed[0]} last @{changed[-1]}"
+    ]
     head_written = [off for off in changed if off < header]
-    out.append(f"    head: {len(head_written)} written dwords"
-               + (" at " + " ".join(f"+{off}" for off in head_written)
-                  if head_written else "")
-               + f" -- model HEAD={WRITE_SET_HEAD}: "
-               + ("MATCH" if len(head_written) == WRITE_SET_HEAD
-                  else "MISMATCH"))
+    out.append(
+        f"    head: {len(head_written)} written dwords"
+        + (" at " + " ".join(f"+{off}" for off in head_written) if head_written else "")
+        + f" -- model HEAD={WRITE_SET_HEAD}: "
+        + ("MATCH" if len(head_written) == WRITE_SET_HEAD else "MISMATCH")
+    )
     rows = []
     for index in range(32):
         base = header + index * stride
-        record = buf[base:base + stride]
+        record = buf[base : base + stride]
         if len(record) < stride or struct.unpack_from("<I", record, 0)[0] == seed:
             continue
         stamp = struct.unpack_from("<H", record, 0)[0]
-        written = [off for off in range(0, stride - 3, 4)
-                   if struct.unpack_from("<I", record, off)[0] != seed]
+        written = [
+            off
+            for off in range(0, stride - 3, 4)
+            if struct.unpack_from("<I", record, off)[0] != seed
+        ]
         rows.append((index, stamp, base, written))
         rule = WRITE_SET_PER_TYPE.get(stamp & 0xFF)
-        verdict = ("no per-type rule: type unknown"
-                   if rule is None
-                   else f"rule {rule} slot(s): "
-                        + ("MATCH" if rule == len(written) else "MISMATCH"))
-        out.append(f"    row {index} (type 0x{stamp:04x}) @+{base}: written rel "
-                   + " ".join(f"+{off}" for off in written) + f" -- {verdict}")
+        verdict = (
+            "no per-type rule: type unknown"
+            if rule is None
+            else f"rule {rule} slot(s): "
+            + ("MATCH" if rule == len(written) else "MISMATCH")
+        )
+        out.append(
+            f"    row {index} (type 0x{stamp:04x}) @+{base}: written rel "
+            + " ".join(f"+{off}" for off in written)
+            + f" -- {verdict}"
+        )
     if not rows:
         out.append("    no record carries a stamp, so the mask selected nothing")
         return out
     by_rule = [WRITE_SET_PER_TYPE.get(stamp & 0xFF) for _i, stamp, _b, _w in rows]
     if any(rule is None for rule in by_rule):
-        out.append("    the arithmetic is NOT applied while a selected type is "
-                   "unknown -- an unruled type is not assumed to equal any case")
+        out.append(
+            "    the arithmetic is NOT applied while a selected type is "
+            "unknown -- an unruled type is not assumed to equal any case"
+        )
         return out
     total = WRITE_SET_HEAD + sum(by_rule)
-    out.append(f"    model: {len(rows)} rows ({sum(by_rule)} row dwords) + "
-               f"HEAD={WRITE_SET_HEAD} = {total} vs observed {len(changed)}: "
-               + ("MATCH" if total == len(changed) else "MISMATCH"))
-    value_rows = [base + 56 for _i, stamp, base, _w in rows
-                  if WRITE_SET_PER_TYPE.get(stamp & 0xFF, 0) > 1]
+    out.append(
+        f"    model: {len(rows)} rows ({sum(by_rule)} row dwords) + "
+        f"HEAD={WRITE_SET_HEAD} = {total} vs observed {len(changed)}: "
+        + ("MATCH" if total == len(changed) else "MISMATCH")
+    )
+    value_rows = [
+        base + 56
+        for _i, stamp, base, _w in rows
+        if WRITE_SET_PER_TYPE.get(stamp & 0xFF, 0) > 1
+    ]
     if value_rows:
-        out.append(f"    model: the last changed dword should be a value row's "
-                   f"rec+56 = {max(value_rows)} vs observed {changed[-1]}: "
-                   + ("MATCH" if max(value_rows) == changed[-1] else "MISMATCH"))
+        out.append(
+            f"    model: the last changed dword should be a value row's "
+            f"rec+56 = {max(value_rows)} vs observed {changed[-1]}: "
+            + ("MATCH" if max(value_rows) == changed[-1] else "MISMATCH")
+        )
     return out
 
 
@@ -410,8 +450,11 @@ def _dwords(buf: bytes, limit: int) -> list[str]:
 def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
     """Print the header words and every non-zero record word of one block."""
     if mid not in GEOMETRY:
-        print(f"0x{mid:08x} @{size}: no geometry entry; ids: "
-              + " ".join(f"0x{k:08x}" for k in sorted(GEOMETRY)), file=out)
+        print(
+            f"0x{mid:08x} @{size}: no geometry entry; ids: "
+            + " ".join(f"0x{k:08x}" for k in sorted(GEOMETRY)),
+            file=out,
+        )
         return 2
     want_size, header, stride = GEOMETRY[mid]
     if size != want_size:
@@ -423,17 +466,21 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
     elif mid in INHERITS:
         note = f"inherits the geometry of 0x{INHERITS[mid]:08x}"
     else:
-        note = ("derived, UNVERIFIED: the arithmetic admits header+128/stride-4 "
-                "as well -- do not treat the field offsets as a layout")
-    print(f"0x{mid:08x} @{size}: header {header} B, 32 x {stride} B records @+{header}",
-          file=out)
+        note = (
+            "derived, UNVERIFIED: the arithmetic admits header+128/stride-4 "
+            "as well -- do not treat the field offsets as a layout"
+        )
+    print(
+        f"0x{mid:08x} @{size}: header {header} B, 32 x {stride} B records @+{header}",
+        file=out,
+    )
     print(f"  ({note})", file=out)
     print("  head: " + (" ".join(_dwords(buf, header)) or "(all zero)"), file=out)
     named = NAMED.get(mid, {})
     populated = 0
     for index in range(32):
         base = header + index * stride
-        record = buf[base:base + stride]
+        record = buf[base : base + stride]
         if len(record) < stride or not any(record):
             continue
         populated += 1
@@ -467,17 +514,21 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
         entries = []
         for index in range(32):
             base = header + index * stride
-            record = buf[base:base + stride]
+            record = buf[base : base + stride]
             if len(record) < stride or not any(record):
                 continue
-            entries.append("%d:%d:0x%04x" % (
-                index,
-                struct.unpack_from("<I", record, 4)[0],
-                struct.unpack_from("<H", record, 0)[0],
-            ))
+            entries.append(
+                "%d:%d:0x%04x"
+                % (
+                    index,
+                    struct.unpack_from("<I", record, 4)[0],
+                    struct.unpack_from("<H", record, 0)[0],
+                )
+            )
         if entries:
-            print("  directory (entry:domain_bit:type) = " + " ".join(entries),
-                  file=out)
+            print(
+                "  directory (entry:domain_bit:type) = " + " ".join(entries), file=out
+            )
             for line in mask_consistency(buf, header, stride):
                 print(line, file=out)
     if mid in CANDIDATES:
@@ -486,27 +537,32 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
         # when every value is zero (the stock case).
         mask = struct.unpack_from("<I", buf, 4)[0] if len(buf) >= 8 else 0
         fields = sorted(CANDIDATES[mid].items())
-        print(f"  candidate slots (mask@+4=0x{mask:x}); the ORDER inside them is",
-              file=out)
-        print("  NOT resolved: the layer above names five value dwords at RM",
-              file=out)
-        print("  rec+8/12/16/20/24 (offset_khz, range_min, range_max, applied,",
-              file=out)
-        print("  extra) via the measured 0x24 shift, but its own article says",
-              file=out)
-        print("  slot 0 is the signed kHz offset while its Blackwell field map",
-              file=out)
-        print("  says the frequency delta is VALUES[2] -- so the current offset",
-              file=out)
-        print("  is one of +8/+12/+16, and ONLY a same-field readback after one",
-              file=out)
-        print("  minimal-step SET decides which. Realtime MHz never does.",
-              file=out)
+        print(
+            f"  candidate slots (mask@+4=0x{mask:x}); the ORDER inside them is",
+            file=out,
+        )
+        print("  NOT resolved: the layer above names five value dwords at RM", file=out)
+        print(
+            "  rec+8/12/16/20/24 (offset_khz, range_min, range_max, applied,", file=out
+        )
+        print(
+            "  extra) via the measured 0x24 shift, but its own article says", file=out
+        )
+        print(
+            "  slot 0 is the signed kHz offset while its Blackwell field map", file=out
+        )
+        print(
+            "  says the frequency delta is VALUES[2] -- so the current offset", file=out
+        )
+        print(
+            "  is one of +8/+12/+16, and ONLY a same-field readback after one", file=out
+        )
+        print("  minimal-step SET decides which. Realtime MHz never does.", file=out)
         for bit in range(32):
             if not (mask >> bit) & 1:
                 continue
             base = header + bit * stride
-            record = buf[base:base + stride]
+            record = buf[base : base + stride]
             if len(record) < stride:
                 continue
             stamp = struct.unpack_from("<H", record, 0)[0]
@@ -515,8 +571,10 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
                 if off + 4 > len(record):
                     continue
                 cells.append(f"+{off}={struct.unpack_from('<i', record, off)[0]}")
-            print(f"    bit {bit:<2} rec @+{base} type=0x{stamp:04x}: "
-                  + " ".join(cells), file=out)
+            print(
+                f"    bit {bit:<2} rec @+{base} type=0x{stamp:04x}: " + " ".join(cells),
+                file=out,
+            )
     if mid == 0x2080901B or INHERITS.get(mid) == 0x2080901B:
         # Only a non-zero background can show a write set: on zeros the dwords
         # the handler writes are zero as well, so "wrote zero" and "never
@@ -543,19 +601,31 @@ def selftest() -> int:
         struct.pack_into("<i", buf, base + 24, 18750)
         struct.pack_into("<I", buf, base + 28, 0x00FF0100)
     text = "\n".join(
-        [f"[OK] clkctl freq-ctrl-info 0x20809025 @7188  status 0x00000000 (NV_OK)"
-         f"  cmd 0x20809025 size 7188 -> NV_OK, hex follows"]
-        + [f"    {off:05d}: " + " ".join(f"{b:02x}" for b in buf[off:off + 16])
-           for off in range(0, len(buf), 16)]
+        [
+            "[OK] clkctl freq-ctrl-info 0x20809025 @7188  status 0x00000000 (NV_OK)"
+            "  cmd 0x20809025 size 7188 -> NV_OK, hex follows"
+        ]
+        + [
+            f"    {off:05d}: " + " ".join(f"{b:02x}" for b in buf[off : off + 16])
+            for off in range(0, len(buf), 16)
+        ]
     )
     blocks = parse_blocks(text)
     assert blocks[(0x20809025, 7188)] == bytes(buf), "round-trip failed"
     import io
+
     sink = io.StringIO()
     assert decode(0x20809025, 7188, bytes(buf), sink) == 0
     report = sink.getvalue()
-    for needle in ("max_vf_khz", "1638400", "offset_floor_khz", "-18750",
-                   "offset_ceiling_khz", "18750", "rec2"):
+    for needle in (
+        "max_vf_khz",
+        "1638400",
+        "offset_floor_khz",
+        "-18750",
+        "offset_ceiling_khz",
+        "18750",
+        "rec2",
+    ):
         assert needle in report, needle
     # 0x20809019 rec+44 is a signed i16 pair on the live payloads (-1000/+1000
     # and -1000/+3000); the pair column must render it as such, not as i32.
@@ -642,8 +712,8 @@ def selftest() -> int:
     zeroed = bytearray(GEOMETRY[0x2080901B][0])
     struct.pack_into("<H", zeroed, GEOMETRY[0x2080901B][1], 0x0808)
     assert write_set_check(bytes(zeroed), 60, 64)[0].startswith(
-        "  write-set: no dword still holds 0xa5a5a5a5"), write_set_check(
-            bytes(zeroed), 60, 64)
+        "  write-set: no dword still holds 0xa5a5a5a5"
+    ), write_set_check(bytes(zeroed), 60, 64)
     # A type the rule does not know is never counted as zero: the arithmetic has
     # to be withheld, not guessed.
     odd = a5_block(0x1, rows=((1, 0x0B0B),) + RECORDED_ROWS[1:])
@@ -671,7 +741,7 @@ def main(argv: list[str]) -> int:
         if not blocks:
             print(f"{path}: no candidate blocks found", file=sys.stderr)
             status = 1
-        for (mid, size) in sorted(blocks):
+        for mid, size in sorted(blocks):
             status |= decode(mid, size, blocks[(mid, size)])
     return status
 

@@ -1474,3 +1474,9 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - `HEAD=14` 是**唯一拟合常数**（由那次 106 反推 ✔）；可独立核对的是一行一行的 type 规则（8 行各自 13／13／…／1 ✔）。真 0xA5 dump 若某行槽位数不符，工具会直接打 `MISMATCH` ✔。
 - **槽位身份仍尚未定位** ✗：12 个槽位里哪个是 signed offset（+8／+12／+16 三选一 ✔）只能靠一次最小步 SET 后的**同字段回读**判定，实时频率**不参与** ✔ ⇒ 因此**仍未发任何 SET** ✔。
 - 下一次健康窗口的收益：`tools/clock-offset-read-run.sh` 的 `--clkctl-hex` 电池含该 id 的 A5 case ✔，runbook 已把该 dump 交给本工具 ✔（其解码调用处 ✔）⇒ 槽位与写集合将变成"跑完即可读结论"的机械判定，而不再需要第二次实机请求 ✔（GET 不可重复：wedge 时根本发不出去 ✔）。
+
+### 44.5 工具自身与 CI 门禁对齐（诚实记录，含"我改了什么、没改什么"）
+- **发现** ✔：仓库 CI 的 lint job 是 `ruff check .`（`.github/workflows/ci.yml`，`pip install ruff` 取最新 ✔），而本机在**全仓库**范围内跑出**只有 2 个错误**，且都在本工具里：`f-string-missing-placeholders`（F541），位置是 `--selftest` 里那段合成文本 fixture 的第 546／547 行——**是旧行，不是本轮新增** ✔（同一处 0.16.10 与 0.17.1 都报 ⇒ 与该 job 的 ruff 版本无关 ✔）。去掉那两个多余的 `f` 前缀后，**全仓库 `ruff check .` ＝ All checks passed** ✔。
+- **格式** ✔：CI 的 fmt job 是 `ruff format . --check`（`preview = true` ⇒ **版本敏感** ✔）。本机用 `ruff@0.17.1` 只对**本工具这一个文件**执行 `ruff format`：该文件从 would-be-reformatted 变为 **already formatted** ✔；全仓库"would be reformatted"文件数 **10→9** ✔。**其余 9 个漂移文件一律未动** ✔ —— 它们是别人/别族的代码，本轮不去制造无关 diff ✔。
+- **行为不变（这是关键证据）** ✔：格式化后 `--selftest` 仍输出 `selftest ok: geometry + round-trip + field decode + write-set model` ✔；对已录 `clkctl-hex.txt` 的解码输出 **md5 前后完全一致**（`7bf52cb8eb151a575ad3d1d70c824750`）✔ ⇒ **纯格式改动，零语义变化** ✔。
+- **规模与边界** ✔：`174 insertions / 104 deletions`，**只限本工具文件** ✔（我自撰的工具，未触碰他人文件 ✔，无 `reset --hard`／无 `clean` ✔）。

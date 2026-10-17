@@ -1347,3 +1347,5 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (5) **对下一次健康窗口的意义** ✔：`tools/clock-offset-read-run.sh` 的 `--clkctl-hex` 电池**已含**该 id 的 A5 case（源码 case 表首例 ✔，且 runbook 走 `run_one clkctl-hex --clkctl-hex` 并把 `clkctl-hex.txt` 交给本工具 ✔）⇒ 健康窗口一出现，"handler 写了哪些槽位"就是**跑完即可读结论**的机械判定，不再需要第二次实机请求 ✔（GET 不可重复：wedge 时发不出去 ✔）。⚠️ 我自己先误判为"工具没 dump 901b"，被源码 case 表当场证伪 ✔ —— 已录的 `clkctl-hex.txt` 是**更早**的一次 dump，不含该块 ✔。
 
 (6) **写入面结论不变** ✔：`settings_write=false`／`settings_restore=false`；**未发任何 SET**，未提权，未改 EFI／驱动配置 ✔。槽位身份（+8／+12／+16 三选一）仍**尚未定位** ✗ ⇒ 只能靠一次最小步 SET 后的**同字段回读**判定；**实时频率不参与判定** ✔。
+
+(7) **工具自身与 CI 门禁对齐（顺手修掉全仓库仅有的 2 个 lint 错误）** ✔：CI 的 lint job 是 `ruff check .`，本机全仓库范围内**只有 2 个错误**且都在本工具（F541，`--selftest` 里旧有的合成文本 fixture，第 546／547 行 ✔，0.16.10 与 0.17.1 同报 ⇒ 与版本无关 ✔）；修掉后**全仓库 `ruff check .` ＝ All checks passed** ✔。格式侧：CI 为 `ruff format . --check`（`preview = true` ⇒ 版本敏感），本机用 `ruff@0.17.1` 只格式化**本工具文件**，其 `format --check` 通过 ✔，全仓库漂移 10→9，**其余 9 个文件未动** ✔。**行为不变的证据**：格式化后 `--selftest` 仍通过 ✔，对已录 `clkctl-hex.txt` 解码输出 md5 完全一致（`7bf52cb8eb151a575ad3d1d70c824750`）✔ ⇒ 纯格式、零语义变化 ✔。规模 174／104 行，**只限本文件** ✔。
