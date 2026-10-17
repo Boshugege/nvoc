@@ -883,3 +883,13 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **同时纠正一处被测试固化的错误前提**：原测试注释写"Live controls fail on their own status, not the page status"，并把 `memory_used_bytes` 当作 live control 断言——那正是本缺陷被"合法化"的地方。现按实测改写：页失败时它随页被压制（理由与分节字段**同一句**），页正常时其自身状态字才是门（`0x57` 用例保留，另加页状态归零前置），并新增回归测试 `a_failed_rusd_page_does_not_publish_a_zero_memory_measurement`（零填充页 + 字段字为 0 ⇒ 必须 `None`、理由与 `temperature_c` **逐字相同**、`pstate` 仍在）。
 
 **验证范围**：`cargo fmt --all -- --check` clean；clippy（core/cli/auto-optimizer，`-D warnings`）通过（仅依赖 `nvapi-sys` 一条既有警告）；`cargo test -p nvoc-core --all-targets` 全绿（88+5+15 等）。**设备级验证**：重建 CLI 后实跑，`Memory Used: N/A` + `RUSD allocation/mapping failed: 0x00000062`，`Pstate: P0` 不受影响，`unavailable` 26 项。本轮**只读**访问设备 **5 次**（1 次 anchor 轮询 + 4 次 `get-status`：修复前 human/json 各一、修复后 human/json 各一；一次参数写错的 `--json` 在解析阶段即退出、未开驱动，不计），**无写入、未提权**。
+
+### 本轮追加三十二（2026-10-18，把"失败页不得产出任何数字"做成结构性回归门；并在设置侧确认前一轮修复）
+
+**一、设置侧确认**：重建后用 `get-settings --macos-rm` 复跑，`Memory Used: N/A`（第 20 轮同一 wedge 会话里它曾打印 `0.000 MiB`）⇒ 追加三十一那处假值修复**在设置与状态两个用户可见面上都生效**，该缺陷两处闭合。
+
+**二、结构性回归门（本轮实质改动）**：追加三十一的教训是"逐个字段的守卫各自看都对，仍有一个漏了"，因此新测试 `a_failed_page_publishes_no_numbers_at_all` **不再逐字段断言，而是检查整个载荷**：页映射失败（`0x62`）且原生层仍把分节报为可读（零填充样本 `FIELD_OK`、字段状态字 0＝"正常"、载荷 0）时，把 `DeviceStatus` **序列化后要求其中不含任何数字**，唯一例外 `pstate`——且该例外是**实测的**而非推测（pstate 查询由 GSP 直接答复，wedge 下仍返回 `P0`）。这样**将来新加的字段若忘记页级门会直接被这条测试抓住**，不需要有人记得去补列表。测试还固化：7 个具名字段（`memory_used_bytes`/`power_mw`/`fan_rpm`/`temperature_c`/`memory_clock_khz`/`pcie_link_gen`/`average_power_mw`）的理由必须是页级原话，两个携带数字的容器（`rusd_timestamps`、`engine_utilization_percent`）**被清空而非半填**。
+
+**三、结果与交叉验证**：该测试首次运行**核心断言即通过**（失败页未漏出任何数字，只有 `pstate`），唯一失败是我自己猜的 `unavailable` 条数（25 vs 实测 26）。改为 26 —— 这与**真实 wedge 设备同一页失败下报出的 26 项完全一致**，说明该夹具**就是设备用例**而不是近似。
+
+**验证范围**：`cargo fmt --all -- --check` clean；clippy（core/cli/auto-optimizer，`-D warnings`）通过；`cargo test -p nvoc-core --all-targets` 全绿（89 项）。本轮**只读**访问设备 **2 次**（1 次 anchor 轮询 + 1 次 `get-settings`），**无写入、未提权**。

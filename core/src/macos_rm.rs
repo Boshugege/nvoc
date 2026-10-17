@@ -2673,6 +2673,71 @@ mod tests {
         assert!(status.pstate.is_some());
     }
 
+    /// A page that failed to map may not yield a single number.
+    ///
+    /// The per-field guards each look right on their own, and one of them still
+    /// let a zero through -- the byte count whose status word rides inside the
+    /// sample. This one checks the whole payload at once instead: with the page
+    /// refused, nothing the backend publishes may be a number, except the live
+    /// RM query that is measured to answer on the wedged driver. A new field
+    /// that forgets the page gate fails here without anyone having to remember
+    /// to list it.
+    #[test]
+    fn a_failed_page_publishes_no_numbers_at_all() {
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        // The page refused, a zero-filled sample came back, and the native layer
+        // still called the sections readable -- the case where a "fine" status
+        // word and a 0 payload are both lies.
+        s.telemetry.status = 0x62;
+        for status in s.telemetry.sample.field_status.iter_mut() {
+            *status = FIELD_OK;
+        }
+        s.telemetry.sample.pstate_status = 0;
+        s.telemetry.sample.memory_used_status = 0;
+        s.telemetry.sample.memory_used_kb = 0;
+
+        let status = status_from_snapshot(&s);
+        let json = serde_json::to_value(&status).expect("the status serialises");
+        let mut numbers: Vec<&String> = json
+            .as_object()
+            .expect("an object")
+            .iter()
+            .filter(|(_, value)| value.is_number())
+            .map(|(name, _)| name)
+            .collect();
+        numbers.sort();
+        // `pstate` is the exception, and it is a measured one rather than a
+        // guess: the pstate query is answered by the GSP itself, and the wedged
+        // driver still returns P0 for it.
+        assert_eq!(
+            numbers,
+            vec!["pstate"],
+            "a failed page produced a number: {numbers:?}"
+        );
+        assert!(status.pstate.is_some());
+
+        // Every suppressed field says why, in the page's own words.
+        let page = "RUSD allocation/mapping failed: 0x00000062";
+        for name in [
+            "memory_used_bytes",
+            "power_mw",
+            "fan_rpm",
+            "temperature_c",
+            "memory_clock_khz",
+            "pcie_link_gen",
+            "average_power_mw",
+        ] {
+            assert_eq!(status.unavailable[name], page, "{name}");
+        }
+        // The two containers that carry numbers are emptied, not half-filled.
+        assert!(status.rusd_timestamps.is_empty());
+        assert!(status.engine_utilization_percent.is_empty());
+        // The same count the wedged device reported for the same page failure,
+        // so this fixture is the device case rather than an approximation of it.
+        assert_eq!(status.unavailable.len(), 26);
+    }
+
     #[test]
     fn engine_utilization_is_normalized_from_percent_x100() {
         let mut s = snapshot();
