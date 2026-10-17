@@ -86,10 +86,15 @@ def main():
     args = ap.parse_args()
 
     _b, e_machine, rows = extract(args.firmware)
-    sys.stderr.write("# %s: %u rows, e_machine=%u, categories=%s\n"
+    # NOTE: the category keys are printed as *hex strings*.  They used to be
+    # printed as bare ints, and a "10: 169" key was then read as "cat 0x10
+    # (CLK) = 169" -- it is actually category 0x0a (internal).  Do not change
+    # this back to a plain dict of ints.
+    cats = collections.Counter(((m >> 8) & 0x3F) for m in rows)
+    sys.stderr.write("# %s: %u rows, e_machine=%u, categories={%s}\n"
                      % (args.firmware, len(rows), e_machine,
-                        dict(sorted(collections.Counter(
-                            ((m >> 8) & 0x3F) for m in rows).items()))))
+                        ", ".join("0x%02x: %d" % (c, cats[c])
+                                  for c in sorted(cats))))
 
     def cat(m):
         return (m >> 8) & 0x3F

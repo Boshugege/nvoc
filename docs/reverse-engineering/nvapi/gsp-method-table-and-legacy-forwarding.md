@@ -135,14 +135,18 @@ puts the **CLK family at 87 rows** — byte `0x90` (68 legacy reads), `0xd0`
 **VOLT family at 17** (`0xb2` 13 reads, `0xf2` 4 writes), vs **1** and **0** in
 the host table.
 
-> **Correction (2026-10-17T11:50Z).** This section used to say "cat 0x10 (CLK)
-> = 169 rows, cat 0x32 (VOLT) = 151". Those two numbers do not reproduce under
-> either natural reading of the category field; they reproduce exactly as the
-> **`0x0a` internal block (169)** and the **`0x20` PERF block (151)**, so the
-> figure was a family mislabel, not a different count. The argument it supported
-> ("the GSP implements these families, the host does not") is unaffected — 87
-> and 17 are still 87 and 17 more than the host's 1 and 0 — but anyone reusing
-> the old numbers should re-run `probe-macos-rm/tools/dump-gsp-families.py`.
+> **Correction (2026-10-17T11:50Z, root cause found).** This section used to
+> say "cat 0x10 (CLK) = 169 rows, cat 0x32 (VOLT) = 151". The two numbers came
+> from `extract-gsp-method-table.py`'s summary line, which printed the category
+> `Counter` with **decimal** keys: `{... 10: 169 ... 32: 151 ...}`. Key `10`
+> is category **0x0a** (*internal*, 169 rows) and key `32` is **0x20** (*PERF*,
+> 151 rows) — the CLK/VOLT labels were attached to the decimal readings of the
+> wrong keys. The tool now prints the keys as hex (`0x0a: 169, 0x10: 87,
+> 0x20: 151, 0x32: 17, …`) so this cannot recur. The argument the old sentence
+> supported ("the GSP implements these families, the host does not") is
+> unaffected — 87 and 17 are still far more than the host's 1 and 0 — but any
+> reuse of the old figures should be re-run through
+> `probe-macos-rm/tools/dump-gsp-families.py`.
 
 Authoritative `paramSize` for the ids this effort uses (GET unless marked):
 
