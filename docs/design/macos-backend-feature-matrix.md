@@ -1207,3 +1207,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (4) **对最高优先的后果** ✔：**第 3 条已完成**（当前值＝RUSD＋776 逐域频率 ✔；限制＝±18.75 MHz/1638400 kHz ✔；**原状态＝逐域偏移本身** ✔）；第 4 条不受损（偏移是从文档**读回**的 ✔）；只剩 **①写能力（提权＋客户端 SET 入口 ✔）②写入后字段是否随动（写实验 ✗）**⇒ 都不是"读不到" ✔。
 (5) **更正** ✗：早先"VF 读从未发过"被证伪 ✔（`stage-clkvf-read-*`/`stage-clkvf-stamped-*` 存在且重复运行 ✔，`0x20809061@776` 已实测 NV_OK ✔）。
 **验证范围**：静态穷举既有日志 ✔；**未发新命令、无写入、未跑 GPU** ✔。
+
+### 本轮追加六十四（2026-10-18，**代码步骤**：把可读的偏移解析落到仓库封送层）
+
+(1) **落地** ✔：`core/src/macos_offset.rs` 新增 `CLK_DOCUMENT_CMD=0x20809061`/`CLK_DOCUMENT_BYTES=776`/`CLK_DOCUMENT_RECORD_MARKER=0x00000303`/head 8/b跨度 24/槽 32 与 `parse_clock_document()`、`ClkDocument{head, entries, unparsed_slots}`、`ClkDocumentEntry{index, domain_bit, frequency_khz, offset_khz, flags}`；`core/tests/data/macos-clkdoc-776.bin`（**776 字节，逐字节取自测试机 `clkdoc-read.txt` 的 hex dump ✔**）＋ fixture 测试；几何自洽 8+32×24=776 ✔。
+(2) **fixture 内容（=证据）** ✔：11 条记录（域位 1/2/4/8/0x10/0x20/0x40/0x40000/0x80000/0x100000/0x200000，频率含 **1 530 000** 与 **6 000 984**，带符号字段含 **−126**、**−244**、**−3904**、**−5**）✔；两处硬佐证：两个频率与该会话 RUSD 实时读数**逐位相同** ✔、0x10 是副本自己掩码里的 MCLK 位 ✔。
+(3) **stray 槽** ✗：槽 21/31 各只有 1 个 `0xff` 字节 ⇒ **按索引报告**而非当条目或丢弃 ✔；"末尾槽是填充"仍是推断 ✔。
+(4) **推断边界** ✔：字段名为读取语义描述而非驱动声明；注释同时给佐证与**可反驳点**（受控写入应使该字段随动 ✔）；`flags`／`ffffffff` 语义**尚未定位** ✔。
+(5) **验证**：fmt 干净 ✔、`clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 干净 ✔、`cargo test -p nvoc-core --all-targets` 全绿（93 passed，含 3 个新单元测试＋fixture 测试 ✔）；**客户端本机构建/测试 ✔，未发新命令、无写入、未用 GPU** ✔。
+(6) **尚未接线** ✗：`core/native/macos_rm.c` 仍只读三条 block ⇒ 下一步发 `0x20809061@776` 并并入 `OffsetChannelSnapshot`/`SettingsCapabilities` ✔。

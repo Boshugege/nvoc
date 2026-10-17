@@ -1121,3 +1121,21 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 ### 29.5 更正
 本会话早先"VF 读从未发过" ✗ **被证伪** ✔：`stage-clkvf-read-*`、`stage-clkvf-stamped-*` 存在且有重复运行 ✔；`0x20809061@776` 已实测 **NV_OK** ✔。
 **验证范围**：静态（穷举测试机既有日志 ✔）；**未发新命令、无写入、未跑 GPU** ✔。
+
+## 30. 把"可读的偏移"落到仓库封送层：`parse_clock_document` 与字节级 fixture（2026-10-18）
+
+**选择依据** ✔：第 29 节已在既有日志中确证 `0x20809061@776` 是**被接受**的读取面且**发布逐域偏移** ✔，但仓库里**没有任何代码解析它** ✗（`core/native/macos_rm.c` 只发 `0x20809019/25/1b` ✗）。按原目标第 5 条"成功后接入现有公共接口"✔ 与第 2 条"从实际封送逻辑还原"✔，本轮先把**读的一半**做成可测试的仓库代码 ✔。
+
+### 30.1 已落地
+- `core/src/macos_offset.rs`：新增 `CLK_DOCUMENT_CMD (0x20809061)`、`CLK_DOCUMENT_BYTES (776)`、`CLK_DOCUMENT_RECORD_MARKER (0x00000303)`、`CLK_DOCUMENT_HEAD_BYTES (8)`、`CLK_DOCUMENT_RECORD_BYTES (24)`、`CLK_DOCUMENT_RECORDS (32)`，`ClkDocument{head, entries, unparsed_slots}`、`ClkDocumentEntry{index, domain_bit, frequency_khz, offset_khz, flags}` 与 `parse_clock_document()` ✔。
+- `core/tests/data/macos-clkdoc-776.bin`（**776 字节，逐字节取自测试机 `outputs/stage-clkdoc-20261017T074448Z/clkdoc-read.txt` 的十六进制 dump** ✔）＋ `core/tests/macos_offset_fixture.rs` 的 fixture 测试 ✔。
+- 几何自洽 ✔：8 + 32×24 = 776 ✔（与既有三条 block 的 tiling 测试并列断言 ✔）。
+### 30.2 fixture 的实际内容（= 证据，不是构造值 ✔）
+11 条记录：域位 1/2/4/8/0x10/0x20/0x40/0x40000/0x80000/0x100000/0x200000，频率 1 530 000 / 1 455 000 / 1 545 000 / 405 000 / **6 000 984** / 1 320 000 / 810 000 / 108 000 / 540 000 / 1 410 000 / 255，带符号字段 −1 / −1 / −1 / **−244** / **−126** / −1 / −3904 / −5 / −244 / −1 / 0 ✔。
+**两处硬佐证** ✔：1 530 000 与 6 000 984 与该会话 RUSD 实时读数**逐位相同** ✔；0x10 正是副本自己分量掩码里的 MCLK 位 ✔。
+**两个 stray 槽** ✗：槽 21 与槽 31 各只有 1 个 `0xff` 字节、其余为零 ✔ ⇒ 解析器**按索引报告**（`unparsed_slots`）而不是当作条目或丢弃 ✔ ⇒ "最后一条之后的槽是填充"仍是**推断**，尚未定论 ✔（不排除同容器内还有第二种数组 ✔）。
+### 30.3 明确保留的推断边界 ✔
+字段名（`frequency_khz`/`offset_khz`）是**读取语义的描述**，不是驱动声明；文档注释同时写出**佐证**与**可反驳点**（受控写入应使该字段随动 ✔，且尚未发生过任何写入 ✔）。`flags` 与 `ffffffff`(=−1) 的语义**尚未定位** ✔。
+### 30.4 验证与范围
+`cargo fmt --all -- --check` 干净 ✔；`cargo clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 干净 ✔；`cargo test -p nvoc-core --all-targets` 全绿（含新增 3 个单元测试与 fixture 测试 ✔；93 passed ✔）。
+**范围**：客户端本机编译/测试 ✔；**未发新命令、无写入、未用 GPU** ✔。**尚未接线** ✗：`core/native/macos_rm.c` 仍只读三条 block ⇒ 下一步是从该处发出 `0x20809061@776` 并把解析结果并入 `OffsetChannelSnapshot`/`SettingsCapabilities` ✔。
