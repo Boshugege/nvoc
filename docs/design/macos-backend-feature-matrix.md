@@ -524,3 +524,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
   字串属 **PMGR 电源策略**断言 —— 因此缺的是**闭源 GSP CLK 控制实现体**（经运行时对象 vtable 分派），
   不是协议/尺寸/戳，也不是权限。详见 `docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md` §15。
   **本轮无任何 GPU 请求、无 SET、未提权、未改驱动/EFI/boot-args、未重启。**
+
+- **单域最小步长写入载体已实现（新，2026-10-17，未执行）**：`probe-macos-rm --write
+  --clk-offset-set BIT:OFF:DELTA`（`V3.5a..e`）就是 `WRITE-VERIFICATION-PLAN.md` §7.3 的执行载体，
+  与 RATED_TDP 的 `V3.4a..c` 同风格。拒绝先于打开驱动：无 `--write` / idle-only / `|DELTA|>1000 kHz`
+  三条实测 rc=2；`OFF` **无默认值**且必须在 12 个已测 value dword 内（G1 未定，工具不猜）；
+  pre-record GET 失败则**不写**。成功 = SET `NV_OK` ∧ 同字段回读 == 原值±DELTA ∧ 该记录其它 value dword
+  逐字节相同 ∧ restore 后整块 2108 B 逐字节相同；**实时 kHz 不作判据**（NVK 自发 PERF_BOOST）。
+  本轮验证：`LINT=1 build.sh` rc=0、`build.sh` rc=0、三条拒绝路径 rc=2、解码器 selftest ok。
+  **未执行任何 SET。** 提交 `ed95433`。
