@@ -80,6 +80,93 @@ pub struct DeviceStatus {
     pub unavailable: BTreeMap<String, String>,
 }
 
+/// Capability flags for the settings surface, so a consumer can disable a
+/// control for the right reason instead of guessing.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct SettingsCapabilities {
+    /// The backend can report the driver's current configuration.
+    pub settings_read: bool,
+    /// The backend can change configuration. Still false on macOS: no writable
+    /// RM control is reachable on this driver (see [`DeviceSettings::notes`]).
+    pub settings_write: bool,
+    /// The backend can put a saved configuration back. Only meaningful once
+    /// `settings_write` is true.
+    pub settings_restore: bool,
+}
+
+/// One reason string shared by every configuration family the RM channel
+/// cannot read on this driver, so the payload cannot drift from the evidence.
+const SETTINGS_UNREADABLE_REASON: &str = "no readable RM control on this driver (see notes)";
+
+/// Read-only projection of the driver-visible configuration.
+///
+/// This deliberately contains only what the RM session actually reports, and
+/// names every configuration family it does *not* report with a reason. A
+/// missing family is never represented by a default-looking zero.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceSettings {
+    pub pstate: Option<u32>,
+    /// Current enforced power limit (the live TGP wall) in mW.
+    pub power_limit_mw: Option<u32>,
+    /// Power limit the driver was asked for, which clamping may exceed.
+    pub power_limit_requested_mw: Option<u32>,
+    pub pcie_link_gen: Option<u32>,
+    pub memory_total_bytes: Option<u64>,
+    pub memory_used_bytes: Option<u64>,
+    pub board_id: Option<u32>,
+    pub chip_sku: Option<String>,
+    pub project: Option<String>,
+    /// Configuration families this backend cannot read (or write) yet, keyed by
+    /// the family name, with the cause.
+    pub unavailable: BTreeMap<String, String>,
+    pub capabilities: SettingsCapabilities,
+    /// Evidence behind the capability claims: what the backend does read, and
+    /// which controls were probed with which RM status.
+    pub notes: Vec<String>,
+}
+
+fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
+    // Every family that would need a read we do not have. The keys are the
+    // public vocabulary (`get-settings` / pynvoc), not RM command names.
+    let unavailable: BTreeMap<String, String> = [
+        "core_clock_offset",
+        "memory_clock_offset",
+        "voltage_boost",
+        "thermal_limit",
+        "fan_control",
+        "pstate_lock",
+        "vf_curve",
+        "power_limit_write",
+        "settings_restore",
+    ]
+    .into_iter()
+    .map(|family| (family.to_string(), SETTINGS_UNREADABLE_REASON.to_string()))
+    .collect();
+
+    DeviceSettings {
+        pstate: status.pstate,
+        power_limit_mw: status.power_limit_mw,
+        power_limit_requested_mw: status.power_limit_requested_mw,
+        pcie_link_gen: status.pcie_link_gen,
+        memory_total_bytes: info.memory_total_bytes,
+        memory_used_bytes: status.memory_used_bytes,
+        board_id: info.board_id,
+        chip_sku: info.chip_sku.clone(),
+        project: info.project.clone(),
+        unavailable,
+        capabilities: SettingsCapabilities {
+            settings_read: true,
+            settings_write: false,
+            settings_restore: false,
+        },
+        notes: vec![
+            "read: P-state, enforced/requested power limit, PCIe generation, board/SKU and memory sizes come from the same RM snapshot as get-status; sensor readings are separate (see get-status).".into(),
+            "write: refused before the driver is opened. No writable RM control is reachable on 610.57.04; setting a limit would also need a verified restore path first.".into(),
+            "offsets/locks/VF/fan/thermal policies: NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2 (0x2080200b, exact SDK struct) and the campaign-sourced GETs rails-get-info 0x2080B201, rails-get-status 0x2080B202 and vfpoints-get 0x208090A2 all return NV_ERR_INVALID_ARGUMENT (0x1f) through this transport; EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
+        ],
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Device {
     id: GpuId,
@@ -97,6 +184,25 @@ impl Device {
 
     /// Refreshes RM state and closes all native handles before returning.
     pub fn status(&self) -> Result<DeviceStatus, Error> {
+        let snapshot = self.refreshed_snapshot()?;
+        Ok(status_from_snapshot(&snapshot))
+    }
+
+    /// Reads the driver-visible configuration without changing anything.
+    ///
+    /// Uses the same single RM snapshot as [`Device::status`], so the
+    /// configuration readback and the telemetry cannot disagree about the
+    /// device, and a device that changed identity behind the session is
+    /// rejected instead of being reported under the old name.
+    pub fn settings(&self) -> Result<DeviceSettings, Error> {
+        let snapshot = self.refreshed_snapshot()?;
+        let info = device_from_snapshot(&snapshot).info;
+        let status = status_from_snapshot(&snapshot);
+        Ok(settings_from(&info, &status))
+    }
+
+    /// One fresh snapshot, with the identity re-checked against this handle.
+    fn refreshed_snapshot(&self) -> Result<Snapshot, Error> {
         let snapshot = read_snapshot(true)?;
         let current = device_from_snapshot(&snapshot);
         if current.info.pci_address != self.info.pci_address
@@ -107,7 +213,7 @@ impl Device {
                 "macOS RM device changed; rediscover GPUs".into(),
             ));
         }
-        Ok(status_from_snapshot(&snapshot))
+        Ok(snapshot)
     }
 }
 
@@ -144,6 +250,22 @@ impl crate::GpuOperation for QueryMacosRmStatus {
 
     fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
         target.macos_rm()?.status()
+    }
+}
+
+/// Read-only configuration query for the common `run` / `run_many` operation API.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryMacosRmSettings;
+
+impl crate::GpuOperation for QueryMacosRmSettings {
+    type Output = DeviceSettings;
+
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::QueryGpuSettings
+    }
+
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.macos_rm()?.settings()
     }
 }
 
@@ -1560,6 +1682,100 @@ mod tests {
     fn snapshot() -> Snapshot {
         // SAFETY: private ABI consists exclusively of integers and byte arrays.
         unsafe { std::mem::zeroed() }
+    }
+
+    /// The settings projection may only carry what the RM session reports, and
+    /// every family it cannot read must be named in `unavailable` with writes
+    /// and restore reported as unavailable.
+    #[test]
+    fn settings_projection_reports_reads_and_gaps() {
+        let info = DeviceInfo {
+            name: Some("NVIDIA GeForce GTX 1650 SUPER".into()),
+            driver_version: "610.57.04".into(),
+            rm_gpu_id: 0x100,
+            pci_address: "0000:01:00.0".into(),
+            vendor_id: 0x10DE,
+            device_id: 0x2187,
+            subsystem_id: Some(0x4018_0062),
+            revision: Some(0xA1),
+            board_id: Some(376),
+            chip_sku: Some("250".into()),
+            project: Some("G166".into()),
+            memory_total_bytes: Some(4_294_967_296),
+            memory_usable_bytes: Some(4_075_880_448),
+            bar1_bytes: Some(268_435_456),
+            l2_cache_bytes: Some(1_048_576),
+            supported_class_count: Some(95),
+            unavailable: BTreeMap::new(),
+        };
+        let mut status = DeviceStatus {
+            pstate: Some(8),
+            graphics_clock_khz: Some(1_530_000),
+            memory_clock_khz: Some(6_000_984),
+            video_clock_khz: Some(1_410_000),
+            sm_clock_khz: None,
+            graphics_target_clock_mhz: Some(1530),
+            memory_target_clock_mhz: Some(6000),
+            video_target_clock_mhz: Some(1410),
+            sm_target_clock_mhz: None,
+            temperature_c: Some(44.125),
+            temperature_memory_c: None,
+            temperature_board_c: None,
+            temperature_power_supply_c: None,
+            power_mw: Some(11_559),
+            power_limit_mw: Some(100_000),
+            power_limit_requested_mw: Some(100_000),
+            average_power_mw: None,
+            power_policy_tgp_mw: Some(11_426),
+            throttle_reason_mask: Some(0),
+            throttle_reasons: Vec::new(),
+            fan_rpm: Some(0),
+            fan_rpms: Vec::new(),
+            utilization_percent: Some(0),
+            memory_utilization_percent: Some(0),
+            engine_utilization_percent: BTreeMap::new(),
+            pcie_link_gen: Some(3),
+            pcie_max_link_gen: Some(3),
+            memory_used_bytes: Some(209_649_664),
+            rusd_timestamps: BTreeMap::new(),
+            unavailable: BTreeMap::new(),
+        };
+        status.pstate = Some(1);
+
+        let settings = settings_from(&info, &status);
+        assert_eq!(settings.pstate, Some(1));
+        assert_eq!(settings.power_limit_mw, Some(100_000));
+        assert_eq!(settings.memory_total_bytes, Some(4_294_967_296));
+        assert_eq!(settings.memory_used_bytes, Some(209_649_664));
+        assert_eq!(settings.board_id, Some(376));
+        assert_eq!(settings.chip_sku.as_deref(), Some("250"));
+        assert!(settings.capabilities.settings_read);
+        assert!(!settings.capabilities.settings_write);
+        assert!(!settings.capabilities.settings_restore);
+        for family in [
+            "core_clock_offset",
+            "memory_clock_offset",
+            "voltage_boost",
+            "thermal_limit",
+            "fan_control",
+            "pstate_lock",
+            "vf_curve",
+            "power_limit_write",
+            "settings_restore",
+        ] {
+            assert!(
+                settings.unavailable.contains_key(family),
+                "missing gap entry for {family}"
+            );
+        }
+        // The gap reason must point at the recorded probe evidence.
+        assert!(
+            settings
+                .notes
+                .iter()
+                .any(|note| note.contains("0x2080B201"))
+        );
+        assert!(settings.notes.iter().any(|note| note.contains("0x1f")));
     }
 
     /// A raw sample in which every section is readable and carries the same
