@@ -6035,12 +6035,21 @@ mod tests {
                 "query_temperature_thresholds",
                 nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON,
             ),
-            ("query_pstates", nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON),
-            ("query_cooler_info", nvoc_core::FAN_PERCENT_UNREADABLE_REASON),
+            (
+                "query_pstates",
+                nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON,
+            ),
+            (
+                "query_cooler_info",
+                nvoc_core::FAN_PERCENT_UNREADABLE_REASON,
+            ),
         ];
         for (entry, reason) in cases {
             let text = source_less_message(entry, reason);
-            assert!(text.contains(reason), "{entry} must quote the shared reason");
+            assert!(
+                text.contains(reason),
+                "{entry} must quote the shared reason"
+            );
             assert!(
                 !text.contains("NVAPI/NVML are not available"),
                 "{entry} must not blame the platform"
