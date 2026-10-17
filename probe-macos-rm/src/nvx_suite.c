@@ -1633,13 +1633,26 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
  *     Z 24: the same 14 head writes and the same 13 slot record, at k = 1
  *     (type stamp 0x00000909) -- so a mask bit selects record index == bit.
  *
- * The arithmetic closes only if the record field set is per-type: 106 = 14 +
- * 92 record writes, and the two records the sweep reached (types 08, 09)
- * carry 13 each, leaving 6 x 11 for the types behind mask bits 2..7.  The
- * counter pre-seed is what makes that visible: every dword the handler writes
- * (including a write of 0) shows up as W or Z against a counter background,
- * and masking ONE bit at a time puts each record's field set on its own line.
- * This pass TESTS that model; it never assumes it.
+ * The arithmetic closes only against the resolution of 2026-10-17 (doc
+ * section 18): 106 = 14 head + 7*13 + 1, i.e. the *value* block is
+ * type-conditional and all-or-nothing.  The 0x20809019 directory gives the
+ * type of every selected entry -- mask 0xFF picks entries 0..7, whose types
+ * are [08,09,08,09,09,09,03,08] -- and the two entries the sweep reached
+ * (0 = type 08, 1 = type 09) both carry 13, so the five remaining 08/09
+ * entries carry 13 too (65) and the single type-03 entry carries 1: its own
+ * stamp and no value dword.  The earlier "6 x 11" reading is retracted because
+ * it needs entry 2 (type 08) to write 11 while entry 0 (also type 08) writes
+ * 13 -- one type, two write sets.  A second, independent measurement agrees on
+ * the head and the record: the small-counter pre-seed with mask 0x2 at +4
+ * reports W {+0,+8,+124} and Z 24, i.e. 27 changed dwords = 14 + 13, on the
+ * one entry whose type stamp is 09.
+ * The counter pre-seed is what makes records visible: every dword the handler
+ * writes (including a write of 0) shows up as W or Z against a counter
+ * background, and masking ONE bit at a time puts each record's field set on
+ * its own line.
+ * This pass TESTS that model; it never assumes it.  Predicted changed-dword
+ * counts on an A5 background, this id, size 2108: mask 0x1 -> 27 (last @116);
+ * mask 0xFF -> 106 (last @564); mask 0x3FF -> 132 (9*13 + 1 + 14, last @692).
  *
  * Read-only: every case is a documented GET; the SET twins
  * (0x2080d01c / 0x2080d024 / 0x2080f214) are in nvx_known_set_ids and are
@@ -1974,15 +1987,28 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
      * model: the mask selects *domain entries* (not domain bits), each filled
      * entry is a 64 B record at +60 + 64*i whose handler writes 13 dwords
      * (rec+0 type, rec+8..rec+44, rec+52, rec+56) and leaves rec+4, rec+48,
-     * rec+60 alone -- so mask 0xFF = 8 entries = 2 + 8*13 = 106 changes, and
-     * the last one is entry 7's rec+56 = 60 + 7*64 + 56 = 564.  The 9019
+     * rec+60 alone.  The 9019
      * directory lists 10 entries (domain bits 0,1,4,2,3,20,19,6,21,5) with
      * record types 08,09,08,09,09,09,03,08,09,09, which is why mask 0xFF must
      * fill 8 records even though only 7 of its bits name a domain.
      *
+     * The write-set arithmetic is type-conditional (doc section 18):
+     *   106 = 14 head + 7*13 (the seven type 08/09 entries) + 1 (the single
+     *   type 03 entry, which writes its own stamp and no value dword).
+     * The older "2 header + 8 records * 13" and "6 x 11" decompositions are
+     * both retracted; only this one survives the per-entry types the 9019
+     * directory supplies.  Predictions this run must confirm or falsify:
+     *   mask 0x1   -> 27 changed dwords, last @ 60+0*64+56 = 116
+     *   mask 0xFF  -> 106 changed dwords, last @ 60+7*64+56 = 564
+     *                 (entry 7 is type 08, so its rec+56 IS written)
+     *   mask 0x3FF -> 132 changed dwords, last @ 60+9*64+56 = 692
+     * A zero-background case cannot see the twelve value dwords at all -- the
+     * handler writes zero and the seed is zero -- so only the head's two
+     * non-zero dwords and the stamps show up there.
+     *
      * Predicted non-zero bytes in a zeroed block (the type bytes are the only
      * non-zero output of this handler; everything else it writes is zero):
-     *   mask 0x1   -> one record : +60 = 08 08                     (13+2 changed dwords)
+     *   mask 0x1   -> one record : +60 = 08 08
      *   mask 0xFF  -> eight      : +60 08, +124 09, +188 08, +252 09,
      *                              +316 09, +380 09, +444 03, +508 08
      *   mask 0x3FF -> all ten    : the eight above plus +572 09, +636 09
@@ -1993,10 +2019,13 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
      * one form whose write set is observable end to end.  Its prediction, read
      * off the 2026-10-17 offsetsweep run (which reported "106/527 dwords
      * changed, first @0 last @564" but could only print 40 of them):
-     *   - 106 of 527 dwords differ from the seed  (2 header + 8 records * 13)
+     *   - 106 of 527 dwords differ from the seed
+     *     (14 head + 7*13 + 1; see doc section 18)
      *   - the last differing dword is entry 7's rec+56 = 60 + 7*64 + 56 = 564
-     *   - per selected entry i: rec+0 becomes a5a508 08 / a5a509 09 (the two
-     *     type bytes only, +2/+3 stay untouched) and rec+8..+44, rec+52,
+     *   - entry 6 (the type 03 entry) differs in ONE dword only, its stamp at
+     *     +444, which must read 03 03
+     *   - per selected 08/09 entry i: rec+0 becomes a5a508 08 / a5a509 09 (the
+     *     two type bytes only, +2/+3 stay untouched) and rec+8..+44, rec+52,
      *     rec+56 become 00000000
      *   - rec+4, rec+48 and rec+60 stay a5a5a5a5 for every entry
      * If the hex dump of the bg=A5 case shows anything else -- in particular a
@@ -2105,6 +2134,53 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
                  "from the seed (first @%u last @%u), %u-byte hex follows",
                  cases[i].cmd, size, cases[i].prefill, changed, size / 4,
                  first, last, size);
+
+        /* Executable test of the type-conditional write-set model (doc
+         * section 18).  The record types per entry come from 0x20809019's
+         * directory, which is a *prediction* here -- this check is what
+         * falsifies it.  Within a 64 B record the handler is predicted to
+         * write dwords 0, 2..11, 13, 14 (13 of 16) for types 08/09, and only
+         * dword 0 for type 03; dwords 1 (+4), 12 (+48) and 15 (+60) are never
+         * written for any type.  A single mismatch of either kind is a
+         * counterexample to the model, not a driver fault: report it and let
+         * the byte dump above be the evidence. */
+        if (cases[i].prefill && size == 2108u && cases[i].mask == 0x000000ffu) {
+            static const unsigned char entry_type[8] = { 8, 9, 8, 9, 9, 9, 3, 8 };
+            unsigned bad = 0;
+            for (unsigned e = 0; e < 8; ++e) {
+                unsigned base = 60u + 64u * e;
+                int stamp_ok = buf[base] == entry_type[e] &&
+                               buf[base + 1] == entry_type[e];
+                if (!stamp_ok) { ++bad; }
+                for (unsigned d = 0; d < 16; ++d) {
+                    unsigned off = base + 4u * d;
+                    int wrote = memcmp(buf + off, seed + off, 4) != 0;
+                    int expect = (d == 0) ||
+                                 (entry_type[e] != 3u && d != 1u && d != 12u &&
+                                  d != 15u);
+                    if (wrote != expect) { ++bad; }
+                }
+            }
+            if (bad == 0)
+                nvx_emit(c, "V2.clkctl",
+                         "clkctl write-set model 0x2080901b mask 0xFF", st,
+                         NVX_V_OK,
+                         "type-conditional model CONFIRMED: 8 entries, types "
+                         "08,09,08,09,09,09,03,08; 13 dwords for each of the 7 "
+                         "type-08/09 entries and the stamp alone for the type-03 "
+                         "entry; %u changed = 14 head + 7*13 + 1; last @%u = "
+                         "entry 7's rec+56", changed, last);
+            else
+                nvx_emit(c, "V2.clkctl",
+                         "clkctl write-set model 0x2080901b mask 0xFF", st,
+                         NVX_V_HARD,
+                         "type-conditional model FALSIFIED: %u mismatching "
+                         "dword/stamp slot(s) of 128 -- the 9019 directory "
+                         "order, the per-type split, or the 64 B record "
+                         "geometry is wrong; the byte dump above is the new "
+                         "evidence", bad);
+        }
+
         for (unsigned o = 0; o < size; o += 16) {
             unsigned n = size - o < 16 ? size - o : 16;
             char t[128];
