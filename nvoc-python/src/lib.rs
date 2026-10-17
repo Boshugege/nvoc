@@ -1392,7 +1392,7 @@ fn settings_macos_rm_to_map(
     // Milliwatts are exact; keep whole watts integral like the NVAPI path and
     // fall back to a fractional value when the driver reports a sub-watt limit.
     let watts = |mw: u32| {
-        if mw % 1000 == 0 {
+        if mw.is_multiple_of(1000) {
             u64_value((mw / 1000) as u64)
         } else {
             f64_value(mw as f64 / 1000.0)
