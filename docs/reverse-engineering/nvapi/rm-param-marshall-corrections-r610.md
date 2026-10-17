@@ -430,3 +430,101 @@ therefore does *not* encode the privilege that makes the write path refuse below
 root, and it must not be cited for that. The below-root refusal stays what the
 runtime measurement says it is: a precondition of the forwarding path the root
 owner holds, not a missing method and not a table flag.
+
+## 7. The same commands as NVAPI wraps them: an 8-slot view of our 12-dword record, and the domain index space
+
+Sections 5–6 established the geometry from the TU116 host side. This section records
+what the *same four commands* look like from the other side of the wall, because the
+in-tree `nvapi-rs` describes them and its comments carry live A/B results. It is a
+cross-reference, not new measurement: everything below is either quoted from that
+copy or read out of our own captured blocks (`core/tests/data/macos-offset-*.bin`).
+
+`nvapi-rs/src/clock.rs` wraps the identical RM commands: GetControl
+`0x2080901b`/ID `0xF58938F5` and SetControl `0x2080d01c` are exposed as private
+NVAPI IDs behind escape `0x07000049`, and its header comment says all four were
+live-verified on an Ada 4060 Laptop under R575.74. The semantics below therefore
+describe **the same command on a different chip and driver version** — useful as a
+hypothesis source, never as a substitute for a TU116 measurement.
+
+### 7.1 The record geometry differs, so the value dwords must not be mapped one-to-one
+
+| | NVAPI caller view (cited) | our measured RM block |
+| --- | --- | --- |
+| block | 2404 B, mask at +8, records at +100 | 2108 B, mask at +4, records at +60 |
+| record stride | 72 B | 64 B |
+| value slots | `values_kHz: [i32; 8]` — **8** dwords | **12** dwords written per record (record-relative `{8,12,16,20,24,28,32,36,40,44,52,56}`) |
+
+The manager's own struct is the one that would settle this, but the two caller views
+agree on nothing structural except the 32-record count. So our twelve dwords are not
+the documented eight and pairing them by position is a guess until the A/B.
+
+### 7.2 The documented slot order — cited, and marked unconfirmed by its own author
+
+`ClkDomainControlEntry.values_kHz` carries this comment (verbatim from the copy):
+
+> Slot semantics are driver-opaque — per the article slot 0 is the signed frequency
+> offset (kHz) and neighbors are range/voltage terms, but only an A/B SET +
+> MEASURE_FREQ experiment confirms which is which.
+
+Two things follow. First, the article's claim (`melonvolt/xbar.txt`, cited in the
+same header) agrees with our own recorded guess that the offset is the first value
+dword, but neither source has shown it. Second, and usefully, the queued first write
+in `tools/clock-offset-write-run.sh` — `BIT 0` with the value at the record's
+`+8` — is *already* slot 0, so whichever way that A/B comes out it tests the
+documented hypothesis first rather than a random dword.
+
+### 7.3 Which record types carry a value write, and one discrepancy with our measurement
+
+The copy records the driver's per-type switch as a set, and says explicitly that it
+"is derived purely from the record TYPE byte, NOT a driver capability bit, and says
+NOTHING about readability" — which is the same distinction our `unavailable`
+wording makes. For the V1 protocol (magic `0x10964`, the size family this host
+speaks) it lists the marshalled types as `{1, 3..=9}`; type `0x02` is marshalled by
+neither version and a SetControl silently drops it; type `0x0A` is V2-only.
+
+Our own stage-7.5 measurement found the write set to be type-conditional and
+all-or-nothing — the type-08/09 records each took twelve value dwords while the
+single type-03 record "writes its stamp only". **The V1 set includes 3**, so either
+the byte we read as a type is not the protocol type, or the two versions disagree.
+Recorded as an open discrepancy: the write runbook must not assume a type-03 record
+accepts a value write.
+
+### 7.4 Bit 5 names the wrong domain for *control* records
+
+The copy's live A/B on Ada: offsetting the control record at bit 5 moved the
+MSD-attributed V/F curve while the Host measure channel stayed in band, so "the
+control RECORD at bit 5 drives the MSD domain, not the Host the RTSS label at index
+5 names", and consumers rendering names "should relabel bit 5 to MSD". Our own
+round-19 note had already used MSD for id 21 and Host for id 5; this is the warning
+to carry if the payload ever names control records.
+
+### 7.5 The index space, named from our own captured blocks
+
+The names are RTSS's, from `nvapi-rs/sys/src/gpu/clock.rs` (`NV_GPU_CLOCK_DOMAIN_ID`:
+`Gpc=0, Xbar=1, Sys=2, Hub=3, M=4, Host=5, Disp=6, …, Leg=19, Pwr=20, Msd=21`, with
+the header noting the names come from RTSS and that RTSS aliases some indices).
+
+Decoding our captured `0x20809019` block with the parser's own geometry (48 B head,
+384 B rows, bit at row+4) gives ten stamped rows whose bits are
+`{0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80000, 0x100000, 0x200000}`, i.e. **bit
+indices {0,1,2,3,4,5,6,19,20,21}** = GPC, XBAR, SYS, HUB, **M**, HOST, DISP, LEG,
+PWR, MSD. That is the citable form of what the backend has been rendering
+informally: bit 0 = GPC is the "core" domain and **bit 4 = M is the memory
+domain**.
+
+The rows are *not* ordered by their bits: in row order the ten bits are
+`{0,1,4,2,3,20,19,6,21,5}`. That is what makes the measured `0xFF` window cover GPC
+and M while leaving bits 21 and 5 — MSD and HOST — outside it, so "the first eight
+rows" and "the first eight bit indices" are different sets, and the reason string's
+row numbering is the one that matches the device.
+
+The same index space appears in the `0x20809025` range block: its three records'
+tags are `01 01 03 01`, `01 01 04 01`, `01 01 05 01` — third byte 3, 4, 5 — and each
+carries `-18750 / +18750` at record `+20 / +24`, matching the documented
+`min_offset`/`max_offset` ±18.75 MHz span. **Hypothesis, not confirmed:** those
+three records are the per-domain windows for HUB(3), M(4) and HOST(5). Supporting
+it: the values land inside the directory's own index space and the record count is
+below the ten domains. Against it: all three records carry the same `0x190000` at
+record `+8`, which is an odd thing for a per-domain quantity to do — so what that
+dword means stays open, and the backend keeps reporting one agreed window rather
+than three attributed ones until something other than the numbering supports it.
