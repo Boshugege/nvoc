@@ -1437,3 +1437,32 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 6. **设备实测（楔子期间，只读、零 SET）** ✔：入口 rc=0、四路传感器均在位、`current_c`/`min_c`/`max_c` 为 `null`；`min_c` 理由为 `the public thermal read did not complete (macOS RM: RUSD allocate/map: 0x00000062 (NV_ERR_RESET_REQUIRED))`。**这条顺带给出一个此前没有的新事实**：楔子期间 `MacosRmSession` **在建立会话（RUSD 映射）时就被拒**，所以公共读根本没发出去——偏移通道的读同样卡在这一层，这也解释了 `get-settings` 报的是"打开失败"而非"逐块 0x62"。
 7. **诚实边界** ✔/✗：**量程的真实数值**＝**已实现待实测**（接线完成、单元测试与构建、失败方向设备实测都有，但健康 GSP 下的 `[0,127]` 尚未由本入口实测）；**入口可达性**＝已实现且实测（rc=0）；**实时温度**＝已实现且实测（阶段 2 与 Metal 负载）；**阈值族/温度限制范围**＝驱动未发布到本路径（该段只有读数与量程，没有策略）；**温度写**＝未实现、访问驱动前拒绝，`settings_write=false` 不变。
 8. **验证范围** ✔：core 单测新增 `the_thermal_read_fills_the_range_of_its_own_target_and_nothing_else`（本 target 量程填入、其余三路理由为"答了但没有该类型的传感器"、`range_known=0` 不变成 0、`target_known=0` 不落任何入口、RUSD 无量值时用读的读数并标 `0x20800513:sensor0`）与 `a_refused_thermal_read_is_not_reported_as_an_unwired_one`（三态互不混同）；core **128**／cli **87**／srv **53**／optimizer **68** 全过；clippy `-D warnings`／`fmt --check` 干净；`cargo check -p pynvoc` 通过；机器 `OGKM=… cargo build -p nvoc-cli` 成功（C 侧一并编译）并实机两次运行（第一次暴露 C 缺 `ctrl2080thermal.h` 头文件包含，已修）。
+
+### 本轮追加八十八（2026-10-18，电压/VF 族的静态只读盘点：公开树里"确实没有"，仓库里"模型完整"，缺的是中间那一层）
+
+**为什么现在做** ✔：原目标把 VF 曲线**后置**（"集中突破一条核心/显存频率域偏移通道，VF 曲线后置"），但没有把它划出范围；同时原目标禁止用"头文件搜不到"当未知的理由 ⇒ 电压/VF 这两族必须给出**具体调查结论**，而不是继续挂着"未实现"三个字。
+
+**1. 公开 OGKM 树：两族都不可命名（这是核对后的精确结论，不是"搜索不便"）** ✔
+- `reference/…/ctrl/ctrl2080/ctrl2080clkavfs.h` = **36 行**，正文只有 `#pragma once` ＋ 3 个 `#include`，**零命令声明**；`ctrl2080volt.h` = **38 行**同样空壳 ✗。
+- `grep -rln "AVFS" src/` ⇒ **零文件命中**；`grep -rn "AVFS_.*_ID" src/` ⇒ **零命中** ⇒ AVFS 的 interface/message id **不在公开树里** ✗。
+- `grep -rn "0x2080[Bb]2[0-9a-f][0-9a-f]" src/` ⇒ **零命中** ⇒ 电压族（VoltRails `0x2080b201`）**同样不可由公开树命名** ✗。
+- 对照：CLK 偏移通道的私有块**也不在**公开树，两者**同形状** ✔。
+
+**2. 出口表里这两族的行确实存在（所以不能写"驱动没有"）** ✔
+| 族 | 接口字节 | 1118 行固件表 | 889 行导出表 |
+|---|---|---|---|
+| CLK legacy 读半边 | `0x90` | **74** 行 | **68** 行 |
+| 电压 legacy 读半边 | `0xb2` | **13** 行 | **13** 行 |
+| 电压 legacy 读半边 | `0xb3` | **1** 行 | **1** 行 |
+- 电压两字节在两张表上**行数完全相同**（13/1），而 CLK 从 68 涨到 74 ⇒ §46 那批 229 行丢弃**确实覆盖 CLK 族** ⇒ 引用"某族有多少行"必须写明是哪份捕获 ✔（与 §48.4 同一纪律）。
+- `0x2080b201@2444`（VoltRails GetInfo）与其余 `0xb2` 行是**读**半边；其写孪生按 §42 规则（接口字节 +0x40、消息 id +1）为 `0xf2xx` ✔ —— **写面存在**，与偏移通道的结论一致 ✗（不是"驱动没提供电压写"）。
+
+**3. 仓库自身：NVAPI 调用者侧的 VF 模型是完整的** ✔（这才是"仓库内已有材料"）
+- `nvapi-rs/src/clock.rs`：`VfPoint`/`VfpEntry`、版本化解码 `from_raw_versioned`（v1/v2/v3）、`v1_marshalable`/`v2_marshalable`、`ClkVfDomainHint`/`ClkVfSegmentKind`/`ClkVfDomainClass`（含 `is_gpc_curve_plane`）、以及 `clk_vf_g_prior*`/`clk_vf_effect_for_delta`/`clk_vf_delta_for_target`/`clk_vf_stair_fit` 的**曲线推演** ✔；
+- `core`：`QueryVfpPointVoltage`、`QueryDomainVfpPoints`、`QueryDomainVfpIndices`、`VfPoint`/`VfPointType`、`SetPublicVftablePointOffset`/`ResetPublicVftableOffset`、`SetGpcVoltLock`/`VfpResetDomain`、`SetNvapiVfpPointPrivate`/`SetNvapiVfpRangePerPointPrivate` 等 ✔；
+- 消费方：`auto-optimizer` 的 `oc_scanner`/`phases`/`pressure`/`scan_support` 已经在用这些操作做真实扫描 ✔。
+
+**4. 结论与分类** ✔
+- 缺的**不是模型、不是驱动实现**，而是 **NVAPI 与 RM 之间的那一层在 macOS 路径上的接线**（私有 id 与其封送）——与偏移通道**同一形状**的问题 ⇒ 偏移通道先做，VF 后置 ✔（符合原目标）。
+- 分类：电压/VF 的**入口**＝**未实现（在访问驱动前拒绝）**，原因＝该层未接线 ✔；**不是**"驱动没有"✗（`0x90`/`0xb2`/`0xb3` 的行确实在表里，写孪生按规则存在 ✔）；**不是**"尚未定位"到无法动手 ✗（方法已定：id 结构 ＋ 仓库内调用者结构 ＋ 可证伪的只读请求，与偏移通道同一套）✔。
+- **待做**（保持 VF 后置，不改优先级）：在偏移通道的写入门（权限前置条件 ＋ 客户端 SET 入口）解决后，用同一方法为 VF 挑出可证伪的只读首发 id。
