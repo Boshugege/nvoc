@@ -86,8 +86,11 @@ pub struct DeviceStatus {
 pub struct SettingsCapabilities {
     /// The backend can report the driver's current configuration.
     pub settings_read: bool,
-    /// The backend can change configuration. Still false on macOS: no writable
-    /// RM control is reachable on this driver (see [`DeviceSettings::notes`]).
+    /// The backend can change configuration. Still false on macOS: the GSP
+    /// method table does contain the GET/SET twins (0x2080901B pairs with
+    /// 0x2080D01C), but a write stays gated until the current value, a bounded
+    /// step and the restore path are verified on the device. See
+    /// [`DeviceSettings::notes`].
     pub settings_write: bool,
     /// The backend can put a saved configuration back. Only meaningful once
     /// `settings_write` is true.
@@ -96,7 +99,13 @@ pub struct SettingsCapabilities {
 
 /// One reason string shared by every configuration family the RM channel
 /// cannot read on this driver, so the payload cannot drift from the evidence.
-const SETTINGS_UNREADABLE_REASON: &str = "no readable RM control on this driver (see notes)";
+const SETTINGS_UNREADABLE_REASON: &str =
+    "no readable RM control for this family on this driver (see notes)";
+
+/// The two clock-offset families are the one family where the shared reason
+/// above would overstate the gap: the driver answers a per-domain offset
+/// *range*, it just never fills the current value. See the prefix notes.
+const CLOCK_OFFSET_UNREADABLE_REASON: &str = "offset range readable (0x20809025) but no current offset: the domain-control GET 0x2080901B answers NV_OK while its offset/range/applied dwords come back zero (see notes)";
 
 /// Read-only projection of the driver-visible configuration.
 ///
@@ -140,7 +149,13 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
         "settings_restore",
     ]
     .into_iter()
-    .map(|family| (family.to_string(), SETTINGS_UNREADABLE_REASON.to_string()))
+    .map(|family| {
+        let reason = match family {
+            "core_clock_offset" | "memory_clock_offset" => CLOCK_OFFSET_UNREADABLE_REASON,
+            _ => SETTINGS_UNREADABLE_REASON,
+        };
+        (family.to_string(), reason.to_string())
+    })
     .collect();
 
     DeviceSettings {
@@ -160,9 +175,11 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             settings_restore: false,
         },
         notes: vec![
+            "responder: these ids are answered by the GSP firmware, not by a host RM table row (NVRM forwards legacy ids with bit 0x8000 set), so every parameter block is sized against the GSP's own export table rather than the NVAPI caller struct.".into(),
             "read: P-state, enforced/requested power limit, PCIe generation, board/SKU and memory sizes come from the same RM snapshot as get-status; sensor readings are separate (see get-status).".into(),
-            "write: refused before the driver is opened. No writable RM control is reachable on 610.57.04; setting a limit would also need a verified restore path first.".into(),
-            "offsets/locks/VF/fan/thermal policies: NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2 (0x2080200b, exact SDK struct) and the campaign-sourced GETs rails-get-info 0x2080B201, rails-get-status 0x2080B202 and vfpoints-get 0x208090A2 all return NV_ERR_INVALID_ARGUMENT (0x1f) through this transport; EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
+            "write: refused before the driver is opened. The clock SET twin is identified (0x2080D01C, same 2108-byte block as the 0x2080901B GET), but a write still needs a readable current value, a bounded step and a verified restore, and the GSP must not be in the RESET_REQUIRED state.".into(),
+            "clock domains/offsets: 0x20809019 answers NV_OK with a 10-domain directory and 0x20809025 answers NV_OK with a per-domain offset range (three entries, +-18750 kHz) whose named fields match the recorded NVAPI struct field for field. 0x2080901B also answers NV_OK but only writes the per-record type bytes, so no *current* offset is readable through it on this firmware.".into(),
+            "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
     }
 }

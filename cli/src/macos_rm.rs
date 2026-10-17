@@ -17,7 +17,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         Ok(())
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons. Performance writes are not implemented.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons. Performance writes stay gated: the clock SET twin (0x2080D01C) is identified, but no write is issued until the current value, the bounded step and the restore path are verified on the device.",
             command.name()
         )))
     }

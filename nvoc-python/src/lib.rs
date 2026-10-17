@@ -5841,7 +5841,7 @@ mod tests {
             project: Some("G166".to_string()),
             unavailable: std::collections::BTreeMap::from([(
                 "core_clock_offset".to_string(),
-                "no readable RM control on this driver (see notes)".to_string(),
+                "no readable RM control for this family on this driver (see notes)".to_string(),
             )]),
             capabilities: nvoc_core::SettingsCapabilities {
                 settings_read: true,
