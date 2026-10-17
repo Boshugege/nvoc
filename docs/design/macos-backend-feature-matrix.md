@@ -46,6 +46,10 @@
   同步遥测、SIGINT/SIGTERM 停止）、`stage9-stress-20261017T041107Z`
   （**阶段 9 正确性校验补充**：`stress-macos` 全量 bit-exact 校验、负例 rc=1、60 s 限时负载
   1206 dispatch/0 失败、SIGINT 0.06 s 停止 + 遥测同步采样）。
+  `stage3-paramsizes-20261017T044129Z`（**阶段 3 读面修正证据**：`0x1f` 语义核对——缺方法
+  `0x1b` 对照、`BUS_GET_PCI_INFO` 错尺寸 `0x1f` 对照；`PERF_*` 家族分类；Tier-B 三个 GET 的
+  正确参数尺寸 2444/3232/524 B 与 payload 非零字数/复读稳定性；修正后 probe 输出
+  `plprobe2/5/6/7.c`）。
 
 ## 一、CLI 命令表（101 条，来源：`cli/src/lib.rs` 的 `CommandSpec`）
 
@@ -223,11 +227,11 @@
 | 0 基线/功能表 | 起点、边界、待办、证据索引 | 完成：本文件 + SSH/硬件/分支核对 + 101 条命令表 | 随每阶段更新并复核 |
 | 1 正确性与资源生命周期 | 修 ABI/释放顺序/旧数据/重连/输出/停止 | **完成**：`78d299d`、`a687453`、`8fb1aeb`；实机 5 项硬件测试、ABI 指纹、broken-pipe、SIGINT 全通过 | 保持回归 |
 | 2 基础信息与遥测 | 设备/信息/状态/连续监控 + 公共字段 | **完成**：样本 ABI v3（14 节/41 槽）落地——限频原因、逐风扇、有效/目标/视频/SM 频率、显存用量、逐引擎利用率、PCIe 代际、多温度、功耗族全部实测；`clkThrottleInfo`/`temps`/`avgPowerUsage`/`tgpmW`/`fanCoolerStatus.rpmCurr[16]`/`procUtil`/`pciBusData` 读取生效，`POLL_MEMORY` 经实测确认 610.57.04 恒返回 `RUSD_TIMESTAMP_INVALID`（`memEcc`/`memRowRemap` 不携带）、SM 域 Turing 为 0/0 → `unavailable`；`get-status` 人类/JSON/JSONL（schema `nvoc/macos-rm-sample/3`）一致；**1 Hz × 10 分钟长跑**（`stage2-longrun-…`）+ **全量验收**（`stage2-telemetry-20261017T034627Z`，15 项 rc=0）+ Metal 负载响应（gfx 1950 MHz / 54.9 C / 12.7 W / util 91% / gr 91.5% / fan 4243 rpm）；pynvoc `backends="macos-rm"` 的 discover/info/status 已分发并归一化 | 电压读取（`get-status` 无 voltage 字段）留给阶段 3/7 的当前设置读取 |
-| 3 当前设置/范围/恢复基础 | `get-settings`、范围/默认值/粒度、快照/回读/恢复 | **只读部分完成**：`get-settings --macos-rm` 输出驱动可见配置 + 能力位 + 缺口原因（core/CLI/pynvoc 三处一致）；写入族全部保持拒绝。**读不到的原因已定位**：`PERF_GET_LEVEL_INFO_V2`(0x2080200b，SDK 结构体精确尺寸) 与 campaign GET `rails-get-info` 0x2080B201 / `rails-get-status` 0x2080B202 / `vfpoints-get` 0x208090A2 全部返回 `NV_ERR_INVALID_ARGUMENT`(0x1f)（参数/尺寸不符，非 NOT_SUPPORTED），`edpp-limit-info`/`pmumon-clk-samples` 返回 0x56 | 需要正确的参数尺寸/布局或另一条读通道才能读偏移/VF 曲线；在此之前不声明范围/恢复 |
-| 4 核心/显存频率控制 | 偏移 GET/SET、锁频、reset | 未开始 | 依赖阶段 3 与写入授权 |
+| 3 当前设置/范围/恢复基础 | `get-settings`、范围/默认值/粒度、快照/回读/恢复 | **只读部分完成**：`get-settings --macos-rm` 输出驱动可见配置 + 能力位 + 缺口原因（core/CLI/pynvoc 三处一致）；写入族全部保持拒绝。**此前"驱动拒绝"是误判——根因是我们传错参数尺寸**（修正见 `a87876a`）：`0x1f` = `NV_ERR_INVALID_ARGUMENT`（尺寸/参数不符），对照缺方法 `0x1b`、`BUS_GET_PCI_INFO` 传错尺寸也返回 `0x1f`。据此复核：`PERF_GET_LEVEL_INFO_V2`(0x2080200b) 容量 0 → `NV_OK` 但 0 条、容量 ≥1 → `0x1f`，**驱动不提供频率域表**；Tier-B GET `rails-get-info`(0x2080B201) **2444 B**、`rails-get-status`(0x2080B202) **3232 B**、`vfpoints-get`(0x208090A2) **524 B** 在正确尺寸下被接受（`NV_OK`），但 payload 只有 16/0/1 个非零字且 `rails-get-status` 复读不一致 → **接受 ≠ 可读，布局未解码**；`edpp-limit-info`/`pmumon-clk-samples` 返回 `0x56` | 公开 SDK（610.57.04 `ctrl2080perf.h` 全量 `PERF_*`）**无任何时钟/电压偏移或 VF 编辑命令**；偏移/VF 需非公开接口或另一条读通道。在此之前不声明范围/恢复 |
+| 4 核心/显存频率控制 | 偏移 GET/SET、锁频、reset | 未开始：公开 RM 控制面（610.57.04 `ctrl2080perf.h` 全量 `PERF_*`）**无任何时钟/电压偏移读写命令** | 需非公开接口；写入依赖阶段 3 与授权 |
 | 5 功耗/温度/运行策略 | W/%、温度墙、Boost | 遥测可读；无写入 | 同上 |
 | 6 逐风扇/模式/曲线 | 风扇模式、曲线读写 | 遥测只有最大 RPM | 同上 |
-| 7 V/F、电压点、高级超频 | 曲线点/偏移/导入导出 | 未开始 | 同上 |
+| 7 V/F、电压点、高级超频 | 曲线点/偏移/导入导出 | 未开始：`vfpoints-get`(0x208090A2) 以 524 B 参数被接受但 payload 仅 1 个非零字，非曲线数据；公开 SDK 无 VF 编辑命令 | 需非公开接口；写入依赖授权 |
 | 8 其余功能族 | VBIOS、EDID、限频原因、策略 | 部分：`get-vbios -i` 离线解析可用 | 逐项给依据 |
 | 9 自动压力执行与验证器 | 限时负载、停止、结构化结果、正确性校验 | **主负载 + 校验器完成**。主负载＝原 `--vulkan-only` 渲染路径（零算法改动，仅补 loader/ICD 解析 `4993a42`）：无 env 冷启动 rc=0，5/10/30 s 阶梯与 60 s stock 负载 rc=0，错误路径（`--gpu-index` 越界 / `--pci-bus` 不匹配）rc=1，`--vulkan-window` 在非 Windows 回退 offscreen rc=0；同步遥测显示 util 峰值 100%/均值 83%、gfx 1.53→1.95 GHz、功耗 11.5→13.5 W、温度 54→62 ℃、风扇 1778→1920 rpm。校验器＝`stress-macos`（`1dcf27a`）：全量 bit-exact 比对、启动自检、负例 rc=1、60 s 限时 1206 次 dispatch/0 失败、SIGINT 0.06 s 优雅停止 | 渲染负载无读回校验、`--vulkan-only` 无进程内取消（靠 SIGINT/SIGTERM 默认处置）；阶段 10 需把负载/校验器结果接进 optimizer 闭环 |
 | 10 自动扫描/优化/结果应用 | 受限闭环、保存/应用/恢复 | 未开始 | 依赖 4-9 |
@@ -247,4 +251,7 @@
   不能由「渲染完成」推断计算正确性——该维度只由 `stress-macos` 提供。
 - `--vulkan-only` 无进程内取消/清理：SIGINT/SIGTERM 走 OS 默认处置立即终止（实测 rc=-2/-15），
   不执行 `device.destroy_device()`/teardown；只有 `stress-macos` 有进程内优雅停止。
+- Tier-B campaign GET（`rails-get-info`/`rails-get-status`/`vfpoints-get`）在正确参数尺寸下返回
+  `NV_OK`，但 payload 只有 16/0/1 个非零字且 `rails-get-status` 复读不稳定 → **"被接受"不等于
+  "可读"**：这些返回值不是可用读数，不得据此声明范围/曲线/恢复支持。
 - 未运行：完整 workspace `--ignored`、stage 3 探针组、任何性能 SET。

@@ -270,22 +270,38 @@ write path exists to restore from — the snapshot/readback/restore sequence has
 no meaning without one.
 
 Why the configuration families are unreadable on 610.57.04 through this
-transport (probed read-only, `probe-macos-rm --tierb-read`):
+transport (probed read-only, `probe-macos-rm --tierb-read`; sizes and payload
+shape corrected in `a87876a`, evidence `stage3-paramsizes-20261017T044129Z`):
 
-| Control | Result |
+An earlier pass recorded these GETs as "the driver refuses this command". That
+was **our** bug, not the driver's: `0x1f` is `NV_ERR_INVALID_ARGUMENT`, the
+"your parameters are the wrong shape" code, not a capability answer. The
+control confirms it — a real control (`BUS_GET_PCI_INFO` 0x20801801) also
+answers `0x1f` when handed the wrong size, while a method identifier that does
+not exist answers `NV_ERR_OBJECT_NOT_FOUND` 0x1b.
+
+| Control | Result (corrected parameter size) |
 | --- | --- |
-| `NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2` 0x2080200b (exact SDK struct) | `NV_ERR_INVALID_ARGUMENT` 0x1f |
-| `rails-get-info` 0x2080B201 (campaign ID, 76 B records) | `NV_ERR_INVALID_ARGUMENT` 0x1f |
-| `rails-get-status` 0x2080B202 (campaign ID, 100 B records) | `NV_ERR_INVALID_ARGUMENT` 0x1f |
-| `vfpoints-get` 0x208090A2 (campaign ID, 68 B records) | `NV_ERR_INVALID_ARGUMENT` 0x1f |
+| `NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2` 0x2080200b | capacity 0 → `NV_OK` with **0 records**; capacity ≥1 → `0x1f`. The driver publishes **no clock-domain table** either way |
+| `rails-get-info` 0x2080B201 | accepted only at **2444 B** → `NV_OK`; payload has just **16** non-zero words |
+| `rails-get-status` 0x2080B202 | accepted only at **3232 B** → `NV_OK`; payload **0** non-zero words and differs between two calls (not stable) |
+| `vfpoints-get` 0x208090A2 | accepted only at **524 B** → `NV_OK`; payload has **1** non-zero word — not a curve |
+| smaller buffers for any of the three | `NV_ERR_INVALID_ARGUMENT` 0x1f (a single record's stride is below the accepted size) |
+| `BUS_GET_PCI_INFO` 0x20801801 with the wrong size | `NV_ERR_INVALID_ARGUMENT` 0x1f — proves `0x1f` = wrong parameters |
+| a method identifier that does not exist | `NV_ERR_OBJECT_NOT_FOUND` 0x1b |
 | `edpp-limit-info`, `pmumon-clk-samples` | `NV_ERR_NOT_SUPPORTED` 0x56 |
 
-`0x1f` is the driver's argument/shape rejection, not "unknown command" (that
-path answers `NV_ERR_NOT_SUPPORTED`, as EDPp and pmumon do), so the GETs likely
-exist with a different parameter size or layout than the campaign records
-assume. Until that is resolved — or another read channel is confirmed — clock
-offsets, locks, the V/F curve, fan policy and thermal policy stay "cannot
-read", and therefore cannot be ranged, snapshotted or restored.
+**Acceptance is not data.** Handing the three GETs the size the driver accepts
+does make them return `NV_OK`, but the payloads do not look like the readings
+the campaign layouts predict (16/0/1 non-zero words) and `rails-get-status` is
+not even stable across two calls, so the layouts remain undecoded and the
+values must not be used. Separately, the public SDK carries no write path for
+these families at all: the full `NV2080_CTRL_CMD_PERF_*` set in 610.57.04's
+`ctrl2080perf.h` contains no clock/voltage offset or VF-edit command. Until the
+Tier-B layouts are decoded (or another read channel is confirmed), and a
+non-public offset/VF interface is found, clock offsets, locks, the V/F curve,
+fan policy and thermal policy stay "cannot read", and therefore cannot be
+ranged, snapshotted or restored.
 
 ## Consumers (pynvoc)
 
