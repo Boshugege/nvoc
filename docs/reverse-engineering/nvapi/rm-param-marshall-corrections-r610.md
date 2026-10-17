@@ -1332,3 +1332,26 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - 分类 ✔：压力侧**构建/入口就绪＝已实现且实测（构建层）**；**实际负载运行＝已实现待实测**（wedge ✗）；Metal 校验器仍**未跑** ✗。
 - 本节**未跑任何负载** ✗（`cargo build` 与 `--help` 均不访问设备 ✔）。
 - 设备访问 ✔：本轮仅一次 wedge 轮询（verdict `0x00000062`，uptime `1 day, 4:16`，同一 boot ✔）⇒ 未重启、未写入、无性能操作 ✔。
+
+## 39. 服务入口能力核对：`srv` 把写能力硬编码成了与后端相反的结论（阶段 11 第 5 条）2026-10-18
+
+**选择依据** ✔：阶段 11 第 5 条要求"**各入口能力、范围和错误与后端一致**，既不能后端可用而入口一律拒绝，也不能可点但无实现"✔ ⇒ 本轮逐个入口核对，发现服务入口与后端能力**不一致** ✗。
+
+### 39.1 缺口（实测）✗
+- `srv/src/macos.rs` 的 `supports_writes()` **硬编码 `false`** ✗（原 L134 ✔），而同一能力在 `core` 侧有唯一常量 `nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED` ✔ —— 优化器写入门控在该常量上（`9ff687f` ✔），**服务入口没有** ✗ ⇒ 两个入口可以各自漂移 ✔。
+- 该方法的消费方实际决定用户可见行为 ✔：`srv/src/http.rs:488`（能力上报 ✔）与 `srv/src/runtime.rs:145,171`（是否启用控制闭环 ✔）都直接读它 ⇒ 漂移会变成对外可见的不一致 ✔。
+- 模块文档两处已被实测推翻 ✗：①"the public 610.57.04 RM control surface has **no** clock/voltage offset, lock, fan or thermal-policy **write** command"× —— 写命令**存在** ✔（`0x2080d01c` 是 `0x2080901b` 的孪生、且是 set 身份 `(cmd & 0xC000) == 0xC000` ✔）；②"the private GETs … return `0x1f` or `0x56`"× —— 那是**早期尺寸猜测**的应答 ✔，驱动只接受其导出表声明的尺寸 ✔，`0x20809061@776` 就是被接受并发布了逐域偏移的那一个 ✔。
+- 这正是原目标明令禁止的表述错误 ✗："root GET 权限不足**不得伪装成命令不存在**" ✔。
+
+### 39.2 修法 ✔
+- `supports_writes()` 改为返回 `nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED` ✔（今天该常量为 false ✔ ⇒ **行为不变** ✔，但两入口从此同源 ✔）。
+- 共享拒绝理由 `READ_ONLY` 改为点名真正缺失的两层 ✔：写路径 `0x2080d01c` **存在** ✔，但 (a) 需要本客户端没有的权限 ✔（非特权调用方实测 `NV_ERR_INSUFFICIENT_PERMISSIONS 0x1b` ✔）；(b) 原生层不发任何 SET id ✔。
+- `read_offset_mhz` 的理由不再宣称"没有可读的偏移命令"✗：偏移**可读** ✔（`nvoc_core::macos_rm::DeviceSettings::clock_offsets`，来自 `0x20809061` 时钟文档 ✔），只是文档的域位尚未全部映射到 `OffsetDomain` 名字 ✔ ⇒ 按域取数会编码未经验证的假设，故如实说明 ✔。
+- `read_vf_curve` 改为"**not located yet**"✗（原来写"driver 上没有可读 V/F 控制"× —— 准确的表述是**尚未定位** ✔）。
+### 39.3 测试与验证范围 ✔
+- 新增 `the_shared_reason_names_the_missing_layers_not_a_missing_command` ✔：钉住理由中含 `0x2080d01c` 与 `privilege`、且**不含** `"no writable RM control"` ✔ ⇒ 防止"命令不存在"的说法回流 ✔。
+- 既有 `every_actuator_fails_closed_with_the_shared_reason` 中 `assert!(!supports_writes())` 改为**与常量相等** ✔ ⇒ 本地副本无法再漂移 ✔。
+- 实测 ✔：Linux `cargo fmt --all -- --check` rc 0 ✔；`cargo clippy -p nvoc-srv --all-targets -- -D warnings` **rc 0** ✔；`cargo test -p nvoc-srv` ⇒ **53 passed, 0 failed** ✔；**测试机 macOS** `OGKM=… cargo test -p nvoc-srv` ⇒ **53 passed, 0 failed**（与 Linux 同数 ✔）✔。
+- 已知且**未动** ✗：`nvapi-rs/sys/src/nvapi.rs:87` 在 macOS 目标上有 `unused variable: id` 警告 ✔ —— 属**vendored 依赖**、非本次改动 ✔ ⇒ 按"不覆盖他人工作"保留原样 ✔，仅记录 ✔。
+### 39.4 设备访问 ✔
+本轮仅一次 wedge 轮询（`0x00000062`，uptime `1 day, 4:19`，同一 boot ✔）；该 crate 的单测不访问设备 ✔（`macos.rs` 的测试以空 GPU 列表构造后端 ✔）⇒ 未重启、未写入、无性能操作 ✔。

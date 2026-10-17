@@ -1289,3 +1289,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (4) **"bundled"真义更正** ✗：非"进程内"× ⇒ `stressor_process.rs:10,67-93` 把路径解析为 `current_exe()` 并以 worker 哨兵 argv 重新调起自身 ⇒ 压力仍以**子进程**运行 ✔；我的 Cargo.toml 注释已按此改写 ✔。
 (5) **状态** ✔：构建/入口＝**已实现且实测**；**实际负载运行＝已实现待实测**（wedge ✗）；Metal 校验器**未跑** ✗。本节未跑任何负载 ✔。
 (6) **设备访问** ✔：仅 wedge 轮询一次（`0x62`，uptime `1 day, 4:16`，同一 boot）；`cargo build` 与 `--help` 均不访问设备 ⇒ 未重启、未写入、无性能操作。
+
+### 本轮追加七十三（2026-10-18，服务入口能力核对：`srv` 曾把写能力硬编码成与后端相反的结论）
+
+(1) **选择依据** ✔：阶段 11 第 5 条"各入口能力、范围和错误与后端一致，既不能后端可用而入口一律拒绝"⇒ 逐入口核对，**发现不一致** ✗。
+(2) **缺口** ✗：`srv/src/macos.rs::supports_writes()` **硬编码 `false`**，而 `core` 侧同一能力有唯一常量 `SETTINGS_WRITE_SUPPORTED`（优化器门控已在该常量上，`9ff687f`）⇒ 两入口各自漂移 ✔；消费方直接决定用户可见行为（`http.rs:488` 能力上报、`runtime.rs:145,171` 是否启用闭环）✔；模块文档两处已被实测推翻 ✗：写命令**存在**（`0x2080d01c` 为 `0x2080901b` 的孪生、set 身份 `(cmd & 0xC000)==0xC000`）✔；"私有 GET 一律 `0x1f`/`0x56`"是早期尺寸猜测的结果 ✗，`0x20809061@776` 被接受并发布逐域偏移 ✔ ⇒ 违反"权限不足不得伪装成命令不存在"✗。
+(3) **修法** ✔：`supports_writes()` 改读 `nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED`（今天为 false ⇒ **行为不变**、两入口同源）✔；共享理由点名真正缺失的两层（写路径存在，但需权限（实测 `0x1b`）＋原生层无 SET id）✔；`read_offset_mhz` 不再宣称"没有可读偏移命令"（偏移**可读**，只是域位未全部映射到 `OffsetDomain`）✔；`read_vf_curve` 改为"尚未定位"✔。
+(4) **测试** ✔：新增 `the_shared_reason_names_the_missing_layers_not_a_missing_command`（钉住含 `0x2080d01c`／`privilege`、不含 `"no writable RM control"`）✔；既有能力断言改为与常量相等 ✔。
+(5) **验证** ✔：Linux fmt rc0、clippy `-D warnings` rc0、`cargo test -p nvoc-srv` **53 passed 0 failed**；**测试机 macOS** 同 crate **53 passed 0 failed**（同数）✔；`nvapi-rs/sys/src/nvapi.rs:87` 的 macOS-only `unused variable` 属 vendored 依赖 ⇒ **未动**、仅记录 ✔。
+(6) **设备访问** ✔：仅 wedge 轮询一次（`0x62`，uptime `1 day, 4:19`）；单测不访问设备（空 GPU 列表构造）⇒ 未重启、未写入、无性能操作。

@@ -4,18 +4,29 @@
 //! backend in [`crate::backend`] has nothing to talk to. The driver is
 //! reachable only through the RM/RUSD read channel behind NullMoth, which
 //! exposes telemetry — clocks, temperatures, power, fan rpm, utilization,
-//! throttle reasons — but **no writable control** is reachable: the public
-//! 610.57.04 RM control surface has no clock/voltage offset, lock, fan or
-//! thermal-policy write command, and the private GETs the read-channel review
-//! probed return `NV_ERR_INVALID_ARGUMENT` (0x1f) or `NV_ERR_NOT_SUPPORTED`
-//! (0x56) through this transport (evidence:
-//! `outputs/review-stage4-7-read-channel-20261017.md` in the delivery
-//! bundle).
+//! throttle reasons — and a private control channel now partially mapped.
 //!
-//! So this backend implements the read half of the trait and fails every
-//! actuator closed with one shared reason; it reports
-//! [`supports_writes`](ControlBackend::supports_writes) as false, which pins
-//! the control loop to observe-only. It deliberately fabricates nothing: a
+//! The read half is implemented; every actuator fails closed. Two facts keep
+//! that honest, because the usual shorthand ("this driver has no write
+//! command") is wrong here and the difference matters to a user:
+//!
+//! * The write command **exists**. The GSP export table names `0x2080d01c` as
+//!   the twin of the `0x2080901b` control GET, and its identity is a *set* id
+//!   (`(cmd & 0xC000) == 0xC000`). What a client cannot do today is *reach*
+//!   it: an unprivileged caller measured `NV_ERR_INSUFFICIENT_PERMISSIONS`
+//!   (0x1b), the host-visible table has no privileged row, and the macOS
+//!   native layer (`core/native/macos_rm.c`) carries no SET id at all.
+//! * Private GETs are **not** uniformly rejected. The read-channel review's
+//!   early `0x1f` / `0x56` answers came from caller-side size guesses; the
+//!   driver accepts exactly the size its export table declares, which is how
+//!   the 776-byte clock document (`0x20809061`) came back `NV_OK` and
+//!   published per-domain offsets.
+//!
+//! So [`supports_writes`](ControlBackend::supports_writes) reports
+//! `nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED` — the same switch the
+//! optimizer's write gate reads, so no entry point can drift away from the
+//! backend or from each other — and the control loop stays observe-only until
+//! the write gate opens. This backend deliberately fabricates nothing: a
 //! sensor / limit the RM channel does not publish is `None`, never a
 //! default-looking zero.
 //!
@@ -29,9 +40,14 @@ use nvoc_core::DeviceStatus;
 use std::borrow::Cow;
 
 /// One reason string shared by every actuator path, so the HTTP body, the
-/// audit entry and the capability matrix cannot drift apart.
-const READ_ONLY: &str =
-    "read-only macOS backend: no writable RM control is reachable on this driver";
+/// audit entry and the capability matrix cannot drift apart. It names the two
+/// layers that are actually missing rather than claiming the driver has no
+/// write command: the write path exists (`0x2080d01c`), but reaching it needs
+/// privilege this client does not have and a client-side SET entry point that
+/// is not wired yet.
+const READ_ONLY: &str = "read-only macOS backend: the clock-offset write path (0x2080d01c) exists \
+     but is not reachable yet -- it requires privilege this client does not have (an unprivileged \
+     caller measured NV_ERR_INSUFFICIENT_PERMISSIONS 0x1b) and the native layer sends no SET id";
 
 /// One discovered GPU: the core handle plus the resolved display name.
 struct MacosGpu {
@@ -132,7 +148,9 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn supports_writes(&self) -> bool {
-        false
+        // Same switch the optimizer's write gate reads. Hard-coding false here
+        // would let the service and the optimizer disagree about the backend.
+        nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -200,8 +218,9 @@ impl ControlBackend for MacosRmBackend {
 
     fn read_vf_curve(&mut self, _gpu_index: usize) -> Result<Vec<(f32, f32)>, String> {
         Err(
-            "V/F curve unavailable: no readable V/F RM control on this driver \
-             (read-only macOS backend)"
+            "V/F curve not located yet: no readable V/F RM control has been pinned on this \
+             driver, so nothing is asserted (the offset channel is the one under test; see \
+             docs/reverse-engineering/nvapi/rm-param-marshall-corrections-r610.md)"
                 .to_string(),
         )
     }
@@ -212,9 +231,18 @@ impl ControlBackend for MacosRmBackend {
         _domain: OffsetDomain,
         _backend: OffsetBackend,
     ) -> Result<i32, String> {
+        // The offset itself *is* readable -- `nvoc_core::macos_rm` parses it out
+        // of the 776-byte clock document and exposes it as `clock_offsets` -- but
+        // this slot asks for one domain by name, and the document identifies
+        // domains by a bit only one of which (0x10, memory) is currently
+        // nameable. Mapping the rest here would encode an unverified
+        // assumption, so this returns a reason that says exactly that instead of
+        // claiming no offset read exists.
         Err(
-            "clock offset unavailable: no readable offset RM control on this driver \
-             (read-only macOS backend)"
+            "clock offset for one named domain is not selected yet: the offset is readable \
+             (nvoc_core::macos_rm::DeviceSettings::clock_offsets, from the 0x20809061 clock \
+             document) but the document's domain bits are not all mapped to OffsetDomain names, \
+             so no per-domain number is asserted"
                 .to_string(),
         )
     }
@@ -344,9 +372,32 @@ mod tests {
     }
 
     #[test]
+    fn the_shared_reason_names_the_missing_layers_not_a_missing_command() {
+        // The write command exists; only the path to it is blocked. A reason
+        // string that says otherwise is the exact confusion the delivery
+        // requirements forbid, so pin the wording's substance.
+        assert!(
+            READ_ONLY.contains("0x2080d01c"),
+            "the reason should name the write command that exists: {READ_ONLY}"
+        );
+        assert!(
+            READ_ONLY.contains("privilege"),
+            "the reason should name the privilege precondition: {READ_ONLY}"
+        );
+        assert!(
+            !READ_ONLY.contains("no writable RM control"),
+            "the reason must not claim the driver lacks a write command: {READ_ONLY}"
+        );
+    }
+
+    #[test]
     fn every_actuator_fails_closed_with_the_shared_reason() {
         let mut backend = MacosRmBackend { gpus: Vec::new() };
-        assert!(!backend.supports_writes());
+        assert_eq!(
+            backend.supports_writes(),
+            nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED,
+            "the service must read the backend capability, not a local copy of it"
+        );
         assert_eq!(backend.backend_kind(), "macos-rm");
         assert_eq!(backend.gpu_count(), 0);
         assert_eq!(backend.name(0).as_ref(), "GPU 0");
