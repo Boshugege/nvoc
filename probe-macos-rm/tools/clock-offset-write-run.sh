@@ -34,6 +34,14 @@
 # rejection would be unreadable), and the full profile builds (the idle build
 # cannot send a stage-3 write at all).
 #
+# The id is not a guess either. In the private halves the SET twin of a GET is
+# (id | 0x4000) + 1 at an identical paramSize, and the corrected table carries 47
+# instances of that convention (0x2080901f@19416 -> 0x2080d020@19416, the six
+# thermal pairs, the a0->e0 pairs). 0x2080901b@2108 -> 0x2080d01c@2108 is one of
+# them; the same-low-byte variant 0x2080d01b does not exist at all. Size identity
+# is part of the rule: 28 further read ids have a partner that exists at a
+# different size, and those are not the pair.
+#
 # Root is not politeness -- it is the precondition the write is refused on. The
 # host forwarder rejects a control id whose bits carry (cmd & 0xC000) == 0xC000
 # unless the calling client is at RS_PRIV_LEVEL_USER_ROOT, and on the corrected
