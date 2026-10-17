@@ -15,8 +15,8 @@ Five earlier claims were wrong and are corrected here:
 | "the responder is not located; TU116 runs host-side RM without GSP" | the responder **is the GSP firmware** reached by the host's legacy-non-privileged forwarding path |
 | "no GSP firmware file exists under `/Library/Extensions`, `/Library/NullMoth` or `/usr/local`" | the firmware lives at `/Users/Shared/nvfw/nvidia/610.57.04/{gsp_tu10x.bin,gsp_ga10x.bin,ucodes_*.bin}` — outside every path that was searched |
 | "the private ids have no implementation body on this machine" | they have none in the host NVOC table, but **169 CLK + 151 VOLT rows** exist in the GSP's own export table |
-| "`0x2080b201` is answered outside the GSP path" (first version of §7) — reversed at 11:11Z, **restored at 11:29Z** | **host-side is right**: §12's anchor battery shows the legacy forward is *dead* (`0x2080a0ff` `0x56` -> `0x62`), so its `NV_OK` cannot be a GSP answer. The 11:11Z argument (no host row, no literal) does not follow from its own premises: a 0-hit search is not a proof of absence, and b201's `paramSize >= 2444` gate is one the NVOC exact-match gate cannot produce |
-| "a `0x62` sweep tells host-implemented rows from GSP-dispatched ones" (first version of §6.1) — reversed at 11:11Z, **restored at 11:29Z** | today it **does** separate them, because the forward is down: `0x62` means "this control needs the GSP". The 11:11Z "per command" reading came from a census that contained only CLK/VOLT ids; §12's `--reg-read` A/B shows public PERF/PMGR/thermal controls going `NV_OK -> 0x62` in the same window |
+| "`0x2080b201` is answered outside the GSP path" (first version of §7; re-argued at 11:11Z and again at 11:29Z) | **withdrawn for good at 11:43Z, on evidence that does not depend on any reading of `0x2080a0ff`**: the request the host *had* been rejecting with `0x1f` (b201 at a `paramSize` under 2444) now answers `0x62`, while a genuinely host-validated id at a deliberately short size still answers `0x1f` in the *same* run (§12, `--anchor-read` rows 5–6). A `>=`-style gate whose answer moves with the GPU's fault state is not a host gate; and no legacy id can produce `NV_OK` **plus a payload** except through the forward. So b201 **is** GSP-answered — and the forward is **alive**. |
+| "a `0x62` sweep tells host-implemented rows from GSP-dispatched ones" (first version of §6.1; withdrawn at 11:11Z, briefly restored at 11:29Z) | **withdrawn again, for a different reason than at 11:11Z.** The forward *is* answering (`0x2080b201` is `NV_OK`), so `0x62` does not mean "this control needs the GSP"; it means "the GSP answered, and its answer is *this control needs a reset*". With the wedge latched, **every** GSP-side rejection — unknown id, size mismatch, state-checking handler — is collapsed onto `0x62`, which is exactly why public PERF/PMGR/thermal rows went `NV_OK -> 0x62` in the same window. A `0x62` sweep therefore measures *which handlers consult the fault state*, not which side of the RPC an id lives on. |
 
 The host table result is unchanged and still true: the loaded NVRM's NVOC
 export table has **1** CLK row (`0x20801037/6024`), **0** VOLT rows and **0**
@@ -697,63 +697,72 @@ sentence — "a `0x62` sweep is therefore a cheap way to tell host-implemented
 rows from GSP-dispatched ones" — because `0x2080b201` answered `NV_OK` while its
 category sibling `0x2080b202` answered `0x62` in the same session.
 
-**Correction (2026-10-17T11:29Z, §12).** The oracle is **restored**: §12's
-anchor battery measures `0x2080a0ff` (the "forwarded, no such method" anchor)
-going `0x56 -> 0x62`, i.e. the forward step is broken, so *no* private id is
-GSP-answered and `0x2080b201`'s `NV_OK` puts it on the host side. The oracle
-holds **while the forward is down** — the condition that makes it useful — and
-must not be used to classify an answer that came through a *live* forward. The
-rest of the paragraph stands: three of the seven `0x62` ids above are in the
-host NVOC table, so registration is not a statement about who answers.
+**Correction (2026-10-17T11:43Z, §12).** The oracle is **withdrawn for
+good.** Its 11:29Z form rested on reading `0x2080a0ff`'s `0x56 -> 0x62` flip as
+"the forward is broken"; §12 replaces that inference with a direct measurement
+of *where* the validation happens, and it lands behind the forward. `0x62` is
+therefore not an oracle for "needs the GSP" — it is what this GSP returns for
+**any** rejection while it wants a reset, including for ids that have a handler
+(the PERF/PMGR rows above) and for ids that do not. The rest of the paragraph
+still stands: three of the seven `0x62` ids *are* registered in the host NVOC
+table, so registration says nothing about who answers.
 
-## 7. `0x2080b201` survives the wedge because it is *host*-answered (anchor battery, 2026-10-17T11:29Z)
+## 7. `0x2080b201` survives the wedge because the GSP's rail-info handler does not consult the fault state
 
-While every GSP-forwarded id above answered `0x62 NV_ERR_RESET_REQUIRED`,
-`0x2080b201 @2444` kept answering `NV_OK` with its usual
-`mask 0xFF + 800000 µV / 756250 µV` payload — while *registered* GSP-backed
-commands like `0x2080200b` and `0x20802609` were `0x62` (see §6.1).
+While every other GSP-forwarded id answers `0x62 NV_ERR_RESET_REQUIRED`,
+`0x2080b201 @2444` keeps answering `NV_OK` with its usual
+`mask 0xFF + 800000 µV / 756250 µV` payload, byte-for-byte the same as before
+the wedge (pre-wedge `outputs/stage3-paramsizes-20261017T044129Z/`, post-wedge
+`outputs/volt-recheck-20261017T112610Z/`). `0x2080b202` — the *status* half of
+the same category — answers `0x62` in the same battery.
 
-**Correction history.** The first version read the contrast as "`0x2080b201` is
-answered *outside* the GSP path". At 11:11Z that was reversed, on the strength
-of the two measurements below, into "the gate is per command" — a reading that
-had *only* CLK/VOLT ids in its census. At 11:29Z the anchor battery (§12)
-refuted it: the legacy forward does not reach the GSP at all any more, so
-`NV_OK` from `0x2080b201` **cannot** be a GSP answer. The first version was
-right about the mechanism; what follows is what is still true of the two
-measurements that were used against it, and §12 is the evidence that settles it.
+**Correction history (this section has been wrong twice).** First version:
+"answered *outside* the GSP path". 11:11Z: reversed to "the gate is per
+command". 11:29Z: reversed again to "the forward is dead, so it must be
+host-answered" — and that version is now **withdrawn**, because it rested on
+interpreting a *negative* anchor (`0x2080a0ff`'s `0x56 -> 0x62` flip) rather
+than on measuring the thing itself. §12 measures it: the `>= 2444` gate on
+`0x2080b201` **moves with the GPU's fault state** (`0x1f` pre-wedge, `0x62`
+during it), and a host validation gate does not do that. So the id is
+GSP-served, and the sentence that survives is the one the first version got
+right by accident: what is special about b201 is that **its handler returns
+`NV_OK` regardless of the reset-required state**, not where it lives.
 
-Two measurements that were read as "therefore it is GSP-served":
+Two facts that were used to argue the host side, and what is actually true of
+them:
 
-1. **The host has no handler for any CLK/VOLT private id.** The host's only
-   deprecated-control rows are the eight in
+1. **The host has no handler for any CLK/VOLT private id.** Correct, and it
+   does not follow that the GSP cannot be the answerer — it is the *reason* the
+   GSP is. The host's only deprecated rows are the eight in
    `src/nvidia/interface/deprecated/rmapi_deprecated_control.c`
-   (`rmDeprecatedControlTable`):
-   `NV0000_CTRL_CMD_SYSTEM_GET_BUILD_VERSION`, `NV2080_CTRL_CMD_BIOS_GET_INFO`,
-   `NV2080_CTRL_CMD_BUS_GET_INFO`, `NV0080_CTRL_CMD_BSP_GET_CAPS`,
-   `NV2080_CTRL_CMD_GPU_GET_INFO`, `NV0073_CTRL_CMD_DP_SET_MSA_PROPERTIES`,
-   `NV0080_CTRL_CMD_MSENC_GET_CAPS`, `NV2080_CTRL_CMD_FB_GET_INFO` — no CLK row,
-   no VOLT row. Everything else with bit `0x8000` goes to `RmGssLegacyRpcCmd`,
-   which does no table lookup, no size check, no name check: it copies the
-   block and calls `pRmApi->Control(PHYSICAL)`.
-2. **The id literal is absent from every loaded host binary.** A byte scan for
-   the little-endian u32 of `0x2080b201`, `0x2080b202`, `0x2080b213`,
-   `0x20809019`, `0x2080901b`, `0x20809026` and `0x20809061` returns **0 hits**
-   in `NVRM`, `NVAccel`, `NVRMFB`, `NVRMAGDC` and the nvmtl dylibs, while the
-   same scan finds the *public, host-implemented* `0x20800102` **19** times and
-   `0x2080122a` twice. A host-side handler would have to compare against a
-   literal; there is none.
+   (`rmDeprecatedControlTable`): `NV0000_CTRL_CMD_SYSTEM_GET_BUILD_VERSION`,
+   `NV2080_CTRL_CMD_BIOS_GET_INFO`, `NV2080_CTRL_CMD_BUS_GET_INFO`,
+   `NV0080_CTRL_CMD_BSP_GET_CAPS`, `NV2080_CTRL_CMD_GPU_GET_INFO`,
+   `NV0073_CTRL_CMD_DP_SET_MSA_PROPERTIES`, `NV0080_CTRL_CMD_MSENC_GET_CAPS`,
+   `NV2080_CTRL_CMD_FB_GET_INFO` — no CLK row, no VOLT row. Everything else
+   carrying bit `0x8000` goes to `RmGssLegacyRpcCmd` (`rmapi_deprecated.h:41`,
+   `rmapi_deprecated_control.c:97`), which does no table lookup, no size check
+   and no name check: it copies the block and calls `pRmApi->Control(PHYSICAL)`.
+   Note the corollary the 11:29Z version missed: because the host does **not**
+   size-check the forward, a size-dependent answer from a forwarded id can
+   *only* come from behind the forward.
+2. **The id literal is absent from every loaded host binary.** Also correct —
+   and now known to be irrelevant, because the host never needs to name a
+   forwarded id. A byte scan for the little-endian u32 of `0x2080b201`,
+   `0x2080b202`, `0x2080b213`, `0x20809019`, `0x2080901b`, `0x20809026` and
+   `0x20809061` returns **0 hits** in `NVRM` (the 16 783 008-byte kext that
+   *is* the analysed copy — sha256 `81c6ba3a…`), `NVAccel`, `NVRMFB`,
+   `NVRMAGDC` and the nvmtl dylibs, while the same scan finds the public,
+   host-implemented `0x20800102` **19** times and `0x2080122a` twice. The
+   complementary check: a stride-40 `NVOC_EXPORTED_METHOD_DEF` scan *and* a
+   relaxed contiguous-run scan of the same kext both cap out at 589 unique
+   `0x2080_xxxx` rows with no CLK/VOLT private id in them, and a stride-32 scan
+   (the firmware's row layout) finds nothing either. The host table is complete
+   — and it is not the surface these ids live on.
 
-Those two measurements are real, but neither follows: point 1 shows the host has
-no *deprecated-table* row and no size check on the forward — not that a host
-path cannot exist elsewhere (the doc's own §10 rule: a 0-hit literal search, or
-a 0-hit extraction, is not a proof of absence; `0x2080b201` also accepts
-`paramSize >= 2444`, i.e. 2448/2480/2500/500008, which the NVOC gate in
-`control.c:448-458` *cannot* produce — a host gate that is not the NVOC gate is
-exactly what is needed, not what is excluded).
-`probe-macos-rm --tierb-read` (read-only, one zeroed block per id at the size
-the GSP's own table gives) now walks the whole VOLT (`0x32`) read half and
-records exactly that, in one session
-(`outputs/volt-read-20261017T111107Z/`):
+The `--tierb-read` pass (read-only, one zeroed block per id at the size the
+GSP's own table gives) walks the whole VOLT (`0x32`) read half and records
+exactly that, in one session (`outputs/volt-read-20261017T111107Z/`):
 
 | command | size | wedged result |
 | --- | --- | --- |
@@ -762,14 +771,14 @@ records exactly that, in one session
 | `0x2080b205` `b207` `b209` `b210` `b211` `b212` `b213` `b214` `b216` `b217` `b218` | GSP table sizes | `0x62` (all eleven) |
 | `0x208090a2` vfpoints-get | 524 | `0x62` |
 
-Read that as: exactly one of the thirteen read ids still answers. That "one"
-is the whole point, and §12's anchor battery shows it is host-served: the
-`0x2080a0ff` negative anchor — *"forwarded, but the GSP has no such method"*,
-measured as `0x56` before the wedge — now also returns `0x62`. The forward step
-itself is broken, so nothing in that table comes from the GSP, and `NV_OK` can
-only have come from the host. The offset read the goal is after
-(`0x2080901b @2108`) returns `0x62` in the same session: it **is** GSP-served,
-and therefore it is unavailable until the machine is rebooted.
+Read that as: exactly one of the thirteen read ids still answers, and it is the
+one whose GSP handler does not look at the fault state. The offset read the goal
+is after (`0x2080901b @2108`) returns `0x62` in the same session: its handler
+*does* consult that state, so **it is unavailable until the machine is
+rebooted** — not because the forward is down, and not because the id is
+unimplemented (§4). The practical difference matters for planning: the surface
+is intact behind the wedge, so nothing needs to be re-derived after the reboot,
+and a reboot is the *only* missing step.
 
 The pass treats the two codes differently: `0x65 NV_ERR_TIMEOUT` stops the pass
 (it is the latch of §6), `0x62` is recorded and the pass continues, because
@@ -891,6 +900,12 @@ but it means every block above still dates from the pre-wedge session.
 `uptime` has been polled all session (19h46m at 10:04Z without a reset), so the
 private path is still dead and **nothing has been written to the GPU**.
 
+**State recheck 2026-10-17T11:43Z** (new evidence, `--anchor-read` row 6):
+`0x2080122a @20` — a host NVOC id at a deliberately short size — returns
+`0x1f` **during** the wedge, while `0x2080b201` at 88/164/620/**2440** returns
+`0x62` (it returned `0x1f` at those sizes before the wedge). That pair is §12.
+`uptime` 21h18m, no reset, nothing written.
+
 ## 10. Candidate-mapping correction table (2026-10-17)
 
 The user's brief for this phase asked for a table that separates, for every
@@ -910,7 +925,7 @@ absent, which is a *different* statement from "the driver does not know it".
 | 5 | `0x2080b213` | "voltage-rail control read" | GSP table @**1036** | `voltrails-family-full-layout-r610.md` | out: mask `0xFF` + `32 x 32` B records (all zero at stock) | `--tierb-read` (now walks the whole VOLT read half) | healthy: `NV_OK`; **wedged: `0x62`** |
 | 6 | `0x208090a2` | "all V/F paths fail" | GSP table @**524**, `flags 0x48` = **read** | — | read half of the `0xd0a3` pair | `--tierb-read` | it is a GET and *was* sendable; wedged: `0x62`. The old "all V/F paths fail" wording was wrong |
 | 7 | `0x20809025` | "offset range source" | GSP table @**7188** | same | `20 + 32*224`: `rec+8` = max VF kHz (`1638400`), `rec+20`/`rec+24` = `-18750`/`+18750` | `--clkctl-hex` | `NV_OK`; this is the **range**, not the current offset |
-| 8 | "`0x62` after the wedge tells host-implemented from GSP-dispatched" | — | **holds again, and now with a separating instrument**: §12's anchor battery shows the forward itself is dead (`0x2080a0ff` `0x56` -> `0x62`), so today `0x62` == "this needs the GSP"; `NV_OK` from a private id then means host-served | the 11:11Z reading ("per command") is **withdrawn** | `--anchor-read` + `--reg-read` A/B | **correction of the correction**: `0x62` is a *having-a-live-GSP* oracle, not a per-command one; `0x2080b201` is host-answered |
+| 8 | "`0x62` after the wedge tells host-implemented from GSP-dispatched" | — | **does not hold — withdrawn twice over.** With the wedge latched the GSP answers `0x62` for *every* rejection it produces (unknown id, mismatched size, state-checking handler), so a `0x62` is not a routing oracle at all (§12). The separating instrument is **GPU-state sensitivity**, not the code: the host NVOC gate answers `0x1f` with or without the wedge, the gate behind the forward moves to `0x62` | both the 11:11Z ("per command") and the 11:29Z ("the forward is dead") readings are **withdrawn** | §12's `--anchor-read` rows 5–6 + `--clkobj-read` wedge A/B | **`0x2080b201` is GSP-answered**, and the forward is alive |
 | 9 | "the write face is missing protocol / driver support" | — | host gate: `rmapi_gss_legacy_control.c` returns `0x1b` for `(cmd & 0xC000) == 0xC000` when `privLevel < RS_PRIV_LEVEL_USER_ROOT` | §2.1 | — | — | **correction**: what is missing is **privilege**; the GSP body exists (§4.4) |
 
 Two rules this table is meant to enforce, because both were violated by earlier
@@ -1062,39 +1077,66 @@ precondition that is one line of macOS glue (§11.4) and is satisfiable by uid 0
 not a missing firmware body (§4.4), and not a marshalling gap (the 2108 B
 geometry is measured on both halves).
 
-## 12. The anchor battery: the legacy forward is dead, so `0x2080b201` is host-answered
+## 12. The anchor battery, corrected: the forward is **alive**, and its *validation layer* is what answers `0x62`
 
-New in this round: a four-request battery that separates *"this id needs the
-GSP"* from *"this id is answered on the host"* without a reboot. It sends only
-ids and sizes this host has already measured, so it is not a scan; all four are
-GET-only and three of them are anchors the rest of the suite already uses.
+The battery now sends six ids at sizes this host has already measured (so it is
+not a size or an id scan), all GET-only:
 
 ```
-probe-macos-rm-idle --anchor-read          # bundle: outputs/anchor-20261017T112952Z/
+probe-macos-rm-idle --anchor-read        # outputs/anchor-size-ctl-20261017T114330Z/
+probe-macos-rm-idle --clkobj-read        # outputs/clkobj-wedge-20261017T114050Z/
 ```
 
-| request | size | pre-wedge | 2026-10-17T11:29Z | reading |
+| request | size | pre-wedge | 2026-10-17T11:43Z | reading |
 | --- | --- | --- | --- | --- |
-| `0x2080b201` volt rails **info** | 2444 | `NV_OK` | **`NV_OK`** (16 non-zero dwords, first @0 last @68) | answered, and *not* by the forward (below) |
-| `0x2080b202` volt rails **status** | 3232 | `NV_OK` | `0x62` | needs the GSP |
-| `0x2080a0ff` non-privileged, **no such method** | 776 | **`0x56`** | **`0x62`** | the forward no longer reaches the GSP at all |
-| `0x2080ffff` privileged bits, unprivileged caller | 776 | `0x1b` | `0x1b` | the host privilege gate still fires — it is *before* the forward and independent of it |
+| `0x2080b201` volt rails **info** | 2444 | `NV_OK` | **`NV_OK`** + 16 non-zero dwords (identical payload) | the forward answered |
+| `0x2080b202` volt rails **status** | 3232 | `NV_OK` | `0x62` | the GSP answered, "needs a reset" |
+| `0x2080a0ff` non-privileged, **no such method** | 776 | `0x56` | `0x62` | the GSP's "no such method" is collapsed onto `0x62` too |
+| `0x2080ffff` privileged bits, unprivileged caller | 776 | `0x1b` | `0x1b` | the host privilege gate — before the forward, wedge-independent |
+| `0x20800102` public, host-registered | 580 | `0x1f` | `0x1f` | host dispatch alive |
+| **`0x2080122a` host-registered, sent at a deliberately short size 20** | 20 | — | **`0x1f`** | the host NVOC `paramSize` gate is alive **and GPU-state independent** |
+| same `0x2080b201` at 88 / 164 / 620 / **2440** | — | **`0x1f`** | **`0x62`** | its gate is *not* the host gate — it is behind the forward |
 
-The third row is the decisive one, and it is a *negative* anchor doing real
-work: `0x2080a0ff` used to prove "the forward works and the GSP answers 'no
-such method'". Now it answers `0x62`, i.e. the RPC step fails, so **no** private
-id can be GSP-answered in this session. `0x2080b201` answering `NV_OK` in the
-same block of four therefore places it on the **host** side. The fourth row
-confirms the host half of the legacy path is still being entered (the privilege
-check runs and returns its documented `0x1b`), so the failure is specifically
-the GSP RPC, not the host's `NV_ESC_RM_CONTROL` plumbing.
+The last row is the measurement this section exists for, and it is the one the
+previous two versions of this section were missing. Everything else in the
+table is compatible with two different stories; this row is not:
+
+* `rmapiutilGetControlInfo()` rejects a wrong `paramSize` with
+  `0x1f INVALID_ARGUMENT` **before** dispatch (`control.c`), and that is a pure
+  host-side, GPU-state-independent check — rows 5 and 6 show it still firing
+  during the wedge, 2–3 µs, exactly as it does when the GPU is healthy.
+* The *same* request shape on `0x2080b201` gave `0x1f` before the wedge
+  (`outputs/stage-clkobj-20261017T074744Z/`, 07:47Z) and gives `0x62` during it
+  (`outputs/clkobj-wedge-20261017T114050Z/`, 11:40Z) — on both carriers
+  (subdevice and device), while the *correct* size still returns `NV_OK`
+  + payload.
+* A gate whose answer depends on the GPU's fault state cannot be the host NVOC
+  gate; the host has no other gate it applies to a forwarded id (§7 point 1:
+  `RmGssLegacyRpcCmd` does no size check). So the validation is behind the
+  forward, and a legacy id that returns `NV_OK` **with a payload** was
+  therefore answered through the forward.
+
+**Latency does not decide this, and the battery says so out loud.** All four
+requests land in the same single-digit-microsecond band (public host 7 µs,
+b201 6 µs, a0ff 7 µs, b202 7 µs) — this platform's GSP RPC is a shared-memory
+queue plus a doorbell, not a syscall per byte, so "as fast as a host id" is not
+evidence of being one. The line is printed, labelled *not discriminating*, and
+then ignored.
+
+**A note on `0x2080a0ff`.** It is a good anchor for "does the GSP still say
+*no such method*" (`0x56`) and a bad one for "is the forward alive": under the
+wedge the GSP answers `0x62` for it, and for a mismatched size, and for
+state-checking handlers. `0x62` while the wedge is latched means *this GSP
+control needs a reset* — a property of the answer, not of the plumbing. The
+only forward-alive probe that cannot be re-read as its opposite is a
+**successful** GSP-served answer, which is what `0x2080b201` provides.
 
 ### 12.1 The same picture from the public surface (`--reg-read` A/B)
 
 Twenty-two ids the loaded NVRM really registers, sent at their live NVOC
-`paramSize`, pre-wedge (`outputs/stage-reg-20261017T082800Z/`) vs now
-(`outputs/wedge-scope-20261017T112552Z/`). Seven changed, and all seven are the
-same subsystem:
+`paramSize`, pre-wedge (`outputs/stage-reg-20261017T082800Z/`) vs during the
+wedge (`outputs/wedge-scope-20261017T112552Z/`). Seven changed, and all seven
+are the same subsystem:
 
 | id | 08:28Z | 11:25Z |
 | --- | --- | --- |
@@ -1108,43 +1150,58 @@ same subsystem:
 
 Unchanged and still answering: `fb-get-static-bar1-info` (`NV_OK`),
 `kgr-get-gfx-gpc-tpc-info` (`NV_OK`), `kgr-get-gpc-mask` (`NV_OK`),
-`fb-get-info-v2` / `gpu-get-info-v2` / `kgr-get-info` (`0x1f` = the handler ran
-and rejected the size), the `internal-*` ids (`0x56` = handler ran and refused),
+`fb-get-info-v2` / `gpu-get-info-v2` / `kgr-get-info` (`0x1f` = handler ran,
+input rejected), the `internal-*` ids (`0x56` = handler ran and refused),
 `timer-gpu-cpu-correlation` (`0x56`). The stage-2 battery says the same in the
 other direction: `fb-get-info-v2`, `fb-stats-get`, `perf-current-pstate`,
 `perf-get-powerstate`, `rated-tdp-get-control`, `gpumon-util-samples-v2`,
 `pmumon-clk-samples`, `perf-level-info-v2`, `rusd-page` and both thermal
-`EXECUTE_V2` forms were `NV_OK` before the wedge and are `0x62` now, while
+`EXECUTE_V2` forms were `NV_OK` before and are `0x62` now, while
 `bios-sku-info` and `bus-get-pci-info` (host deprecated-table rows) are still
 `NV_OK`.
 
 Two consequences worth keeping:
 
-* **`0x62` now outranks the parameter-size check.** `perf-get-gpumon-util-samples`
-  and `perf-get-vid-eng-perfmon` returned `0x1f` (size rejected) pre-wedge and
-  `0x62` now, i.e. the reset-required answer is produced **before** per-id
-  handler dispatch. So on this box today, "which ids still answer" measures
-  "which ids avoid the GSP", not "which handlers exist".
-* **The wedge is not CLK-scoped and not private-id-scoped.** It covers the
-  public PERF/PMGR/PMU and thermal surfaces too, which is why §9's remaining
-  probes (`--tupleb-read`, the VFP family, any new private id) cannot be
-  advanced on this session: they are all downstream of the same dead RPC.
+* **`0x62` now outranks the parameter-size check** — for GSP-served ids.
+  `perf-get-gpumon-util-samples` and `perf-get-vid-eng-perfmon` returned `0x1f`
+  pre-wedge and `0x62` now, and so does `0x2080b201` at a short size: behind
+  the forward, the fault-state answer is produced **before** the size
+  comparison. On the host side the order is the opposite and unchanged (rows 5
+  and 6 of the battery). So the same status code means different things
+  depending on which side produced it, and the two are told apart by
+  GPU-state sensitivity, not by the code.
+* **The wedge is not CLK-scoped, not VOLT-scoped and not private-id-scoped.**
+  It covers public PERF/PMGR/PMU and both thermal `EXECUTE_V2` forms too. That
+  is why no read face in §9 can be advanced on this session — every one of them
+  is a GSP-side handler that consults the fault state. It is *also* why the
+  `--tierb-read`/anchor result matters: the surface is not gone, it is gated.
 
-### 12.2 What is still open about `0x2080b201`
+### 12.2 What this settles, and what it changes for the goal
 
-If it is host-answered, the host path is *not* any of the three the repo knows:
+Settled:
 
-* not the 8-row `rmDeprecatedControlTable` (no CLK/VOLT row);
-* not the extracted 604-row NVOC export table (the id is absent from it, and
-  that table's gate is exact-size equality — `control.c:448-458` — while b201
-  accepts anything `>= 2444`);
-* not a literal-comparison handler (0 little-endian hits in every loaded host
-  binary).
+* the responder for the private CLK/VOLT ids is the **GSP**, reached through
+  the host's legacy forward, and that forward is **working** in this session;
+* `0x2080b201` is **not** a counter-example that proves a host path exists. It
+  is the one GSP control whose handler ignores the reset-required state, which
+  is a property of that handler, not of the plumbing;
+* the host NVOC `paramSize` gate and the GSP-side one are distinguishable
+  *behaviourally* while the wedge is latched (host: `0x1f`, wedge-independent;
+  forward: `0x62`), and that is the only reliable oracle this session produces.
 
-So there is a fourth host path for that id: a handler reached without a
-comparable literal and with a `>=` size gate. Naming it is an open item; the
-measurement above only fixes *which side* of the RPC it lives on. Until it is
-named, `0x2080b201` may **not** be used as evidence that a private id is
-readable "without the GSP", and the clock-domain offset read
-(`0x2080901b`, which is GSP-served and answers `0x62`) stays blocked on the
-reboot exactly as §6/§9 say.
+Changed for the goal:
+
+* nothing about `0x2080901b` becomes readable — it is GSP-served and its
+  handler consults the fault state, so it answers `0x62` until the machine is
+  rebooted. The blocker is **one** thing: the latched reset-required state of
+  this GPU/GSP session (a reboot, or a privileged kext reload which is outside
+  the standing boundary);
+* the work that would otherwise have been triggered by "the forward is dead"
+  (hunting for a fourth host path, re-deriving the surface) is **not needed**:
+  the surface behind the wedge is intact and already catalogued (§3, §4, §5,
+  §11);
+* the priority order in the goal's plan does not change: after the reboot, the
+  first read is `0x2080901b @2108` with `in@4 = 0xFF` (still the only block in
+  the corpus without a lossless whole-block dump), then the two V1-record
+  questions of §9 — the same barriers, just approached with a correct model.
+

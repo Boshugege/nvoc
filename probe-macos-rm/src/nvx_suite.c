@@ -802,27 +802,52 @@ int nvx_stage2_anchor_read(nvx_ctx *c)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* monotonic microsecond clock (latency discrimination)                */
+/* ------------------------------------------------------------------ */
+/* Used by the anchor battery to tell a host-answered control from one
+ * that goes out over the legacy RPC to the GSP: an in-kernel host handler
+ * costs tens of microseconds, a GSP round trip costs hundreds.  This is a
+ * *secondary* line of evidence next to the 0x56/0x62 answer code, and it is
+ * only meaningful as an order-of-magnitude comparison against the public
+ * anchor measured in the same loop (see item_anchor_reads()). */
+static uint64_t nvx_now_us(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
+}
+
 /* Documented-anchor battery (--anchor-read).
  *
- * Four ids at sizes this host has already measured, so this is not a size or
- * id scan.  It answers the one question the other batteries cannot answer
- * while the clock/perf families return 0x62: is `RmGssLegacyRpcCmd` still
- * *reaching the GSP* at all?
+ * Six ids at sizes this host has already measured, so this is not a size or
+ * id scan.  It answers the question the other batteries cannot answer while
+ * the clock/perf families return 0x62: *is the legacy forward to the GSP still
+ * answering anything at all?*
  *
- *   0x2080b201 @2444  VOLT rails INFO    -- still NV_OK through the wedge
- *   0x2080b202 @3232  VOLT rails STATUS  -- 0x62 through the wedge
- *   0x2080a0ff @776   non-privileged id that does not exist
- *       0x56 => the forward reached the GSP and the GSP answered "no such
- *               method"  (forward path ALIVE)
- *       0x62 => the forward itself is failing, so *no* private id can be
- *               GSP-answered right now (forward path DEAD) -- and then
- *               0x2080b201's NV_OK cannot have come from the GSP either
- *   0x2080ffff @776   privileged bits, unprivileged caller
- *       0x1b => the host privilege gate, before any forward (expected)
+ *   0x2080b201 @2444  VOLT rails INFO    -- still NV_OK with a payload
+ *   0x2080b202 @3232  VOLT rails STATUS  -- 0x62
+ *   0x2080a0ff @776   non-privileged id that does not exist -- 0x62
+ *   0x2080ffff @776   privileged bits, unprivileged caller -- 0x1b
+ *   0x20800102 @580   public host read (latency/again-answers reference)
+ *   0x2080122a @20    host NVOC id at a *deliberately short* size -- 0x1f
  *
- * All four are GET-only, all four have been sent before, and three of them
- * are the anchors the rest of the suite already relies on.  Nothing here is a
- * write and nothing here is new ground. */
+ * The last row is the discriminator that the first version of this battery
+ * lacked.  `rmapiutilGetControlInfo()` rejects a wrong paramSize with 0x1f
+ * *before* dispatch (control.c), and that is a pure host-side, GPU-state
+ * independent check: it keeps returning 0x1f through the wedge (0x20800102
+ * and 0x20801201 do exactly that, doc section 6.1).  Meanwhile the SAME
+ * request shape on 0x2080b201 -- a private id with bit 0x8000, not in any host
+ * table -- measured 0x1f *before* the wedge and 0x62 *during* it (doc section
+ * 13).  A check whose answer depends on the GPU's fault state is not the host
+ * NVOC gate, so 0x2080b201's validation happens behind the forward, and a
+ * legacy id cannot produce NV_OK + a payload unless the forward answered it.
+ *
+ * All six are GET-only and all six have been sent before -- nothing new is
+ * opened here.  This battery therefore reports "the forward answered" from
+ * 0x2080b201's own NV_OK, and demotes 0x2080a0ff's 0x62 to what it is: the
+ * GSP collapsing a rejection while the GPU needs a reset, not a dead forward.
+ */
 static void item_anchor_reads(nvx_ctx *c)
 {
     static const struct { const char *name; NvU32 cmd; NvU32 size; } a[] = {
@@ -830,53 +855,119 @@ static void item_anchor_reads(nvx_ctx *c)
         { "anchor volt rails STATUS 0x2080b202", 0x2080b202u, 3232 },
         { "anchor unknown non-priv  0x2080a0ff", 0x2080a0ffu,  776 },
         { "anchor privileged bit    0x2080ffff", 0x2080ffffu,  776 },
+        { "anchor public host info  0x20800102", 0x20800102u,  580 },
+        { "anchor host short size   0x2080122a", 0x2080122au,   20 },
     };
     static unsigned char buf[3232];
-    NvU32 got[4] = { 0, 0, 0, 0 };
+    enum { REP = 5 };
+    NvU32 got[6] = { 0, 0, 0, 0, 0, 0 };
+    uint64_t lat_min[6] = { 0 }, lat_med[6] = { 0 };
     const unsigned n = (unsigned)(sizeof a / sizeof a[0]);
 
     for (unsigned i = 0; i < n; ++i) {
-        memset(buf, 0, a[i].size);
-        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
-                                  a[i].cmd, buf, a[i].size);
-        got[i] = st;
-        /* Count non-zero dwords so a "NV_OK but nothing written" answer is
-         * visible as such (that is how the b201 anchor is told apart from a
-         * stub that returns NV_OK with an untouched block). */
         unsigned nz = 0, first = 0, last = 0;
-        for (unsigned off = 0; off + 4 <= a[i].size; off += 4) {
-            NvU32 w;
-            memcpy(&w, buf + off, sizeof w);   /* buf is byte-aligned BSS */
-            if (w != 0) {
-                if (!nz) first = off;
-                last = off;
-                ++nz;
+        uint64_t t[REP];
+        for (unsigned r = 0; r < REP; ++r) {
+            memset(buf, 0, a[i].size);
+            uint64_t t0 = nvx_now_us();
+            NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                      a[i].cmd, buf, a[i].size);
+            uint64_t t1 = nvx_now_us();
+            t[r] = (t1 >= t0) ? (t1 - t0) : 0;
+            got[i] = st;
+            if (r == 0) {
+                /* Count non-zero dwords so a "NV_OK but nothing written"
+                 * answer is visible as such (that is how the b201 anchor is
+                 * told apart from a stub that returns NV_OK with an untouched
+                 * block). */
+                for (unsigned off = 0; off + 4 <= a[i].size; off += 4) {
+                    NvU32 w;
+                    memcpy(&w, buf + off, sizeof w);  /* byte-aligned BSS */
+                    if (w != 0) {
+                        if (!nz) first = off;
+                        last = off;
+                        ++nz;
+                    }
+                }
             }
         }
-        nvx_emit(c, "V2.anchor", a[i].name, st,
-                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-                 "cmd 0x%08x size %u -> %s; %u non-zero dword(s), first @%u last @%u",
-                 a[i].cmd, a[i].size, nvx_status_name(st), nz, first, last);
+        /* insertion sort of 5 -- min and median are robust to a single hiccup */
+        for (unsigned x = 1; x < REP; ++x) {
+            uint64_t v = t[x];
+            unsigned y = x;
+            while (y > 0 && t[y - 1] > v) { t[y] = t[y - 1]; --y; }
+            t[y] = v;
+        }
+        lat_min[i] = t[0];
+        lat_med[i] = t[REP / 2];
+        nvx_emit(c, "V2.anchor", a[i].name, got[i],
+                 got[i] == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "cmd 0x%08x size %u -> %s; %u non-zero dword(s), first @%u "
+                 "last @%u; latency min %llu us / median %llu us over %u calls",
+                 a[i].cmd, a[i].size, nvx_status_name(got[i]), nz, first, last,
+                 (unsigned long long)lat_min[i], (unsigned long long)lat_med[i],
+                 (unsigned)REP);
     }
 
-    /* Verdict: the whole point of sending the 0xa0ff anchor next to b201. */
-    if (got[2] == 0x00000056u) {
-        nvx_emit(c, "V2.anchor", "anchor verdict", got[2], NVX_V_OK,
-                 "forward path ALIVE: 0x2080a0ff returned 0x56 (the GSP answered "
-                 "'no such method'), so 0x62 is GSP-internal state -- the "
-                 "0x2080b201 NV_OK is compatible with a GSP-served id whose "
-                 "own handler is not in the faulted subsystem");
-    } else if (got[2] == 0x00000062u) {
-        nvx_emit(c, "V2.anchor", "anchor verdict", got[2], NVX_V_REJECTED,
-                 "forward path DEAD: 0x2080a0ff also returned 0x62, so no "
-                 "private id is GSP-answered right now -- and therefore the "
-                 "0x2080b201 NV_OK did NOT come from the GSP: that id is "
-                 "answered on the host (re-opens doc section 7)");
-    } else {
-        nvx_emit(c, "V2.anchor", "anchor verdict", got[2], NVX_V_REJECTED,
-                 "UNEXPECTED anchor answer for 0x2080a0ff; record it as-is, "
-                 "no model is promoted");
+    /* Latency is reported for completeness only: it does NOT separate the two
+     * paths on this platform.  A host control and a GSP round trip are both in
+     * the single-digit-microsecond range here (queue + doorbell, not a syscall
+     * per byte), so an id being "as fast as a host id" is not evidence that it
+     * *is* one.  Do not cite this line as proof either way. */
+    {
+        uint64_t host = lat_med[4];
+        nvx_emit(c, "V2.anchor", "anchor latency (not discriminating)",
+                 got[4], NVX_V_OK,
+                 "medians: public host 0x20800102 %llu us; b201 %llu us; "
+                 "a0ff %llu us; b202 %llu us -- all the same order of "
+                 "magnitude, so latency is recorded and then ignored",
+                 (unsigned long long)host,
+                 (unsigned long long)lat_med[0],
+                 (unsigned long long)lat_med[2],
+                 (unsigned long long)lat_med[1]);
     }
+
+    /* (a) The host NVOC size gate, measured in the same session. */
+    if (got[5] == 0x0000001fu) {
+        nvx_emit(c, "V2.anchor", "anchor host size gate", got[5], NVX_V_OK,
+                 "0x2080122a at the short size 20 returned 0x1f: the host NVOC "
+                 "paramSize gate is alive and GPU-state independent, so a "
+                 "private id that answers 0x62 for a short buffer (0x2080b201 "
+                 "does, doc section 13) is not validated by that gate");
+    } else {
+        nvx_emit(c, "V2.anchor", "anchor host size gate", got[5], NVX_V_REJECTED,
+                 "0x2080122a at the short size 20 did NOT return 0x1f (%s): "
+                 "the host gate itself is in an unexpected state -- do not "
+                 "classify anything else from this run",
+                 nvx_status_name(got[5]));
+    }
+
+    /* (b) Which of the two answers the legacy forward gives now. */
+    if (got[0] == 0x00000000u) {
+        if (got[2] == 0x00000056u) {
+            nvx_emit(c, "V2.anchor", "anchor verdict", got[2], NVX_V_OK,
+                     "forward ALIVE and healthy: 0x2080b201 answered NV_OK with "
+                     "a payload while 0x2080a0ff returned 0x56 (the GSP's 'no "
+                     "such method'), i.e. the GSP is dispatching legacy ids "
+                     "normally");
+        } else {
+            nvx_emit(c, "V2.anchor", "anchor verdict", got[2], NVX_V_OK,
+                     "forward ALIVE but the GSP is in its reset-required "
+                     "state: 0x2080b201 still answered NV_OK with a payload "
+                     "(only the GSP can answer it), while every rejection "
+                     "-- unknown id (0x2080a0ff) and the state-checking "
+                     "handlers (0x2080b202) alike -- is collapsed to 0x62. "
+                     "0x62 here means 'this GSP control needs a reset', NOT "
+                     "'the forward is dead'");
+        }
+    } else {
+        nvx_emit(c, "V2.anchor", "anchor verdict", got[0], NVX_V_REJECTED,
+                 "0x2080b201 did NOT answer NV_OK (%s): with the host gate "
+                 "confirmed alive above, this is the forward itself failing "
+                 "-- re-read doc section 13 before concluding either way",
+                 nvx_status_name(got[0]));
+    }
+
     if (got[3] != 0x0000001bu) {
         nvx_emit(c, "V2.anchor", "anchor privilege check", got[3], NVX_V_REJECTED,
                  "0x2080ffff did NOT return 0x1b: the host privilege gate did "
