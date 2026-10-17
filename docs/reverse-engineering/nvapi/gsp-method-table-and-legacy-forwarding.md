@@ -1497,3 +1497,28 @@ No SET has ever been sent. No new id, size or stamp was scanned while producing
 this section; the one tool change adds a background to a case that had already
 answered `NV_OK`, so that the next run records the write set instead of losing
 66 of its 106 changed dwords to the printer.
+
+### 14.5 An open geometry question in the same family: `0x2080901d @32680`
+
+The tool's table splits `0x2080901d` as `40 + 32*1020`, but that is only one of
+the integer solutions and it is marked *derived, unverified*. Re-reading the
+`0xA5` log raises a second candidate:
+
+* `32680 - 40 = 32640 = 255 * 128` exactly, and 255 is the VF-point count of
+  the same interface family;
+* in the surviving delta print, the block at `+40` and the block at `+168` — 128
+  bytes apart — start with the *same* leading fields (`a5a50808` type stamp,
+  `032aa501`, `a5a50000`) and then differ in a single byte
+  (`ff1f00a5` vs `ff2100a5`), which is what two consecutive records of one
+  table look like and is not what a 1020-byte stride predicts;
+* `352` changed dwords with `last @3376` fits `27 * 13 + 1` (the same
+  13-dword-per-record shape §14.1 measured on `0x2080901b`), while 1020 gives no
+  such reading.
+
+This is **not** settled: the print kept 40 of the 352 changed dwords, so the
+periodicity can only be measured, not inferred. It matters because a wrong
+stride silently mis-attributes every field, and `0x2080901d` is already in the
+read battery. The lossless dump of that block is therefore worth one explicit
+check when it lands: compare `rec+0` (the type-stamp bytes) across candidate
+record starts and see which stride makes them repeat — 128 (255 records) or
+1020 (32 records). No tool geometry was changed on the strength of this.
