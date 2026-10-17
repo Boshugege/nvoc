@@ -742,3 +742,13 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **② 更正表述（避免把已有结论当新发现）**：目录的行/类型/域位表此前**已**记录在 `gsp-method-table-and-legacy-forwarding.md` §14.3/§18 与本表「本轮追加七」③，`0x2080901b` 的记录字段位置（+8/+12/+16/+20/+24 候选）也已在该文档与解码器 `CANDIDATES` 里。因此本轮真正的增量是：把两条恒等式**写成算术并上升为工具校验**、复核「十行」是**驱动自己声明**的（故 runbook 的 `0x3FF` 支不是猜测，且预测 `14+9×13+1=132` 与探针 PREDICTIONS 一致），以及把 `head +28 = 5`（＝第 0、2 行，即核心与显存）标为**候选**而非结论。
 
 **③ 仍未定（如实）**：`0x2080901b` 记录内 12 个 value dword 的字段身份——stock 全零 ⇒ 零值写入无法自证，只有「门控单域最小步 SET ＋ 同字段回读」能定；`head +8`(0x335)/`+16`(0x3fc007f＝并集再加 bit 18 与 22–25)/`+24`(0x85)/`+36`(0x103e8)/`+40`(0xffff0000) 未解；range 块（`0x20809025`）3 条记录 tag 递进字节 03/04/05 若为域 id 则覆盖 3/4/5（含显存不含核心），与目录的 id 命名空间**可能不同**，目录仍为索引↔域 id 的唯一权威表。
+
+### 本轮追加二十一（2026-10-17，源代码侧界面对照：风扇/热学/时钟族的"公开面到底有什么"）
+
+**方法**：不再用"头文件里搜不到"结案，而是把 610.57.04 源码树当作**分发表**来核对：① 逐个 `ctrl2080*.h` 数 `NV2080_CTRL_CMD_*` 定义与行数；② 用全树正则抽出**全部公开 id→名字**（775 条）并做族名统计；③ 把这些 id 与 GSP 转发表逐条比对。命令与输出可复现，均只读。
+
+**① 时钟/电压控制面在公开 SDK 里几乎不存在（这正面支撑本目标的技术前提）**：`ctrl2080clk.h` 128 行仅 **1** 个命令，且该命令是 `NV2080_CTRL_CMD_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES = 0x20801037`（＝我们已实测的那张公共时钟表的 id）；`ctrl2080volt.h` 38 行 **0** 个命令；`ctrl2080clkavfs.h` 36 行 **0**；`ctrl2080pmumon.h` 100 行 **0**；775 条公开 id 里名字含 `VOLT` 的 **0** 条、含 `CLK_` 的 1 条。⇒ 偏移/VF 这类控制**不可能**从公开 id 空间取到，只能走私有 id + GSP 旧式转发——这正是本目标第 1、2 条的**依据**，而非印象。
+
+**② 热学族是公开且已被完全用尽**：`ctrl2080thermal.h` 417 行、2 个命令（`THERMAL_SYSTEM_EXECUTE_V2 = 0x20800513` 与其 `_PHYSICAL` 孪生 `0x20808513`）。已实测：`paramSize 1432` = 头文件结构 `6×u32 + 0x20×INSTRUCTION` 的**逐字节**算术（24 + 32×44 = 1432 ⇒ `INSTRUCTION` 恰 44 B：result@+0 / executed@+4 / opcode@+8 / 32 B operands@+12），故探针读到的 `exec`/`rc` 与头文件字段一一对应，将来任何 opcode 的偏移都不必猜。目标枚举里的 MEMORY(2)/POWER_SUPPLY(4)/BOARD(8) **有定义但未被实例化**（驱动自报 1 target/1 sensor）⇒ 显存/板卡温度缺失是**驱动无该对象**，不是工具没问。另：`0x20800513` 在 GSP 表内（paramSize 1432, flags 0x48），而 `_PHYSICAL` 孪生 `0x20808513` **不在表内**（与"孪生由 host 侧回答"一致）——下次要归因某一层的拒绝时，这条有用。
+
+**③ 风扇：公开控制空间里没有命令，界面的确存在但在上一层**。`ctrl2080fan.h` 是 **33 行的空生成桩**（全部内容＝license + `#pragma once` + `Source file: ctrl/ctrl2080/ctrl2080fan.finn` 注释，**零** define、**零** struct），且 token `NV2080_CTRL_FAN` 在整棵树里**一次都不出现**——这才把"文件被生成成空"与"我的 grep 写错了"区分开。风扇界面在 NVAPI 的 cooler API 里（nvapi-rs `sys/src/gpu/cooler.rs` 有完整记录）：`GetCoolerSettings` V1/V3/V4（152/1288/1368 B）、`SetCoolerLevels`、`RestoreCoolerSettings`、`GetTachReading`，cooler 类型 FAN/WATER/LIQUID_NO2，每 cooler 的 `currentLevel`/`currentMinLevel`/`currentMaxLevel`（百分比）、policy 枚举、`{speedRPM, bSupported, maxSpeedRPM, minSpeedRPM}` 转速表 ⇒ 上表要的"范围/原状态/恢复"字段**在该界面里是齐的**，缺的是"该界面在本驱动的 macOS 路径上映射到哪个可接受控制"。**形状旁证（非证明）**：GSP 表里没有任何一行的 paramSize 是 1288/1368，152 只出现在 4 个无关 id 上 ⇒ 该 cooler 界面在固件转发表里也**认不出来**（表无名字，故只能说形状）。
