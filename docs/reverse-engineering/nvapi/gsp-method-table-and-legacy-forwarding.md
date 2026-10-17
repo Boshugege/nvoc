@@ -122,8 +122,12 @@ a time with a `0xFF` seed:
 
 | seed position | status | effect |
 | --- | --- | --- |
-| +0, +8, +12 … +56 | `0x25 NV_ERR_INVALID_DATA` | non-zero anywhere but the mask field is rejected |
+| +0, +8, +12 … +56 | `0x25 NV_ERR_INVALID_DATA` | the block is refused; only the `+4` seed makes the same `0xA5` block acceptable |
 | **+4** | `NV_OK` | the driver fills records: bytes `+60 = 08 08`, `+124 = 09 09`, and zeroes the value dwords |
+
+The sweep's information is *"which single dword makes this block acceptable"*,
+not *"which dword is ignored"*: with an `0xA5` background every other dword is
+still non-zero, so exactly one field is interpreted — the mask at `+4`.
 
 The two type bytes `0x08` and `0x09` are exactly what `nvapi-rs` documents for
 live Turing: *"Turing live (RTX 2070) mixes {0x08, 0x09}, Ada live (RTX 4060
@@ -137,9 +141,56 @@ says **"V2 is the REAL read/write path"**. So on this box
 `0x2080901b@2108` is the V1 form: it confirms which domains exist and their
 record type, and it does **not** hand back an offset or a range.
 
-Earlier attempts put the mask at `+0` or `+8` (from the NVAPI caller layout);
-both are valid-but-ignored, which is why every earlier run came back with a
-populated header and empty records.
+Earlier attempts put the mask at `+0` or `+8` (from the NVAPI caller layout).
+Under a zeroed background those answer `NV_OK` too, but only because the real
+mask field at `+4` is then still `0` — a zero mask is accepted and selects no
+records, which is exactly the "populated header, empty records" shape of those
+runs. A zero mask is therefore kept as the deliberate *no records* baseline
+case in `--clkctl-hex` (§8), next to the `+4 = 0xFF` case.
+
+### 4.1 Why no `0x2080901b` handler body can be found by scanning
+
+All 889 table rows have their *own* `pFunc` (889 rows, 889 distinct values), so
+`pFunc` is not a shared dispatcher and the id is only a table row. Each `pFunc`
+is a ~30-instruction thunk of the same shape; the shape — not a literal —
+carries the method identity:
+
+```asm
+ld   a5, 0x158(a0)      ; RM client
+ld   s1, 0xe0(a5)       ; device
+addi a5, s1, 0x2000     ;
+ld   a5, -0x78(a5)      ; X = device->[0x1f88]      (0 -> error path)
+addi a5, a5, 0x1000     ;
+ld   a0, 0x148(a5)      ; iface = X->[0x1148]        (0 -> error path)
+ld   a5, 0x20(a0)       ; iface->[0x20]              (0 -> error path)
+ld   a5, 0(a5)          ;
+jalr a5                 ; iface->vtbl[0](iface, 0)  (0 -> error path)
+ld   a5, 0x38(a0)       ;
+jr   a5                 ; ret->vtbl[0x38](device, ret, params)
+```
+
+so the marshalling for the `0x2080901b` GET lives in the **seventh slot of a
+runtime object's vtable**, and for the `0x2080d01c` SET (`pFunc 0x4d5c3c0`) in
+the **fifth slot of a different object**:
+
+| | `0x2080901b` (GET) | `0x2080d01c` (SET) |
+| --- | --- | --- |
+| dispatch base | `X->[0x1148]` | `X->[0x1150]` |
+| extra preconditions | none | `*(s1+0x2050) != 0`, then its `+0x4f4` byte `!= 0`, and the `+0x179` byte of `X->[0x1148]` `== 0` |
+| slot invoked with the param block | `+0x38` | `+0x28` |
+
+Every failing branch loads a packed constant (`lui a1, 0x5f2d` / `addi a1, a1,
+…`) that resolves outside the `.fwimage` mapping, so it is a log/service tag
+rather than a printable message.
+
+Two consequences. (a) A literal or `nm` scan over the firmware cannot find a
+`0x2080901b` body: the id exists only as a table row and the body is a vtable
+slot whose object is built at runtime. (b) The SET path is *not* the GET path
+with the other direction — it additionally refuses to run unless two flag bytes
+on two different objects are in the required state. Those two flags are the
+natural first suspects for a "clock control enabled" precondition, and they are
+why a first write attempt has to re-verify the gates instead of assuming that
+the GET's success implies the SET's.
 
 ## 5. Neighbouring containers that *do* carry values
 
@@ -253,6 +304,9 @@ Two things follow that change the plan:
   is **`0x2080d01c @2108`**, the SET twin of the §4 GET. That is therefore the
   single candidate for a domain-offset *write* on this box, and it stays
   unsent until §4's GET returns a current value and its range (`WRITE-VERIFICATION-PLAN.md`).
+  The two directions do not share a handler: §4.1 shows the SET thunk carrying
+  preconditions the GET thunk does not have, so the SET's own gate state has to
+  be verified before it is used.
 
 ## 6. Safety: a bad private GET can wedge the GSP for the session
 
@@ -346,14 +400,25 @@ cd probe-macos-rm && OGKM=$OGKM sh build.sh
 python3 tools/extract-gsp-method-table.py \
         /Users/Shared/nvfw/nvidia/610.57.04/gsp_tu10x.bin > /tmp/gsp-table.tsv
 ./probe-macos-rm-idle --clkctl-read     # GSP-sized GETs, incl. mask@+4
-./probe-macos-rm-idle --clkctl-hex      # full hex of 12336 / 7188 blocks
+./probe-macos-rm-idle --clkctl-hex      # THE lossless record: full hex of
+                                        # 0x2080901b @2108 with mask@+4 = 0xFF
+                                        # and = 0, 0x20809025, 0x20809019, and
+                                        # 0x2080901d @32680 last
 ./probe-macos-rm-idle --clkctl-offsweep # 0x2080901b A5 sweep ONLY (see §6)
 ```
+
+Use `tools/clock-offset-read-run.sh` to run the battery into one bundle with a
+SHA-256 manifest and the offline decoder. Prefer `--clkctl-hex` over the
+`--clkctl-offsweep` delta printout for anything that has to survive the session:
+the 2026-10-17 `0xA5` sweep reported `106/527` changed dwords for `0x2080901b`
+but its log kept 40 of them (`0x2080901d`: 352 reported, 60 kept), so a delta
+printout alone is not a reproducible record of a block.
 
 ## 9. What is still missing
 
 * a container that returns the **current** per-domain offset. Candidates, in
-  the order they should be tried once the GSP is alive again:
+  the order they should be tried once the GSP is alive again — steps 1 and 2
+  are now the first two cases of one `--clkctl-hex` run:
   1. `0x2080901b @2108` re-read with the §4 `+4` mask and a **zeroed**
      background, to check whether the `08`/`09` records are really
      "types only" or whether a single-sourced mask leaves fields that the
@@ -380,6 +445,11 @@ python3 tools/extract-gsp-method-table.py \
   live there, and the GSP table does not offer a second size for
   `0x2080901b`, so V2 is either versioned inside the same 2108 B block or not
   available on this TU116 GSP;
+* the body behind §4.1's vtable slots. `pFunc` is a thunk, so the field-level
+  marshalling of the GET and the SET is not reachable by scanning `.fwimage`
+  for the id or for a size; it needs the runtime object (or a data-section
+  cross-reference from the slot number), which is why the field map here is
+  derived from live blocks rather than from disassembly;
 * confirmation of §4's `+4` mask field with a zeroed background (blocked: the
   GSP is wedged — see §6).
 
@@ -391,3 +461,12 @@ reloaded, no driver/EFI state was touched. All of `--clkctl-read`,
 `--clkctl-hex`, `--clkctl-offsweep`, `--clkdom-read`, `--clkvf-read`,
 `--reg-read` on this box are **read-only** and refuse the SET ids before
 sending.
+
+**State recheck 2026-10-17T10:03Z**: `--clkctl-hex` now starts with
+`0x2080901b @2108 in@4=0xFF`, seeds `+4`, reads back `0x62
+NV_ERR_RESET_REQUIRED` and aborts the remaining dumps
+(`outputs/stage-clkctl-hex-v2-20261017T100350Z/`). That is the intended
+behaviour on a wedged GSP — the battery stops instead of walking the id list —
+but it means every block above still dates from the pre-wedge session.
+`uptime` has been polled all session (19h46m at 10:04Z without a reset), so the
+private path is still dead and **nothing has been written to the GPU**.
