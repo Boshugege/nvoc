@@ -4,7 +4,7 @@
 //! library. No external probe executable, NVAPI, or NVML runtime is required.
 //! The initial implementation discovers the first service exposed by NullMoth.
 use crate::macos_offset;
-use crate::{Error, GpuId, PciAddress};
+use crate::{ClockDomain, Error, GpuId, PciAddress};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -121,6 +121,22 @@ pub const SETTINGS_WRITE_SUPPORTED: bool = false;
 /// Whether this backend can put a saved configuration back. Only meaningful once
 /// [`SETTINGS_WRITE_SUPPORTED`] is true.
 pub const SETTINGS_RESTORE_SUPPORTED: bool = false;
+
+/// Why an entry that *writes* through this backend is refused while the read
+/// half answers.
+///
+/// The missing layer here is a *verification*, not a control and not a
+/// privilege: the write id is located (see [`WRITE_NEEDS_PRIVILEGE_REASON`]), the
+/// current value and the driver's window are already readable
+/// (`get-pstate-global-freq-offset`, `get-settings`), and what no read can supply
+/// is the proof that the field moved -- a single bounded step, the same field
+/// read back, and the restore target being the value that same read found, which
+/// is what [`SETTINGS_WRITE_SUPPORTED`] waits for.
+///
+/// It exists so a write entry can say this instead of a platform-level "NVAPI
+/// and NVML do not exist here", which is true of the *host* and misleading about
+/// the *entry*: the same backend answers the matching read.
+pub const MACOS_RM_WRITE_GATE_REASON: &str = "this backend is read-only until one write has been verified on the device: the current value and the driver's own window are already read by the matching entry (get-pstate-global-freq-offset, get-settings), but only issuing a bounded step and reading the same field back can show that the field moved, and the restore target has to be the value that same read found; until then the backend's write gate is closed by construction (SETTINGS_WRITE_SUPPORTED is false), so the missing layer is the verification, not the control";
 
 /// Why a family that needs a *write* is listed as unavailable: the write half of
 /// these ids carries the legacy privileged bits, so an unprivileged client is
@@ -713,6 +729,25 @@ pub fn unnamed_offset_reason(name: &str) -> String {
 /// tries them. A name outside this list is rejected at parse time rather than
 /// silently becoming "unnamed": a typo must not read like a device finding.
 pub const PUBLIC_OFFSET_DOMAINS: [&str; 4] = ["graphics", "memory", "video", "processor"];
+
+/// The public name of a clock domain: the spelling [`PUBLIC_OFFSET_DOMAINS`]
+/// uses, which is also the key [`DeviceSettings::clock_offset_view`] resolves.
+///
+/// `None` for a domain no offset entry has a name for -- the caller then has a
+/// device bit, not a name, and should say so rather than look up a made-up one.
+/// This is the one mapping between the NVAPI/NVML clock-domain enum an entry
+/// parses and the name a macOS snapshot is looked up by, kept here so an entry
+/// outside this crate (the Python bindings) cannot grow a second copy of it; the
+/// CLI's own `domain_label` delegates to it for the same reason.
+pub fn public_offset_domain(domain: ClockDomain) -> Option<&'static str> {
+    match domain {
+        ClockDomain::Graphics => Some("graphics"),
+        ClockDomain::Memory => Some("memory"),
+        ClockDomain::Processor => Some("processor"),
+        ClockDomain::Video => Some("video"),
+        _ => None,
+    }
+}
 
 /// Which record a dry-run step refers to.
 ///

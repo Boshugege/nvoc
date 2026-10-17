@@ -2216,6 +2216,70 @@ fn normalize_query_clock_offset_nvapi(
     )]))
 }
 
+/// The backend a clock-offset entry resolves to.
+///
+/// Deliberately not [`parse_backend`]: that one also admits the cooler backends
+/// (which carry no clock offsets) and does not know `macos-rm` at all, which is
+/// why the offset read used to reject a backend name every other family accepts.
+/// Absent or `auto`/`default` means the platform default, the same rule the fan,
+/// power and temperature reads use: the RM snapshot on macOS, NVML elsewhere
+/// (which is what this entry has defaulted to on every other host).
+fn clock_offset_backend(raw: Option<&str>) -> PyResult<&'static str> {
+    let Some(raw) = raw else {
+        return Ok(fan_power_backends(cfg!(target_os = "macos")));
+    };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "auto" | "default" => Ok(fan_power_backends(cfg!(target_os = "macos"))),
+        "macos-rm" | "macos_rm" | "macosrm" => Ok("macos-rm"),
+        "nvml" => Ok("nvml"),
+        "nvapi" => Ok("nvapi"),
+        other => Err(invalid_value(format!(
+            "invalid backend {other:?}; expected 'nvapi', 'nvml', 'auto'/'default', or 'macos-rm'"
+        ))),
+    }
+}
+
+/// Refuse a write the macOS RM backend cannot accept, naming the gate.
+///
+/// The read half of the same family answers, so a platform-level "NVAPI and NVML
+/// are not available here" would be true of the host and misleading about the
+/// entry: what is missing is the verification the gate waits for, and core's
+/// constant says which.
+fn macos_write_gate(entry: &str, backend: &str) -> PyResult<()> {
+    if backend == "macos-rm" {
+        return Err(PyRuntimeError::new_err(format!(
+            "{entry}: {}",
+            nvoc_core::MACOS_RM_WRITE_GATE_REASON
+        )));
+    }
+    Ok(())
+}
+
+/// The macOS RM offset read: the snapshot's own per-domain record, projected into
+/// the same `mhz` field the NVAPI and NVML branches return, so a caller reads one
+/// field whatever the backend.
+///
+/// The name is resolved by core, which attaches one only where the same snapshot
+/// corroborated it against a live clock; a domain it cannot name is therefore
+/// refused with that reason instead of being reported as an offset of zero.
+fn normalize_query_clock_offset_macos(
+    settings: &nvoc_core::DeviceSettings,
+    domain: ClockDomain,
+) -> PyResultValue {
+    let name = nvoc_core::public_offset_domain(domain).ok_or_else(|| {
+        invalid_value(format!(
+            "this clock domain has no public offset name on macOS; the names the snapshot can \
+             corroborate are {}",
+            nvoc_core::PUBLIC_OFFSET_DOMAINS.join(", ")
+        ))
+    })?;
+    let view = settings.clock_offset_view(name).map_err(to_py_err)?;
+    Ok(value_object([(
+        "mhz",
+        f64_value(f64::from(view.offset_khz) / 1000.0),
+    )]))
+}
+
 fn normalize_domain_vfp_points(
     target: &GpuTarget<'_>,
     domain: ClockDomain,
@@ -2527,38 +2591,31 @@ fn query_clock_offset(
     domain: &str,
     pstate: Option<&str>,
 ) -> PyResult<Py<PyAny>> {
-    let backend = parse_backend(backends.unwrap_or("nvml"))?;
+    let backend = clock_offset_backend(backends)?;
     let domain = parse_domain(domain)?;
-    // Dispatch per-backend like set_clock_offset: NVML reads NVML's
-    // clock-offset API (integer MHz, PerformanceState); NVAPI reads the live
-    // pstate delta (kHz, sub-MHz, PState) from QueryGpuSettings — the field
-    // SetPstateClockOffset writes. The two backends use different pstate enums,
-    // so the pstate string is parsed inside each branch. NVAPI uses
-    // BackendSet::Nvapi (a pure NVAPI read needs no NVML handle), not Both.
-    let inventory = {
-        let mut cache = lock_inventory_cache();
-        cache.entry(if backend == "nvml" {
-            BackendSet::Nvml
-        } else {
-            BackendSet::Nvapi
-        })?
-    };
-    let target = selected_target(&inventory.0, gpu)?;
-    let value = match backend {
+    // Dispatch per backend like set_clock_offset: NVML reads NVML's clock-offset
+    // API (integer MHz, PerformanceState); NVAPI reads the live pstate delta
+    // (kHz, sub-MHz, PState) from QueryGpuSettings — the field
+    // SetPstateClockOffset writes; the macOS RM backend reads the offset the
+    // snapshot already carries for that domain. The NVAPI/NVML pair use different
+    // pstate enums, so the pstate string is parsed inside each branch; the macOS
+    // branch takes none, because those records are per domain and not per P-state
+    // (the P-state it is in is reported by query_status).
+    let value = with_target(gpu, backend, |target| match backend {
+        "macos-rm" => {
+            let device = target.macos_rm().map_err(to_py_err)?;
+            let settings = device.settings().map_err(to_py_err)?;
+            normalize_query_clock_offset_macos(&settings, domain)
+        }
         "nvml" => {
             let pstate = parse_nvml_pstate(pstate.unwrap_or("P0"))?;
-            normalize_query_clock_offset(&target, domain, pstate)?
-        }
-        "nvapi" => {
-            let pstate = parse_pstate(pstate.unwrap_or("P0"))?;
-            normalize_query_clock_offset_nvapi(&target, domain, pstate)?
+            normalize_query_clock_offset(target, domain, pstate)
         }
         _ => {
-            return Err(invalid_value(
-                "clock offsets require backend 'nvapi' or 'nvml'",
-            ));
+            let pstate = parse_pstate(pstate.unwrap_or("P0"))?;
+            normalize_query_clock_offset_nvapi(target, domain, pstate)
         }
-    };
+    })?;
     py_value(py, &value)
 }
 
@@ -2814,10 +2871,16 @@ fn set_clock_offset(
                 "clock offset {value} MHz is not a finite number"
             )));
         }
-        let backend = parse_backend(backend)?;
+        let backend = clock_offset_backend(Some(backend))?;
+        // On macOS the offset read answers from the snapshot and this write does
+        // not yet: say which layer that is, not that the host lacks a runtime.
+        macos_write_gate("set_clock_offset", backend)?;
         let domain = parse_domain(domain)?;
         let inventory = {
             let mut inventory_cache = lock_inventory_cache();
+            // The macOS spelling never reaches this line today (the gate above
+            // refuses it), so when the gate opens this is the table to extend --
+            // the read half already resolves it through `with_target`.
             inventory_cache.entry(if backend == "nvml" {
                 BackendSet::Nvml
             } else {
@@ -2853,7 +2916,8 @@ fn set_clock_offset(
             }
             _ => {
                 return Err(invalid_value(
-                    "clock offsets require backend 'nvapi' or 'nvml'",
+                    "clock offsets require backend 'nvapi' or 'nvml'; on macOS the RM backend \
+                     answers the read and the write stays behind the gate",
                 ));
             }
         }
@@ -6233,6 +6297,85 @@ mod tests {
         // No codename is exposed by RM: do not fabricate an architecture.
         assert!(!map.contains_key("codename"));
         assert!(!map.contains_key("arch"));
+    }
+
+    /// The macOS offset read: one field, taken from the snapshot's own record,
+    /// and a domain that same snapshot could not corroborate refused with core's
+    /// reason -- not reported as an offset of zero, and not blamed on the host.
+    #[test]
+    fn macos_rm_clock_offset_answers_from_the_snapshot_and_names_an_unnamed_domain() {
+        let settings = nvoc_core::DeviceSettings {
+            clock_offsets_named: Some(vec![nvoc_core::NamedClockOffset {
+                name: "memory".to_string(),
+                domain_bit: 0x10,
+                frequency_khz: 6_000_984,
+                offset_khz: -126,
+                corroboration: "the record published 6000984 kHz, which is this snapshot's live \
+                                memory clock, and it is the only one of the 2 records that did"
+                    .to_string(),
+            }]),
+            ..Default::default()
+        };
+        let value = normalize_query_clock_offset_macos(&settings, ClockDomain::Memory)
+            .expect("a domain this snapshot corroborated answers");
+        assert_eq!(value["mhz"].as_f64(), Some(-0.126));
+        assert_eq!(
+            value.as_object().expect("the value is an object").len(),
+            1,
+            "the macOS branch returns the same single field the NVAPI/NVML branches do"
+        );
+
+        let err = normalize_query_clock_offset_macos(&settings, ClockDomain::Graphics)
+            .expect_err("a domain this snapshot did not corroborate cannot answer");
+        let text = err.to_string();
+        assert!(
+            text.contains("graphics is not named in this reading"),
+            "the refusal is core's own named reason: {text}"
+        );
+        assert!(
+            !text.contains("NVAPI/NVML"),
+            "the refusal must not blame the platform for the entry's gap: {text}"
+        );
+    }
+
+    /// The offset family's backend resolution and the write half: the read
+    /// answers on macOS, so the write names the gate rather than a host runtime
+    /// that does not exist there.
+    #[test]
+    fn macos_rm_offset_backends_and_the_write_gate_name_the_right_layer() {
+        // Absent or `auto` resolves to the platform's own backend, so a caller
+        // that says nothing gets the one that exists on the host it runs on.
+        assert_eq!(
+            clock_offset_backend(None).expect("a default exists"),
+            fan_power_backends(cfg!(target_os = "macos"))
+        );
+        assert_eq!(
+            clock_offset_backend(Some("auto")).expect("auto resolves"),
+            fan_power_backends(cfg!(target_os = "macos"))
+        );
+        assert_eq!(
+            clock_offset_backend(Some(" macOS-RM ")).expect("the macOS spelling is a backend here"),
+            "macos-rm"
+        );
+        assert_eq!(clock_offset_backend(Some("nvapi")).expect("nvapi"), "nvapi");
+        assert!(
+            clock_offset_backend(Some("nvapi-cooler")).is_err(),
+            "the cooler backends carry no clock offsets, and must still be refused"
+        );
+
+        let gate = macos_write_gate("set_clock_offset", "macos-rm")
+            .expect_err("the macOS offset write is behind the gate");
+        let text = gate.to_string();
+        assert!(text.starts_with("set_clock_offset: "), "{text}");
+        assert!(
+            text.contains(nvoc_core::MACOS_RM_WRITE_GATE_REASON),
+            "{text}"
+        );
+        assert!(
+            !text.contains("NVAPI/NVML"),
+            "the gate is what is missing, not the host runtime: {text}"
+        );
+        macos_write_gate("set_clock_offset", "nvml").expect("a non-macOS backend passes the gate");
     }
 
     /// The macOS settings projection must report what it reads, and must name

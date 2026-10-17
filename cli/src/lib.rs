@@ -8333,14 +8333,12 @@ fn mhz_to_khz_u32(mhz: u32) -> CliResult<u32> {
         .ok_or_else(|| CliError::new("MHz value is too large"))
 }
 
+/// The public name of a clock domain, for display and for the macOS RM offset
+/// lookup. The mapping lives in core so the Python bindings resolve the same
+/// names; a domain core has no name for prints as `unknown` here, and the macOS
+/// lookup then refuses it *by name* rather than looking up an invented one.
 fn domain_label(domain: ClockDomain) -> &'static str {
-    match domain {
-        ClockDomain::Graphics => "graphics",
-        ClockDomain::Memory => "memory",
-        ClockDomain::Processor => "processor",
-        ClockDomain::Video => "video",
-        _ => "unknown",
-    }
+    nvoc_core::public_offset_domain(domain).unwrap_or("unknown")
 }
 
 /// Resolve a `set-private-legacy-pstates20-freq-domain-global-offset --domain` argument into the
