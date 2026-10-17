@@ -3,6 +3,7 @@
 //! Uses the same IOKit transport as the validation probe, linked into this
 //! library. No external probe executable, NVAPI, or NVML runtime is required.
 //! The initial implementation discovers the first service exposed by NullMoth.
+use crate::macos_offset;
 use crate::{Error, GpuId, PciAddress};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -296,7 +297,7 @@ impl crate::GpuOperation for QueryMacosRmSettings {
 /// Version of the private C ABI in core/native/macos_rm_abi.h. Bump both
 /// sides together: the C header pins the same number and the hardware test
 /// compares the two fingerprints.
-const ABI_VERSION: u32 = 3;
+const ABI_VERSION: u32 = 4;
 
 /// Slots returned by [`abi_layout`] and by the native
 /// nvoc_macos_rm_abi_layout(): sizes, field offsets, the ABI version and the
@@ -507,6 +508,14 @@ unsafe extern "C" {
         cap: usize,
     ) -> u32;
     fn nvoc_macos_rm_session_close(handle: *mut SessionOpaque, error: *mut u8, cap: usize) -> u32;
+    fn nvoc_macos_rm_session_offset(
+        handle: *mut SessionOpaque,
+        kind: u32,
+        out: *mut u8,
+        size: usize,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
     fn nvoc_macos_rm_abi_layout(out: *mut u64, count: usize) -> usize;
 }
 
@@ -1447,6 +1456,69 @@ pub struct MacosRmSession {
     silent_samples: u32,
 }
 
+/// Which block of the private clock-offset channel to read. The numbers are the
+/// `kind` argument the native side maps onto its command table, and the sizes
+/// are the exact param sizes those commands require.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+#[derive(Debug, Clone, Copy)]
+enum OffsetBlock {
+    Directory,
+    Range,
+    Control,
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl OffsetBlock {
+    fn kind(self) -> u32 {
+        match self {
+            Self::Directory => 0,
+            Self::Range => 1,
+            Self::Control => 2,
+        }
+    }
+
+    fn bytes(self) -> usize {
+        match self {
+            Self::Directory => macos_offset::OFFSET_DIRECTORY_BYTES,
+            Self::Range => macos_offset::OFFSET_RANGE_BYTES,
+            Self::Control => macos_offset::OFFSET_CONTROL_BYTES,
+        }
+    }
+}
+
+/// Read one block and parse it, keeping the driver's refusal distinct from a
+/// payload that could not be made sense of. Must be called with the transport
+/// lock held, like every other entry point.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn read_offset_block<T>(
+    handle: *mut SessionOpaque,
+    block: OffsetBlock,
+    parse: fn(&[u8]) -> Result<T, macos_offset::OffsetParseError>,
+) -> macos_offset::OffsetBlockRead<T> {
+    let mut payload = vec![0u8; block.bytes()];
+    let mut error = [0u8; 256];
+    // SAFETY: the handle is live, `payload` is exactly the size its command
+    // declares, the buffers outlive the call, and C writes the payload only on
+    // a zero return.
+    let status = unsafe {
+        nvoc_macos_rm_session_offset(
+            handle,
+            block.kind(),
+            payload.as_mut_ptr(),
+            payload.len(),
+            error.as_mut_ptr(),
+            error.len(),
+        )
+    };
+    if status != 0 {
+        return macos_offset::OffsetBlockRead::Refused(status);
+    }
+    match parse(&payload) {
+        Ok(parsed) => macos_offset::OffsetBlockRead::Parsed(parsed),
+        Err(err) => macos_offset::OffsetBlockRead::Malformed(err),
+    }
+}
+
 impl MacosRmSession {
     /// Open with the default staleness window and no cancellation hook.
     pub fn open() -> Result<Self, Error> {
@@ -1659,6 +1731,35 @@ impl MacosRmSession {
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     fn raw_sample(&mut self) -> Result<RawSample, Error> {
+        Err(Error::Custom(
+            "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
+        ))
+    }
+
+    /// Read the private clock-offset channel: the domain directory, the
+    /// per-domain offset range, and the block that carries the current values.
+    ///
+    /// Read-only, so it is safe to call while the write gate is closed. Every
+    /// block reports its own outcome, and the call needs a healthy GSP: while
+    /// the GSP is in its reset-required state all three come back
+    /// [`macos_offset::OffsetBlockRead::Refused`] with `0x62`, which must not
+    /// be rendered as a value.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    pub fn read_offset_channel(&mut self) -> Result<macos_offset::OffsetChannelSnapshot, Error> {
+        let _guard = lock_transport()?;
+        Ok(macos_offset::OffsetChannelSnapshot {
+            directory: read_offset_block(
+                self.handle,
+                OffsetBlock::Directory,
+                macos_offset::parse_directory,
+            ),
+            range: read_offset_block(self.handle, OffsetBlock::Range, macos_offset::parse_range),
+            control: read_offset_block(self.handle, OffsetBlock::Control, macos_offset::parse_control),
+        })
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    pub fn read_offset_channel(&mut self) -> Result<macos_offset::OffsetChannelSnapshot, Error> {
         Err(Error::Custom(
             "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
         ))

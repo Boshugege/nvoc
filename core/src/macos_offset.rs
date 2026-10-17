@@ -248,6 +248,39 @@ pub fn parse_control(buf: &[u8]) -> Result<OffsetControl, OffsetParseError> {
     })
 }
 
+/// The outcome of reading one block of the private clock-offset channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OffsetBlockRead<T> {
+    /// The driver answered and the payload parsed at its declared geometry.
+    Parsed(T),
+    /// The driver refused the command. The value is the RM status as returned:
+    /// `0x62` while the GSP is in its reset-required state, `0x56` when the
+    /// handler is not implemented for this chip.
+    Refused(u32),
+    /// The driver answered with a zero status, but the payload does not have
+    /// the geometry its command declares. Requesting the exact size makes this
+    /// a driver-side surprise rather than a caller error, so it is reported
+    /// instead of guessed at.
+    Malformed(OffsetParseError),
+}
+
+/// One read of the private clock-offset channel.
+///
+/// Each block keeps its own outcome. A refusal must never be rendered as a
+/// value -- in particular not as "the offset is zero" -- and one refused block
+/// must not discard the two that answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffsetChannelSnapshot {
+    /// `0x20809019`: the domain bit and record type of each entry.
+    pub directory: OffsetBlockRead<OffsetDirectory>,
+    /// `0x20809025`: the per-record offset bounds, in kHz.
+    pub range: OffsetBlockRead<OffsetRange>,
+    /// `0x2080901b`: the current values. Every value dword reads zero at stock,
+    /// so a `Parsed` block means "no offset is applied" -- a measured zero,
+    /// not a missing reading.
+    pub control: OffsetBlockRead<OffsetControl>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,6 +8,7 @@ pub use gpu::nvapi_init_attempted;
 pub mod legacy_vbios_parser;
 pub mod macos_offset;
 pub mod macos_rm;
+pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{
     ABI_LAYOUT_SLOTS, DeviceInfo, DeviceSample, DeviceSettings, DeviceStatus, FieldState,
     MONITOR_SECTIONS, MONITOR_STALE_AFTER, MacosRmSession, QueryMacosRmInfo, QueryMacosRmSettings,

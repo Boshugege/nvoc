@@ -583,6 +583,35 @@ uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *s, nvoc_rm_sample *out, s
     return sample_read(s, out);
 }
 
+/* ---- private clock-offset channel ---- */
+
+/* These three commands are not in the open kernel modules' headers, so the ids
+ * and the exact param sizes below are the probe's measurement on the device;
+ * the driver rejects any other size. Only the GSP answers them, so while the
+ * GSP is in its reset-required state all three report 0x62 instead of data. */
+static const struct {
+    uint32_t cmd;
+    uint32_t bytes;
+} offset_commands[NVOC_RM_OFFSET_KINDS] = {
+    {0x20809019u, 12336u}, /* domain directory */
+    {0x20809025u, 7188u},  /* per-domain offset range */
+    {0x2080901bu, 2108u},  /* domain control: the current values */
+};
+
+uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *s, uint32_t kind, void *out, size_t size,
+                                      char *error, size_t cap)
+{
+    if (!s || !out) return failure(error, cap, "session offset without buffers", UINT32_MAX);
+    if (kind >= NVOC_RM_OFFSET_KINDS) return failure(error, cap, "session offset kind", UINT32_MAX);
+    if (size != offset_commands[kind].bytes)
+        return failure(error, cap, "offset ABI size", UINT32_MAX);
+    /* The caller reads the payload only on a zero return, so a refusal must not
+     * leave a stale or half-filled block where a parser could find one. */
+    memset(out, 0, size);
+    return nvx_rm_control(s->ctl, s->client, s->subdevice, offset_commands[kind].cmd, out,
+                          offset_commands[kind].bytes);
+}
+
 uint32_t nvoc_macos_rm_session_close(nvoc_rm_session *s, char *error, size_t cap)
 {
     if (!s) return 0;

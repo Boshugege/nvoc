@@ -23,6 +23,10 @@
  * ABI v3 carries the full read-only RUSD page plus the two live RM controls
  * (P-state, FB heap usage) through one section table, so the one-shot and the
  * continuous paths interpret driver telemetry through identical field rules.
+ * ABI v4 adds the private clock-offset channel entry point below. No struct
+ * layout changed with it, so every assertion above still holds; the version
+ * moves because a caller cannot tell from the layout whether the channel is
+ * reachable at all.
  */
 #ifndef NVOC_MACOS_RM_ABI_H
 #define NVOC_MACOS_RM_ABI_H
@@ -30,7 +34,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define NVOC_RM_ABI_VERSION 3u
+#define NVOC_RM_ABI_VERSION 4u
 
 /* Per-section status codes carried in nvoc_rm_sample.field_status. */
 /* The section was copied under a stable, data-valid sequence. */
@@ -176,6 +180,19 @@ uint32_t nvoc_macos_rm_session_open(nvoc_rm_session **out_session, nvoc_rm_snaps
  * timestamps are reported as observed so the caller can decide freshness. */
 uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *session, nvoc_rm_sample *out,
                                      size_t size, char *error, size_t cap);
+
+/* The private clock-offset channel. Three read-only commands that are not in
+ * the open kernel modules' headers; their geometry is the probe's measurement
+ * on the device. Each is requested by kind and must be given exactly the size
+ * its command declares. The payload is valid only on a zero return: while the
+ * GSP is in its reset-required state all three answer 0x62 instead of data, and
+ * that refusal must never be rendered as a zero offset. */
+#define NVOC_RM_OFFSET_KINDS 3
+#define NVOC_RM_OFFSET_DIRECTORY 0 /* 12336 bytes: domain bit -> record type */
+#define NVOC_RM_OFFSET_RANGE 1     /* 7188 bytes: per-domain offset range, kHz */
+#define NVOC_RM_OFFSET_CONTROL 2   /* 2108 bytes: domain control, current values */
+uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, void *out,
+                                      size_t size, char *error, size_t cap);
 
 /* Release the mapping, the RM objects and both fds. Returns non-zero (and a
  * reason) when the mapping could not be unmapped; the resource is then
