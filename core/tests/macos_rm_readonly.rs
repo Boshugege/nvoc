@@ -11,9 +11,14 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 }
 
 use nvoc_core::{
-    BackendSet, GpuId, GpuSelector, MacosRmSession, QueryMacosRmInfo, QueryMacosRmStatus,
-    discover_targets, nvapi_init_attempted, run, select_targets,
+    BackendSet, FieldState, GpuId, GpuSelector, MacosRmSession, QueryMacosRmInfo,
+    QueryMacosRmStatus, abi_layout, discover_targets, native_abi_layout, nvapi_init_attempted, run,
+    select_targets,
 };
+
+fn count_fds() -> usize {
+    std::fs::read_dir("/dev/fd").unwrap().count()
+}
 
 #[test]
 #[ignore = "requires an initialized NullMoth GPU on x86_64 macOS"]
@@ -51,7 +56,6 @@ fn rusd_refreshes_across_queries_without_leaking_fds() {
     let inventory = discover_targets(BackendSet::MacosRm).unwrap();
     let targets = inventory.targets();
     let target = targets[0];
-    let count_fds = || std::fs::read_dir("/dev/fd").unwrap().count();
     let before = count_fds();
     let mut previous_timestamp = 0;
     for _ in 0..8 {
@@ -70,10 +74,16 @@ fn rusd_refreshes_across_queries_without_leaking_fds() {
 #[ignore = "requires a NullMoth GPU with RUSD telemetry"]
 fn persistent_session_samples_advance_without_leaking_fds() {
     let _serial = serial();
-    let count_fds = || std::fs::read_dir("/dev/fd").unwrap().count();
     let before = count_fds();
     let mut session = MacosRmSession::open().unwrap();
     assert_eq!(session.info().driver_version, "610.57.04");
+    // An open session waited for every section to publish a first new value, so
+    // the first sample may not claim "never refreshed" for any of them.
+    assert_eq!(
+        session.initial_freshness(),
+        [true; nvoc_core::MONITOR_SECTIONS.len()],
+        "a section did not publish a new value inside the open budget"
+    );
     // The identity the monitor guards on is the one the session opened on.
     let (pci, device_id, _rm_id) = session.identity();
     assert_eq!(pci, session.info().pci_address);
@@ -88,7 +98,14 @@ fn persistent_session_samples_advance_without_leaking_fds() {
             "sample {index}: {:?}",
             sample.status.unavailable
         );
+        assert!(sample.epoch_reset.is_empty(), "sample {index}: clock reset");
+        assert_eq!(
+            sample.freshness["temperature_c"],
+            FieldState::Advancing,
+            "sample {index} did not advance"
+        );
         assert!(sample.updated["temperature_c"], "sample {index} stalled");
+        assert!(sample.advancing_sections() > 0);
         let temperature = sample.status.temperature_c.unwrap();
         assert!((-50.0..=150.0).contains(&temperature));
         assert!(sample.status.utilization_percent.unwrap() <= 100);
@@ -100,6 +117,36 @@ fn persistent_session_samples_advance_without_leaking_fds() {
         );
         previous_timestamp = timestamp;
     }
-    drop(session);
+    // Explicit close reports its own result instead of relying on Drop.
+    session.close().unwrap();
     assert!(count_fds() <= before + 1);
+}
+
+#[test]
+#[ignore = "requires a NullMoth GPU with RUSD telemetry"]
+fn sessions_can_be_closed_and_reopened_without_growing_resources() {
+    let _serial = serial();
+    let before = count_fds();
+    let mut identity = None;
+    for cycle in 0..3 {
+        let session = MacosRmSession::open().unwrap();
+        let current = session.identity();
+        if let Some(previous) = &identity {
+            assert_eq!(previous, &current, "cycle {cycle} changed device identity");
+        }
+        identity = Some(current);
+        session.close().unwrap();
+    }
+    // Closing must release the chain and the mapping, not just the Rust value.
+    assert!(count_fds() <= before + 1);
+}
+
+#[test]
+#[ignore = "requires a NullMoth GPU on x86_64 macOS"]
+fn native_and_rust_abi_layouts_agree() {
+    let _serial = serial();
+    // The C side pins the same numbers with _Static_assert; this compares the
+    // two languages at run time through the shared fingerprint entry point, so
+    // the extern declaration in core/src/macos_rm.rs cannot drift silently.
+    assert_eq!(native_abi_layout().unwrap(), abi_layout());
 }

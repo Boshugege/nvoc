@@ -132,3 +132,26 @@ own samples (plus a host-monotonic 5 s staleness window), not from the absolute
 stamp. This is what makes `updated` flags and the `no RUSD update` reason
 trustworthy even though the driver's clock is offset from ours.
 
+### Two stamp encodings in one field (`class/cl00de.h`)
+
+`RUSD_SEQ_DATA_VALID` in `cl00de.h` accepts two different encodings of the same
+`lastModifiedTimestamp` word, and the header names the reason for each:
+
+- **Polled sections** (what the six telemetry fields we read are, given the
+  `NV00DE_RUSD_POLL_*` allocation mask) carry a value **below**
+  `RUSD_SEQ_START` (`0xFF00000000000000`) and nonzero: the nanosecond stamp
+  measured above. `RUSD_TIMESTAMP_INVALID` is `0`, i.e. "not available or not
+  supported on this platform".
+- **Non-polled sections** carry a value **at or above** `RUSD_SEQ_START` whose
+  low bit is clear: an even sequence counter, incremented on every write, not a
+  clock. Treating one as an age would be meaningless.
+
+A stamp can therefore only be compared for *change*, never for absolute age,
+and a comparison must tolerate the value going **backwards** (a driver clock
+reset or a re-initialised page restarts the counter). The monitor classifies
+that case as `epoch_reset`, keeps the new value and restarts its
+session-relative silent-time accounting; a per-field sequence/silent window
+taken from the stamp itself is never used. Polled values observed during
+hardware runs were all in the nanosecond encoding (`1.79e18`), far below
+`RUSD_SEQ_START`.
+

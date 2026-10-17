@@ -111,40 +111,91 @@ nvoc-cli get-status --macos-rm --interval 0.5                   # until Ctrl-C
 - `--interval SECONDS` (fractional) switches `get-status` into continuous mode;
   `--count N` stops after N samples (0 or omitted = run until Ctrl-C). Both
   require the macOS RM backend and are refused for NVAPI/NVML.
-- JSON output becomes one complete object per line (JSONL): `sequence`,
-  `host_time` (RFC 3339) and `host_time_unix_ns`, `sample_duration_us`, the
-  telemetry fields in their raw units, `rusd_timestamps`, `updated` and
-  `unavailable`. Human output keeps the engineering-unit block per sample and
-  lists the fields that did not refresh.
-- Ctrl-C stops after the current sample, prints a summary line on stderr and
-  exits 0, unwinding the session (mapping, RM objects, file descriptors).
+- Accepted intervals are 1 ms to 24 h. Below that the run would busy-loop the
+  driver instead of sampling (and `Duration::from_secs_f64` rounds to zero);
+  above it the value is almost certainly a typo. Out-of-range input is refused
+  before any driver access, and never by panicking - a release build uses
+  `panic = "abort"`, so a panic would abort the process without unwinding the
+  session.
+- Cadence: one sample, then `interval` of rest, so the observed period is the
+  interval plus the sampling cost (measured: `--interval 1` gives 1.000-1.011 s
+  gaps, `--interval 2` gives 2.001-2.011 s, with 0.1-1.0 ms of sampling).
+- JSON output becomes one JSONL object per sample (`schema
+  nvoc/macos-rm-sample/2`): `sequence`, `host_time` (RFC 3339) and
+  `host_time_unix_ns`, `sample_duration_us`, the telemetry fields in their raw
+  units, `rusd_timestamps`, `updated`, `freshness`, `epoch_reset` and
+  `unavailable`. Human output keeps the engineering-unit block per sample,
+  lists the fields that did not refresh and reports any stamp reset.
+- Ctrl-C stops after the current sample (including during a reconnect backoff),
+  prints a summary line on stderr and exits 0, unwinding the session (mapping,
+  RM objects, file descriptors).
+- A closed consumer (`nvoc-cli get-status --interval 1 | head -1`) also ends the
+  run cleanly with exit 0: the stream is written with `writeln!`/`flush` errors
+  handled instead of the `println!` panic, which would have aborted on
+  `BrokenPipe`. Non-pipe write failures are reported and exit non-zero.
 - Raw logs stay outside the repository (`<workspace>/outputs/`).
 
 ### Session semantics
 
-Continuous mode calls the `nvoc_macos_rm_session_*` ABI
-(`core/native/macos_rm.c`): the connection chain and the read-only RUSD mapping
-are created once and reused for every sample instead of being rebuilt per
-query. The one-shot snapshot ABI is unchanged and still opens/closes per call.
+Continuous mode calls the `nvoc_macos_rm_session_*` ABI: the connection chain
+and the read-only RUSD mapping are created once and reused for every sample
+instead of being rebuilt per query. The one-shot snapshot ABI is unchanged and
+still opens/closes per call.
 
-Freshness rules:
+The struct layouts and the entry-point signatures live in one shared header,
+`core/native/macos_rm_abi.h`. `macos_rm.c` includes it, so a definition that
+drifts from the declared prototype stops compiling, and the header's
+`_Static_assert`s pin the same sizes/offsets the Rust side asserts with
+`size_of!`/`offset_of!` (`core/tests/macos_rm_abi.c` re-checks the signatures
+and the status codes; the ignored hardware test
+`native_and_rust_abi_layouts_agree` compares both languages' runtime
+fingerprints through `nvoc_macos_rm_abi_layout`). Every entry point treats
+`error`/`cap` as optional, requires an exact `size` argument, and only touches
+outputs on success.
 
-- A field is a reading only when its RUSD section was copied coherently (a
-  data-valid sequence whose stamp did not change during the copy). Otherwise it
-  is `null` with an "unstable sequence" reason.
-- `updated[field]` reports whether the section's stamp advanced since the
-  previous sample. A section that legitimately did not refresh keeps its last
-  coherent value with `updated: false`; it is never replaced by a zero.
-- A section that has not advanced for longer than `MONITOR_STALE_AFTER` (5 s)
-  becomes `null` with a "no RUSD update for N ms" reason until it advances
-  again. The window is host monotonic time between our own samples, not the
-  absolute RUSD stamp (see the reverse-engineering note: the driver stamp is in
-  the host real-time domain but lags wall clock by ~1.9 s and drifts).
+`nvoc_macos_rm_session_open` also hands back each polled section's
+**mapping-time watermark**. The monitor must see a later value before it may
+treat a reading as new; without that baseline a session opened on an already
+old page would report the stale value as its "first fresh sample".
+
+Freshness rules (per field, `freshness[field]`):
+
+- `advancing` - the section was copied coherently and its stamp/sequence
+  changed on this sample: the value is new and `updated[field]` is `true`.
+- `unchanged` - not refreshed on this sample but still inside the staleness
+  window. The last coherent value is repeated with `updated[field] = false`; it
+  is never replaced by a zero, and valid `0 RPM` / `0 %` readings are kept.
+- `never_refreshed` - the section has not advanced once since the session
+  opened, so its value is withheld (`null`) with a "no RUSD update since this
+  session opened (N ms)" reason. The open path waits up to 1.5 s for every
+  section and reports the ones still waiting on stderr, so a slow driver is
+  visible rather than silently presented as fresh.
+- `stale` - it did advance earlier in this session but has been silent past
+  `MONITOR_STALE_AFTER` (5 s): the value is withheld with a "no RUSD update for
+  N ms" reason. The window is host monotonic time between our samples, not the
+  absolute RUSD stamp (the driver stamp is in the host real-time domain but
+  lags wall clock by ~1.9 s and drifts).
+- `unsupported` - the section carries no valid timestamp
+  (`RUSD_TIMESTAMP_INVALID`): the driver does not publish it right now, so
+  retrying will not help until it does.
+- `unstable` - the section changed while it was copied (sequence/timestamp
+  raced): no coherent value this round, but retrying is reasonable.
+- A stamp/sequence that moves **backwards** is new data from a restarted
+  timeline (driver clock reset, page re-initialisation); the fields are listed
+  in `epoch_reset` and no absolute age is derived from the stamp.
 - P-State is re-read from RM on every sample because it is a live control, not
-  a RUSD section.
-- On a session-level failure the CLI drops the session and reopens it with a
-  bounded backoff (0/0.5/1/2 s), verifying that the reopened device identity
-  (PCI address, device id, RM GPU id) still matches the discovered target.
+  a RUSD section, so it is `advancing` whenever the query succeeds.
+- A single quiet field is normal and never triggers a reconnect. When **no**
+  section advances for six consecutive samples the session is considered dead
+  and `sample()` returns an error so the caller reconnects.
+
+Reconnect rules: the old session is explicitly closed (and any release failure
+is reported) *before* a new one is opened, because the transport and the
+driver's poller are process-global. Reopening uses a bounded 0/0.5/1/2 s
+backoff, at most 8 consecutive reconnects, an interruptible wait, and a strict
+identity check (PCI address, device id, RM GPU id). `MacosRmSession::close()`
+returns any native release error and `Drop` is only the fallback for callers
+that forget it.
 
 P-State, clocks, temperature, power and utilization are not one atomic
 snapshot: sections update on the driver's own ~500 ms schedule and
@@ -160,7 +211,10 @@ cargo test -p nvoc-core --test macos_rm_readonly -- --ignored --nocapture
 
 The read-only hardware tests are serialized (a process-wide mutex): the NVOC
 transport and the driver's RUSD poller are process-global, and two concurrent
-read-only clients can starve each other's 1.5 s freshness budget.
+read-only clients can starve each other's 1.5 s freshness budget. They cover
+identity, VRAM, refreshed P-state, missing-data semantics, selection, repeated
+timestamp advancement, the C/Rust ABI fingerprint, explicit
+close/reopen cycles and fd accumulation.
 
 The last command requires the initialized GPU and only performs GET queries
 and RM resource allocation/cleanup. It verifies identity, VRAM, refreshed
@@ -172,6 +226,11 @@ be run on the build host:
 cc -std=c11 -Wall -Wextra -Werror -Icore/native \
   -I"$OGKM/src/common/sdk/nvidia/inc" core/tests/rusd_read.c -o /tmp/nvoc-rusd-read
 /tmp/nvoc-rusd-read
+cc -std=c11 -Wall -Wextra -Werror -Icore/native -fsyntax-only core/tests/macos_rm_abi.c
 ```
+
+`rusd_read.c` covers the RUSD validity/freshness/stable-copy helpers;
+`macos_rm_abi.c` is a compile-time contract test for the shared header (it is
+checked with `-fsyntax-only`, since it only needs to type-check).
 Performance-write tests remain ignored. Raw test output belongs in workspace
 `outputs/`, outside the repository.
