@@ -8,13 +8,15 @@
 
 ## 1. Correction summary
 
-Three earlier claims were wrong and are corrected here:
+Five earlier claims were wrong and are corrected here:
 
 | earlier claim | correction |
 | --- | --- |
 | "the responder is not located; TU116 runs host-side RM without GSP" | the responder **is the GSP firmware** reached by the host's legacy-non-privileged forwarding path |
 | "no GSP firmware file exists under `/Library/Extensions`, `/Library/NullMoth` or `/usr/local`" | the firmware lives at `/Users/Shared/nvfw/nvidia/610.57.04/{gsp_tu10x.bin,gsp_ga10x.bin,ucodes_*.bin}` — outside every path that was searched |
 | "the private ids have no implementation body on this machine" | they have none in the host NVOC table, but **169 CLK + 151 VOLT rows** exist in the GSP's own export table |
+| "`0x2080b201` is answered outside the GSP path" (first version of §7) | it is **not** host-side — the host has no CLK/VOLT row and no id literal at all (§7); it is answered by the GSP, which survives a wedge that kills its own category sibling `0x2080b202` |
+| "a `0x62` sweep tells host-implemented rows from GSP-dispatched ones" (first version of §6.1) | refuted by that same pair: the gate is **per command**, so `0x62` classifies a *gated handler/subsystem*, not a dispatch path (§7) |
 
 The host table result is unchanged and still true: the loaded NVRM's NVOC
 export table has **1** CLK row (`0x20801037/6024`), **0** VOLT rows and **0**
@@ -688,22 +690,69 @@ Run while the wedge was active, it split them cleanly:
 The `0x62` set is exactly the set that was `NV_OK` before the wedge and that
 also goes to the GSP — *including* ids that **are** in the host table. So being
 registered in the host NVOC table does **not** mean the host answers a command;
-several registered perf/pmgr/clk rows are GSP-implemented too. A `0x62` sweep
-is therefore a cheap way to tell host-implemented rows from GSP-dispatched
-ones, without touching the firmware.
+several registered perf/pmgr/clk rows are GSP-implemented too.
 
-## 7. `0x2080b201` is answered *outside* the GSP path
+**Correction (2026-10-17T11:11Z, §7).** The last sentence of the previous
+version — "a `0x62` sweep is therefore a cheap way to tell host-implemented
+rows from GSP-dispatched ones" — does not hold. `0x2080b201` answers `NV_OK`
+*while* its own category sibling `0x2080b202` answers `0x62`, in the same
+session, on the same forwarding path, and **neither** has a host handler (§7
+proves both facts from source and from the loaded binaries). A post-latch
+`0x62` therefore identifies a **gated handler/subsystem**, not a dispatch path;
+do not use it to classify host-vs-GSP.
+
+## 7. `0x2080b201` survives the wedge: the gate is per command
 
 While every GSP-forwarded id above answered `0x62 NV_ERR_RESET_REQUIRED`,
 `0x2080b201 @2444` kept answering `NV_OK` with its usual
 `mask 0xFF + 800000 µV / 756250 µV` payload — while *registered* GSP-backed
-commands like `0x2080200b` and `0x20802609` were `0x62` (see §6.1). So the
-wedge covers the GSP service generally, not just the legacy forward, and
-`0x2080b201` is not served by it at all, despite carrying the `0x8000` legacy
-bit. It is either a host-side handler or a different transport. This finally gives
-the long-standing "unattributed responder" of §4 a definite counter-example:
-at least one accepted private id survives a GSP wedge, and at least one does
-not.
+commands like `0x2080200b` and `0x20802609` were `0x62` (see §6.1).
+
+**Correction (2026-10-17T11:11Z).** The first version of this section read that
+as "`0x2080b201` is answered *outside* the GSP path". Two measurements exclude
+it:
+
+1. **The host has no handler for any CLK/VOLT private id.** The host's only
+   deprecated-control rows are the eight in
+   `src/nvidia/interface/deprecated/rmapi_deprecated_control.c`
+   (`rmDeprecatedControlTable`):
+   `NV0000_CTRL_CMD_SYSTEM_GET_BUILD_VERSION`, `NV2080_CTRL_CMD_BIOS_GET_INFO`,
+   `NV2080_CTRL_CMD_BUS_GET_INFO`, `NV0080_CTRL_CMD_BSP_GET_CAPS`,
+   `NV2080_CTRL_CMD_GPU_GET_INFO`, `NV0073_CTRL_CMD_DP_SET_MSA_PROPERTIES`,
+   `NV0080_CTRL_CMD_MSENC_GET_CAPS`, `NV2080_CTRL_CMD_FB_GET_INFO` — no CLK row,
+   no VOLT row. Everything else with bit `0x8000` goes to `RmGssLegacyRpcCmd`,
+   which does no table lookup, no size check, no name check: it copies the
+   block and calls `pRmApi->Control(PHYSICAL)`.
+2. **The id literal is absent from every loaded host binary.** A byte scan for
+   the little-endian u32 of `0x2080b201`, `0x2080b202`, `0x2080b213`,
+   `0x20809019`, `0x2080901b`, `0x20809026` and `0x20809061` returns **0 hits**
+   in `NVRM`, `NVAccel`, `NVRMFB`, `NVRMAGDC` and the nvmtl dylibs, while the
+   same scan finds the *public, host-implemented* `0x20800102` **19** times and
+   `0x2080122a` twice. A host-side handler would have to compare against a
+   literal; there is none.
+
+So `0x2080b201` is served by the GSP, and the wedge is **command-selective**.
+`probe-macos-rm --tierb-read` (read-only, one zeroed block per id at the size
+the GSP's own table gives) now walks the whole VOLT (`0x32`) read half and
+records exactly that, in one session
+(`outputs/volt-read-20261017T111107Z/`):
+
+| command | size | wedged result |
+| --- | --- | --- |
+| `0x2080b201` rails get-info | 2444 | **`NV_OK`** — 16 non-zero dwords, stable on re-read |
+| `0x2080b202` rails get-status | 3232 | `0x62` |
+| `0x2080b205` `b207` `b209` `b210` `b211` `b212` `b213` `b214` `b216` `b217` `b218` | GSP table sizes | `0x62` (all eleven) |
+| `0x208090a2` vfpoints-get | 524 | `0x62` |
+
+Read that as: the private VOLT read half is not uniformly alive *or* uniformly
+dead; exactly one of the thirteen read ids still answers. Whether the gate sits
+in the host's physical-RM shim (a command-selective "GSP client reset pending"
+check) or in the GSP itself is **not** separated yet — both earlier readings
+("all legacy-forwarded ids die", "b201 is host-side") are excluded, this one is
+not. The pass therefore treats the two codes differently: `0x65
+NV_ERR_TIMEOUT` stops the pass (it is the latch of §6), `0x62` is recorded and
+the pass continues, because "which read faces still answer" *is* the
+measurement.
 
 ## 8. Reproducing
 
@@ -812,3 +861,174 @@ behaviour on a wedged GSP — the battery stops instead of walking the id list �
 but it means every block above still dates from the pre-wedge session.
 `uptime` has been polled all session (19h46m at 10:04Z without a reset), so the
 private path is still dead and **nothing has been written to the GPU**.
+
+## 10. Candidate-mapping correction table (2026-10-17)
+
+The user's brief for this phase asked for a table that separates, for every
+candidate id: the original record, the actual source, the version it belongs
+to, the **full marshalling**, and a **reproducible read-only request**. This is
+that table. "Source" means where the number's authority comes from now —
+`GSP table` = a row of the firmware's own export table (§3, 889 rows, each row
+carrying an authoritative `paramSize`), `not in GSP table` = searched and
+absent, which is a *different* statement from "the driver does not know it".
+
+| # | id | original record / claim | actual source | version it belongs to | full marshalling (measured) | reproducible read-only request | verdict |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | `0x20809019` | "ClockClient domain info" (§4 of the superseded note) | GSP table @**12336** | R610.57.04 TU116 GSP | in: zeroed block. out: `48` B head (`+0` low byte `0xff`, `+4=0x3ff`, `+8=0x335`) + `32 x 384` B records; `rec+0` u16 type stamp, `rec+4` single domain bit, `rec+44` two `i16` (`0x03e8fc18` = `-1000,+1000`) | `probe-macos-rm-idle --clkctl-hex` (lossless hex) | `NV_OK`, 10 filled records, types `{08,09,03}`. No current/offset field observed |
+| 2 | `0x2080901b` | "ClockClient GET_CONTROL / offset+range read" | GSP table @**2108** | same | in: `+4` = u32 domain mask (validated: an invalid mask gives `0x25 NV_ERR_INVALID_DATA`); out: `60` B head (14 writes: `+0` u8 `0xff`, `+8` u32 `0x01010000`, `+12` u16 `0`, `+16..+56`) + bit-sparse `64` B records at `+60+64*bit` (`u16` type stamp @`+0`, value dwords `+8..+44` and `+52`,`+56`; `+4`,`+48`,`+60` **never** written) | `--clkctl-read` (per-bit counter map) / `--clkctl-hex` (lossless) | `NV_OK`; types `08`/`09` records write 13 slots, other types 11; **every value dword reads 0** (stock). Current offset **not** obtained |
+| 3 | `0x20809006` | "frequency measurement" | **not in GSP table** | — | 32 B / stamp `0x10020` form only | `--clkdoc-read` | every documented size and stamp -> `0x1f`; not usable here |
+| 4 | `0x20809061` / `0x20809062` | "V/F directory and status" | `9061` **is** a GSP row @**776**; `9062` is **not** in the table | the 582.41-numbered VFP pair does *not* map onto these sizes | `776 = 8 + 32*24`: 2 head masks (`0xFF`/`0x7FF`) + 11 filled per-domain records carrying a kHz-magnitude value | `--clkvf-read`, `--clkctl-hex` | `9061` readable and **live** (matches RUSD GPC/MCLK sample-for-sample); `9062` at every documented size -> `0x1f` |
+| 5 | `0x2080b213` | "voltage-rail control read" | GSP table @**1036** | `voltrails-family-full-layout-r610.md` | out: mask `0xFF` + `32 x 32` B records (all zero at stock) | `--tierb-read` (now walks the whole VOLT read half) | healthy: `NV_OK`; **wedged: `0x62`** |
+| 6 | `0x208090a2` | "all V/F paths fail" | GSP table @**524**, `flags 0x48` = **read** | — | read half of the `0xd0a3` pair | `--tierb-read` | it is a GET and *was* sendable; wedged: `0x62`. The old "all V/F paths fail" wording was wrong |
+| 7 | `0x20809025` | "offset range source" | GSP table @**7188** | same | `20 + 32*224`: `rec+8` = max VF kHz (`1638400`), `rec+20`/`rec+24` = `-18750`/`+18750` | `--clkctl-hex` | `NV_OK`; this is the **range**, not the current offset |
+| 8 | "`0x62` after the wedge tells host-implemented from GSP-dispatched" | — | refuted by §7 (b201 `NV_OK` vs b202 `0x62`, neither has a host row or literal) | — | — | `--tierb-read` | **correction**: the gate is per command |
+| 9 | "the write face is missing protocol / driver support" | — | host gate: `rmapi_gss_legacy_control.c` returns `0x1b` for `(cmd & 0xC000) == 0xC000` when `privLevel < RS_PRIV_LEVEL_USER_ROOT` | §2.1 | — | — | **correction**: what is missing is **privilege**; the GSP body exists (§4.4) |
+
+Two rules this table is meant to enforce, because both were violated by earlier
+notes in this repo:
+
+* an id is "absent" only when it is absent from the **GSP's own table** (the
+  host table is not the dispatch authority), and even then `0x1f`
+  (`INVALID_ARGUMENT`) means "your block did not match", not "no such
+  command" — the negative anchors `0x2080a0ff -> 0x56` (forwarded, GSP has no
+  method) and `0x2080ffff -> 0x1b` (privileged) are what "absent" looks like;
+* a value that reads `0` is a **stock reading**, not a missing field, only if
+  the same slot is shown to be *written* by the responder. The `0xA5`
+  background sweep is what separates the two (`0xA5 -> 0` is a write of zero;
+  `0xA5 -> 0xA5` is a field the responder never touches). The `0x2080901b`
+  record writes 13 slots in a `0xA5` block, so its zeros are the driver's own
+  zeros — which is *not yet* the same statement as "the current offset is 0
+  for every domain", because no non-zero reference exists on a stock board.
+
+**State recheck 2026-10-17T11:11Z**: still wedged (`uptime` 20h49m without a
+reset, no reboot, no kext reload, nothing written to the GPU). New in this
+window: the whole-VOLT read census of §7 (`outputs/volt-read-20261017T111107Z/`)
+and the host-binaries literal scan that goes with it. The clock-domain read
+battery still aborts on its first case by design, so §4's `+4` mask
+confirmation with a **zeroed** background, and the current-offset question
+itself, stay blocked on the reboot — they are the first two cases of
+`tools/clock-offset-read-run.sh`.
+
+## 11. The clock-domain offset channel: ids named, slot order reopened, privilege resolved (2026-10-17)
+
+§4 reconstructed `0x2080901b` from live blocks and §9 listed what was still
+missing. This section closes two of those items from sources already in the
+repo — the `nvapi-rs` NVAPI layer and the macOS port's own OS glue — and it
+**demotes one row of §4.3** that had been read as settled. No new GPU request
+was sent; every claim below is either a source reading or a re-reading of a
+block captured before the §6 wedge.
+
+### 11.1 The ids are NVAPI entry points, and the write recipe is written down
+
+`nvapi-rs/sys/src/gpu/clock.rs:1365-1375` maps this family onto private NVAPI
+calls and `:1930-1976` declares them; the middle layer drives them in
+`nvapi-rs/src/gpu.rs:2218` (`set_clk_domain_offset`):
+
+| RM id | NVAPI entry point | NVAPI id | caller-side block | recorder's verdict |
+| --- | --- | --- | --- | --- |
+| `0x20809019` | `ClockClkDomainsGetInfo` | `0x57B5A5DF` | 2520 B, magic `0x109D8` | "returns UNRESOLVED on R575.74; GetControl supersedes it for discovery" |
+| `0x2080901b` | `ClockClkDomainsGetControl` | `0xF58938F5` | 2404 B, magic `0x10964` | "WORKS live on Ada 4060 Laptop" |
+| `0x2080d01c` | `ClockClkDomainsSetControl` | `0xD14B69CF` | same 2404 B block, by reference | "DANGEROUS GPU clock write" |
+| `0x20809006` | `ClockCounterMeasureAvgFreq` | `0xFB8F61EC` (nvapi-rs) vs `0x527FC458` (`oc-surface-audit.md:45`) | 32 B, magic `0x10020` | the two records disagree — and §10 row 3 says the id is not in the GSP table at all |
+
+Two consequences that matter *on this host*:
+
+* our 2108 B block is **not** the NVAPI caller block (2404 B, `0x964`): it is
+  the **RM** block one layer down, and its head `+8` is the responder's own
+  constant `0x01010000` (§4.2), *not* the caller magic `0x10964`. The
+  "version-gate on `0x10964`" step of the recipe therefore applies to the layer
+  we bypass, and the only size/version gate that can refuse us is the GSP's own
+  `paramSize` (2108 on both halves, §5.2). **Do not seed a magic into the RM
+  block**: nothing measured writes `0x10964` there, and the head `+8` is written
+  unconditionally by the responder.
+* the recipe's remaining steps port one-to-one and are exactly this goal's
+  write-verification plan: snapshot the whole block -> patch a **copy** -> SET ->
+  GET read-back -> verify -> restore the snapshot on mismatch. Its extra rule is
+  worth adopting verbatim: **never submit a broad mask to `SET_CONTROL`.** GET
+  is mask-*seeded*, so a broad seed is how the record set is discovered; a broad
+  seed to SET asks the driver to apply 32 records, most of which it never filled.
+
+### 11.2 Which records a V1 SET can write, from the marshaller's own switch
+
+The same layer records the per-type write rule
+(`nvapi-rs/src/clock.rs:384-410`): `v1_marshalable(t) = t in {1,3,4,5,6,7,8,9}`,
+the V2 write path accepts `{1,3..=10,15}`, and protocol type `2` is marshalled
+by **neither** — a SET on such a record is silently dropped (recorded there as
+live-confirmed). This host's `0x2080901b` returns types `03` / `08` / `09`
+(§10 row 2), all three V1-marshalable, so a first single-domain write is
+well-posed *provided the target record's type is read first*. The corollary is a
+trap: readability and writability are independent per record — "the GET
+succeeded" says **nothing** about the SET.
+
+### 11.3 §4.3's `rec+8 = offset_kHz` is a candidate, not a result
+
+`nvapi-rs` disagrees with itself about the value-slot order, and both halves are
+in the repo:
+
+* the medium layer's own comment on the write path
+  (`sys/src/gpu/clock.rs:1930-1976`, `src/gpu.rs:2218`) says *"per the article
+  slot 0 is the signed frequency offset (kHz)"*;
+* the Blackwell field map (`sys/src/gpu/clock.rs:1766-1773`) says the frequency
+  delta is **`VALUES[2]`** (`rec+0x114`) and the voltage term is `VALUES[4]`
+  (`rec+0x11C`).
+
+Under §4.3's measured `0x24` shift, NVAPI slot 2 of the V1 five-dword value
+block (NVAPI `rec+52`) lands on RM `rec+16` — the slot §4.3 currently labels
+`range_max`. So the type-8/9 records carry **two** live candidates for the
+current frequency offset: `rec+8` (the article's slot 0) and `rec+16`
+(Blackwell's slot 2). Every one of them reads `0` at stock, which cannot
+separate them; only the per-bit counter map (which field set each type writes)
+plus a gated single-step SET with a same-field read-back can. §4.3's table is
+therefore down-graded from "ranked list with a leading row" to "candidate list,
+slot order unresolved".
+
+### 11.4 The privilege precondition is resolved *on macOS*, at source level
+
+§9 left open "whether a root caller actually lands at `RS_PRIV_LEVEL_USER_ROOT`"
+because that needed a root client. The macOS port's own sources answer it
+without running anything:
+
+| fact | source |
+| --- | --- |
+| the level is a function of the caller's uid | `kexts/NVRM/os-xnu.cpp:174`: `os_is_administrator(void) { ... return (kauth_getuid() == 0) ? NV_TRUE : NV_FALSE; }` — this overrides the Linux body (`kernel-open/nvidia/os-interface.c:389`, `NV_IS_SUSER()`), and the port ships a hardening test that forbids the stub-to-true form (`tools/test_security_hardening.py:80`) |
+| the level is stamped on every control that arrives | `src/nvidia/src/kernel/rmapi/entry_points.c:185` and `arch/nvalloc/unix/src/escape.c:381`: `pSecInfo->privLevel = osIsAdministrator() ? RS_PRIV_LEVEL_USER_ROOT : RS_PRIV_LEVEL_USER;` (`arch/nvalloc/unix/src/os.c:648` forwards to `os_is_administrator()`) |
+| `0x1b` *is* that gate's return code | `src/common/sdk/nvidia/inc/nvstatuscodes.h:56`: `NV_ERR_INSUFFICIENT_PERMISSIONS, 0x0000001B` — and it is what §2 measured from `0x2080FFFF` |
+| the unprivileged ctl client is open *on purpose*, behind exactly this check | `kexts/NVRM/NVRM.cpp:1487-1496`: "the escalated operations behind it are gated by the real-privilege check in `_os_is_administrator` and the root requirement on first init" |
+
+So: **uid 0 ⇒ `RS_PRIV_LEVEL_USER_ROOT` ⇒ the §2.1 gate passes.** What remains
+unknown is whether the *GSP* then also refuses — a different check on a
+different layer, and `0x1b` exists there too: `ctrl2080gpu.h:1222/2427/2556`
+document `NV_ERR_INSUFFICIENT_PERMISSIONS` as a *control* result. That gives a
+first write an unambiguous two-outcome reading:
+
+* `0x1b` from a **root** client ⇒ there is a second, GSP-side permission layer;
+* anything else (`0x56` / `0x6c` / `NV_OK`) ⇒ the host gate is behind us and the
+  answer is the SET thunk's own preconditions (§4.4).
+
+Runtime confirmation needs a root client, which the standing permission boundary
+does not include (this box has no `sudo`), so nothing was run: the claim above is
+source-level and is labelled as such.
+
+### 11.5 Status of the write gate, 2026-10-17
+
+* **G0** (privilege reachable) — the source chain to it is now complete (§11.4);
+  the empirical half still needs a root client.
+* **G1** (current value) — **not obtained**; §11.3 leaves two candidate fields,
+  both `0` at stock.
+* **G2** (range) — obtained from `0x20809025` (`rec+20`/`rec+24` =
+  −18750/+18750, §5.1), but the unit is still unclosed (kHz ⇒ ±18.75 MHz, or a
+  voltage term).
+* **G3** (original state) — the snapshot is the all-zero GET block, which is the
+  expected stock state *only if* the target field is the offset; it is not yet a
+  validated "before" for a chosen field.
+* **G4** (step) — unknown; the ±18750 pair is a range, not a step.
+* **G5** (GSP usable) — **no**: `0x62 NV_ERR_RESET_REQUIRED` since the §6 wedge,
+  polled unbroken through 2026-10-17T11:12Z.
+* **G6** (the SET's own preconditions) — enumerated in §4.4 (`0x56` ×4, `0x6c`
+  once); all runtime values unknown.
+
+Net: what is missing for the clock-domain SET is **the caller's privilege** — a
+precondition that is one line of macOS glue (§11.4) and is satisfiable by uid 0
+— and behind it the *step/field* question of §11.3. It is not a protocol gap,
+not a missing firmware body (§4.4), and not a marshalling gap (the 2108 B
+geometry is measured on both halves).

@@ -97,8 +97,8 @@ PROFILE=full sh build.sh
 
 | 门槛 | 现状 |
 | --- | --- |
-| **G0 该 id 对本客户端可达（特权门槛）** | **未满足，且不是软件问题**。写半区的 id 都带 `0xC000`（读 id `\|0x4000`），`RmGssLegacyRpcCmd` 在转发前要求 `privLevel >= RS_PRIV_LEVEL_USER_ROOT`，否则回 `0x1b`。本会话是非 root 客户端 ⇒ **GET 读面可达、SET 不可达**；提权不在授权边界内（`gsp-method-table-and-legacy-forwarding.md` §2.1/§9） |
-| G1 能读到**当前偏移**（不是实时频率） | **未满足**。`0x2080901b@2108` 的写图已实测（`A5` 值图：head 14 次写、每条记录 1 个 u16 类型戳 + 12 个 dword），但 stock 下**所有值槽都被写成 0**，所以无法区分「当前偏移恰好是 0」与「该 GET 不填值槽」⇒ 字段归属仍未确定；`0x20809026@5332` 是已知 wedge id，被代码拒绝 |
+| **G0 该 id 对本客户端可达（特权门槛）** | **未满足，且不是软件问题**。写半区的 id 都带 `0xC000`（读 id `\|0x4000`），`RmGssLegacyRpcCmd` 在转发前要求 `privLevel >= RS_PRIV_LEVEL_USER_ROOT`，否则回 `0x1b`。本会话是非 root 客户端 ⇒ **GET 读面可达、SET 不可达**；提权不在授权边界内（`gsp-method-table-and-legacy-forwarding.md` §2.1/§9）。**§11.4 更新（源码级，未运行）**：macOS 端 `kexts/NVRM/os-xnu.cpp:174` 把 `os_is_administrator()` 定义为 `(kauth_getuid() == 0)`，`entry_points.c:185`/`escape.c:381` 再把它映射成 `RS_PRIV_LEVEL_USER_ROOT`，而 `nvstatuscodes.h:56` 确认 `0x1b` 就是这道门的返回码 ⇒ **uid 0 的客户端应当能过 host 门**；若 root 仍回 `0x1b`，那才是 **GSP 侧第二道权限**（`ctrl2080gpu.h:1222/2427/2556` 也把 `0x1b` 当控制返回值），两者必须分开记录 |
+| G1 能读到**当前偏移**（不是实时频率） | **未满足**。`0x2080901b@2108` 的写图已实测（`A5` 值图：head 14 次写、每条记录 1 个 u16 类型戳 + 12 个 dword），但 stock 下**所有值槽都被写成 0**，所以无法区分「当前偏移恰好是 0」与「该 GET 不填值槽」⇒ 字段归属仍未确定；`0x20809026@5332` 是已知 wedge id，被代码拒绝。**§11.3 更新**：候选值槽有两个而不是一个 —— `rec+8`（上一层 article 说 slot 0 = signed freq offset）与 `rec+16`（同层 Blackwell 字段表说 `VALUES[2]`，经实测 `0x24` 位移折算）；stock 全 0 无法区分，只能靠逐位 counter 图 + 单步 SET 同字段回读定案 |
 | G2 能读到**范围** | 已满足：`0x20809025@7188` 的 `±18750 kHz`（单域） |
 | G3 能记录**原状态**并把同一字段写回 | 未满足（依赖 G1 的字段位置） |
 | G4 写步长有依据（最小步长） | **未满足**：`18750` 是范围端点，不是步长；步长可能来自同一容器的 steps 字段或驱动文档，**不允许猜** |
@@ -111,11 +111,12 @@ PROFILE=full sh build.sh
    同时按 G6 列出「SET 可能被 thunk 前置门拒绝」的假设与预期返回码——它不改变别的判据，只是让第一次
    非 `NV_OK` 有归属。
 2. 单域：只对一个域（例如显存域或域 0），并且只改**一个最小步长**；不整组、不 Boost、不搜索。
-3. （仅在 G0 被满足、即调用者处于特权级时）pre-record → arm restore → SET `0x2080d01c{domain, offset=原值±1 step}` → **同一字段 GET 回读**
+3. （仅在 G0 被满足、即调用者处于特权级时）pre-record → arm restore → SET `0x2080d01c{domain, offset=原值±1 step}` → **同一字段 GET 回读**。
    必须是新值（实时频率变化**不算**证据）。
 4. 立即 restore 原值 → 再 GET 回读必须等于原值；记录两步的回读字节。
 5. 中止判据：SET 非 `NV_OK`；回读不等于预期；restore 后回读不等于原值（最高优先级，立即停止并只读记录）；
    出现 `0x65`/`0x62` 立即停止（会整场打断 GSP 私有路径）。
+   **SET 的唯一 mask 纪律（§11.1）**：`0x2080901b` 是**按 mask 播种**的发现接口，所以宽 seed 只属于 GET；对 `0x2080d01c` 只允许提交「GET 已证明被填过的那一条域记录」的掩码，**绝不宽 seed** —— 否则等于要求驱动套用 32 条记录、其中大多数驱动从未填过。另：V1 只 marshal 类型 `{1,3..9}`（类型 `2` 被静默丢弃），目标记录的类型必须在 SET 前先读到（`nvapi-rs/src/clock.rs:384-410`）。
 6. 全程进程级，不改 EFI/boot-args/驱动配置；不自动重启。
 
 ### 7.4 与 RATED_TDP 的关键差别
