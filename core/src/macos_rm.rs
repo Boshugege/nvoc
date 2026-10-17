@@ -9,7 +9,7 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DeviceInfo {
     pub name: Option<String>,
     pub driver_version: String,
@@ -100,13 +100,38 @@ pub struct SettingsCapabilities {
     pub settings_restore: bool,
 }
 
-/// One reason string shared by every configuration family the RM channel
-/// cannot read on this driver, so the payload cannot drift from the evidence.
-const SETTINGS_UNREADABLE_REASON: &str =
-    "no readable RM control for this family on this driver (see notes)";
+/// Why a family that needs a *write* is listed as unavailable: the write half of
+/// these ids carries the legacy privileged bits, so an unprivileged client is
+/// refused before the GSP is consulted. This is a precondition that has been
+/// located (the host forwarder's own `(cmd & 0xC000) == 0xC000` test selects
+/// exactly the 92 write-half ids and nothing else), not a missing control.
+pub const WRITE_NEEDS_PRIVILEGE_REASON: &str = "needs a write, and a private SET is refused below root on this host: the write half carries the legacy privileged bits (0x2080D01C = 0x2080901B | 0x4000), so no SET has been issued (see notes)";
 
-/// The two clock-offset families are the one family where the shared reason
-/// above would overstate the gap: the driver answers a per-domain offset
+/// Fan control, the one family whose published surface really is absent: the
+/// SDK's own `ctrl2080fan.h` is a FINN-generated file with no definitions, and
+/// the whole control-header tree mentions "cooler" zero times. That is a fact
+/// about the published headers, not about the driver, so the private thermal
+/// read half -- 31 read-half ids, not one of them read yet -- keeps this family
+/// short of "the driver has no such control".
+pub const FAN_CONTROL_UNREADABLE_REASON: &str = "no fan entity in the published controls (ctrl2080fan.h is an empty generated stub; the control headers never say \"cooler\"), and the private thermal read half (31 read-half ids) has not been read yet, so this is unlocated rather than absent (see notes)";
+
+/// The VF family is the opposite case: its reads exist, are non-privileged, and
+/// have simply never been issued, because the current priority is the offset
+/// channel. Saying it is missing would be wrong in a way a later round would
+/// have to retract.
+pub const VF_CURVE_UNREADABLE_REASON: &str = "the VF read half exists and is non-privileged (0x2080901F@19416, 0x20809023@66060 and their siblings) but none of it has been read yet: deferred by the current priority, not missing (see notes)";
+
+/// The thermal family *is* read -- the sensor path answered with a temperature
+/// before the wedge -- so what is absent for a limit is a different field, and
+/// that distinction is exactly what the retired blanket sentence lost.
+pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "the thermal family itself is readable (0x20800513 answered a sensor reading before the wedge); the *configured* limit is a different field that has not been located yet (see notes)";
+
+/// The boost path is a SET, so it sits behind the same gate as the write
+/// families; nothing about it has been read, and nothing is claimed.
+pub const VOLTAGE_BOOST_UNREADABLE_REASON: &str = "the boost path is a SET, so it sits behind the same write gate; no read of it is claimed (see notes)";
+
+/// The two clock-offset families are the one family where a summary sentence
+/// would overstate the gap: the driver answers a per-domain offset
 /// *range*, and the current offset is measured **zero** rather than missing --
 /// on a background that cannot miss a write, the domain-control GET writes its
 /// value dwords and they are all zero, so no offset is applied. The measurement
@@ -130,7 +155,7 @@ const SETTINGS_UNREADABLE_REASON: &str =
 /// [`DeviceSettings::clock_offset_limits_khz`]; only the offset itself stays out
 /// of the numbers, because saying "0" would assert a slot identity this backend
 /// does not have.
-const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 for the records the measured selection mask reaches (0x2080901B seeded at +4 with 0xFF wrote its value dwords as zero on an 0xA5 background, where a field the handler skipped would have kept 0xA5, so the zero is a write and not a missing reading); the directory itself declares ten entries (its head carries +4 = 0x3ff, ten consecutive row bits, alongside the union of those rows' domain bits 0x38007f) and 0xFF selects the first eight, so the last two are unmeasured until the offset runbook's wider mask answers -- those two are the MSD (id 21) and HOST (id 5) rows, so the core and memory domains this backend reports (rows 0 and 2, ids 0 and 4) are inside the measured window; the window the driver enforces is reported as measured data in clock_offset_limits_khz; which of the twelve value dwords carries the offset is not yet pinned, so the offset itself is not reported as a number and no SET is issued (see notes)";
+pub const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 for the records the measured selection mask reaches (0x2080901B seeded at +4 with 0xFF wrote its value dwords as zero on an 0xA5 background, where a field the handler skipped would have kept 0xA5, so the zero is a write and not a missing reading); the directory itself declares ten entries (its head carries +4 = 0x3ff, ten consecutive row bits, alongside the union of those rows' domain bits 0x38007f) and 0xFF selects the first eight, so the last two are unmeasured until the offset runbook's wider mask answers -- those two are the MSD (id 21) and HOST (id 5) rows, so the core and memory domains this backend reports (rows 0 and 2, ids 0 and 4) are inside the measured window; the window the driver enforces is reported as measured data in clock_offset_limits_khz; which of the twelve value dwords carries the offset is not yet pinned, so the offset itself is not reported as a number and no SET is issued (see notes)";
 
 /// The offset window the driver reports for a clock domain, in kHz.
 ///
@@ -231,9 +256,21 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
     ]
     .into_iter()
     .map(|family| {
+        // One sentence per family, because the first real `get-settings
+        // --macos-rm` run showed what a single shared sentence costs: it printed
+        // "no readable RM control for this family on this driver" for the
+        // families whose control demonstrably *is* dispatched. An unread or
+        // unauthorised thing must not be reported as a missing one.
         let reason = match family {
             "core_clock_offset" | "memory_clock_offset" => CLOCK_OFFSET_UNREADABLE_REASON,
-            _ => SETTINGS_UNREADABLE_REASON,
+            "fan_control" => FAN_CONTROL_UNREADABLE_REASON,
+            "vf_curve" => VF_CURVE_UNREADABLE_REASON,
+            "thermal_limit" => THERMAL_LIMIT_UNREADABLE_REASON,
+            "voltage_boost" => VOLTAGE_BOOST_UNREADABLE_REASON,
+            "pstate_lock" | "power_limit_write" | "settings_restore" => {
+                WRITE_NEEDS_PRIVILEGE_REASON
+            }
+            _ => WRITE_NEEDS_PRIVILEGE_REASON,
         };
         (family.to_string(), reason.to_string())
     })
@@ -2121,6 +2158,64 @@ mod tests {
                 .any(|note| note.contains("0x2080B201"))
         );
         assert!(settings.notes.iter().any(|note| note.contains("0x1f")));
+    }
+
+    /// An unread or unauthorised family must not be reported as an absent one.
+    ///
+    /// The first real `get-settings --macos-rm` run printed one shared sentence,
+    /// "no readable RM control for this family on this driver", for every
+    /// family -- including ones whose control the driver demonstrably
+    /// dispatches. This test is the reason that cannot come back: each family
+    /// names its own cause, the write families share the privilege one, and none
+    /// of them is the retired blanket claim.
+    #[test]
+    fn every_gap_names_its_own_cause_rather_than_a_missing_control() {
+        let info = DeviceInfo {
+            pci_address: "0000:01:00.0".to_string(),
+            driver_version: "610.57.04".to_string(),
+            ..Default::default()
+        };
+        let settings = settings_from(&info, &DeviceStatus::default());
+
+        let retired = "no readable RM control for this family on this driver";
+        for (family, reason) in &settings.unavailable {
+            assert!(!reason.is_empty(), "{family} has an empty reason");
+            assert!(
+                reason.ends_with("(see notes)"),
+                "{family} must point at the recorded evidence: {reason}"
+            );
+            assert!(
+                !reason.contains(retired),
+                "{family} still claims the control is missing: {reason}"
+            );
+        }
+
+        // The families that only need a *write* share the privilege cause.
+        for family in ["pstate_lock", "power_limit_write", "settings_restore"] {
+            assert_eq!(
+                settings.unavailable[family], WRITE_NEEDS_PRIVILEGE_REASON,
+                "{family} should give the privilege cause"
+            );
+        }
+        // And the ones with a real read gap do not borrow it.
+        for family in [
+            "core_clock_offset",
+            "memory_clock_offset",
+            "fan_control",
+            "vf_curve",
+            "thermal_limit",
+            "voltage_boost",
+        ] {
+            assert_ne!(
+                settings.unavailable[family], WRITE_NEEDS_PRIVILEGE_REASON,
+                "{family} needs a write? then say so; otherwise name its gap"
+            );
+        }
+        assert_eq!(
+            settings.unavailable["fan_control"],
+            FAN_CONTROL_UNREADABLE_REASON
+        );
+        assert_eq!(settings.unavailable["vf_curve"], VF_CURVE_UNREADABLE_REASON);
     }
 
     /// The driver's own bytes, as captured by the probe: the same fixtures the

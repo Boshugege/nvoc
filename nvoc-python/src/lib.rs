@@ -5892,7 +5892,7 @@ mod tests {
             }]),
             unavailable: std::collections::BTreeMap::from([(
                 "core_clock_offset".to_string(),
-                "no readable RM control for this family on this driver (see notes)".to_string(),
+                nvoc_core::macos_rm::CLOCK_OFFSET_UNREADABLE_REASON.to_string(),
             )]),
             capabilities: nvoc_core::SettingsCapabilities {
                 settings_read: true,
