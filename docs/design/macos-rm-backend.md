@@ -47,6 +47,10 @@ connection, version or object-chain failures return
 an error. Capabilities describe implemented backend surfaces, not a guarantee
 that every query succeeds on every board.
 
+The full command-by-command status (101 CLI commands, the non-CLI consumers and
+the stage 0-12 roadmap) lives in
+[the macOS backend feature matrix](macos-backend-feature-matrix.md).
+
 The current transport selects the first matching NVAccel/NVRM service. It does
 not enumerate all physical GPUs in a multi-NVIDIA system. `--gpu` still applies
 the existing NVOC index / bus-derived ID selection to the returned inventory.
