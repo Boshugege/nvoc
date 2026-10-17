@@ -1478,7 +1478,14 @@ int nvx_stage2_clk_level_read(nvx_ctx *c)
  *                                        RM head 12 + 32 * 76 B (the stride
  *                                          measured for 0x2080B201)
  *
- * Only the documented controllable-domain mask is seeded, at the recorded +8.
+ * Only the documented controllable-domain mask is seeded, and it is written to
+ * RM offset +4 rather than the documented +8: the record's fields sit 4 bytes
+ * earlier in the RM block than the documented layout
+ * (docs/reverse-engineering/nvapi/rm-param-marshall-corrections-r610.md section
+ * 1), and the mask was then measured there -- seeding 0xFF at +4 answers NV_OK
+ * with 106 written dwords, while seeding 0xFF at the documented +8 answers 0x25
+ * NV_ERR_INVALID_DATA (offsweep A5). Every case below seeds 0, so the offset is
+ * a no-op for this pass and the label is what had to be corrected.
  * All of these are GET; 0x2080d01c (the SET twin) is in nvx_known_set_ids and
  * is refused below.  Accepted cases are hex-dumped so a head/record layout can
  * be located without guessing offsets.
@@ -1487,7 +1494,7 @@ typedef struct {
     const char *name;
     NvU32 cmd;
     unsigned size;
-    NvU32 mask_off8;
+    NvU32 mask;
 } clkdom_case;
 
 static const clkdom_case nvx_clkdom[] = {
@@ -1526,7 +1533,7 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
         memset(buf, 0, k->size);
         /* dword 0 stays ZERO on purpose: the (version|size) magics are
          * NVAPI-layer and must not be written into the RM parameter block. */
-        memcpy(buf + 8, &k->mask_off8, 4);
+        memcpy(buf + 4, &k->mask, 4);
         NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
                                   k->cmd, buf, k->size);
 
@@ -1535,8 +1542,8 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
             if (buf[o]) { ++nz; if (!first) first = o; last = o; }
         nvx_emit(c, "V2.clkdom", k->name, st,
                  st == 0 ? (nz ? NVX_V_OK : NVX_V_REJECTED) : NVX_V_REJECTED,
-                 "cmd 0x%08x size %u dword0=0 mask@+8=0x%08x -> %u non-zero B, "
-                 "first @%u last @%u", k->cmd, k->size, k->mask_off8, nz, first, last);
+                 "cmd 0x%08x size %u dword0=0 mask@+4=0x%08x -> %u non-zero B, "
+                 "first @%u last @%u", k->cmd, k->size, k->mask, nz, first, last);
         if (st != 0) continue;
 
         unsigned nd = k->size / 4, shown = nd < 24 ? nd : 24;
