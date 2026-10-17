@@ -624,3 +624,16 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **实际验证范围（如实）**：`rustfmt --check` **rc=0**；`cargo clippy -p nvoc-core --all-targets --offline -- -D warnings` **rc=0**（强制 `touch` 后确认确有 `Compiling nvoc-core`）；`cargo test -p nvoc-core --lib --offline` **80 passed / 0 failed**（含 ABI 布局镜像测试，故 ABI_VERSION 3→4 两端同步已被机器校验）；测试二进制**链接**了新的 C 符号，这正是 native 侧确实被编译的证据（若 C 未重编，链阶段会因未定义符号失败）。**分类：已实现、已编译、待实测**——本机 wedge 未解，三条 GET 现在都会以 `Refused(0x62)` 返回，所以「拿真实 GSP 读到目录/范围/当前值」这一步**仍未发出**。ABI 版本 3→4：**结构布局零改动**（头文件所有断言仍成立），版本号只因「调用方无法从布局判断这条通道是否存在」而上移。
 
 **未发出**：任何 GPU 请求、任何 RM 会话、任何 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。
+
+### 本轮追加十二（2026-10-17，无 GPU：用**设备原始字节**钉住解析器 + 一处验证流程缺陷的更正）
+
+**做了什么**：`core/tests/macos_offset_fixture.rs` + `core/tests/data/*.bin`（commit `953b25e`）。fixture 是探针在目标卡上 **pre-wedge `NV_OK`** 两次运行的**逐字节 payload**——只有 9019 目录块与 9025 范围块曾经被原始 dump 过，正好就是本轮要钉的两块。它们**精确复现**录盘值：10 条目录条目（各带域位与类型戳）、3 条范围记录（`-18750..+18750 kHz`，tag `0x01030101/0x01040101/0x01050101`）；并断言前 8 条的**类型序列**，因为那是「106 个写入 dword」论证的载重部分——类型一变，算术就得重做，所以它不该只活在散文里。
+
+**能被证明与不能被证明的，分开写**：覆盖面 = 「记录的步长/字段偏移一旦漂移，在这里而不是在 GPU 上失败」；不能证明 = ① 控制块的 geometry（其 payload 从未被原始 dump，只有写集被 dump ⇒ 靠合成单测 + 目录类型序列）；② **12 个 dword 里哪个是偏移**——stock 全零，任何字节 fixture 都定不了。另断言「把一块的字节喂给另一条命令的解析器」必报错（短缓冲是**错误**，绝不是更短的零块），以及 `Parsed`/`Refused`/`Malformed` 三者**互不相等**（`0x62` 绝不能长得像「偏移为 0」）。
+
+**⚠️ 更正上一轮（追加十一）的验证范围——工作区缺陷，如实记录**：上一轮我用
+`rsync -a --checksum SRC mac@host:'$HOME/Desktop/…'` 同步，该写法**静默什么也不做**（rc=0、只打印 `building file list ... done`、不列任何文件名）；`'~/Desktop/…'` 写法正常。后果：`cf2848c`（FFI 接线）那轮的「`Compiling nvoc-core` + 80 测试全绿 + 链接到 C 符号」是**在没收到 FFI 文件的树上跑的**，结论**名义成立但不真实**。本轮已按**逐文件 sha256 核对 8 个文件全部到位**后重做：`rustfmt --check` **rc=0**、`clippy -p nvoc-core --all-targets -- -D warnings` **rc=0**（0 error，`touch` 后确认真编译）、`cargo test -p nvoc-core --all-targets` **80 lib + 5 fixture + 15 non-GPU 全过**（50 个硬件门控测试保持 ignored）。**结论：`cf2848c` 的代码本身无问题，但它的验证直到本轮才算真的做过。**
+
+**新增常驻规矩**：同步后**必须**核对文件清单与逐文件 sha256，**不得以 rsync 退出码代替**；远端路径一律用 `~/` 写法。这条已写入 INDEX 与 review，防止重犯。
+
+**仍未发出**：任何 GPU 请求、任何 RM 会话、任何 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。
