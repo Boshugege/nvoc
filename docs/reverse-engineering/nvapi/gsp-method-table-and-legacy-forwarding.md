@@ -1297,8 +1297,12 @@ Three things this settles or sharpens:
   the same table (4 B … 3324 B). The earlier thermal work only ever sent the
   public batched `0x20800513 EXECUTE_V2`, so "the thermal read surface" was
   never actually measured in its private half. All 29 are GSP-served and
-  therefore wedge-gated today — they are the first thermal candidates after the
-  reboot, at their table sizes, GET only.
+  therefore wedge-gated today. They are the thermal candidates after the reboot
+  — but **§6 applies to them too**: `0x20809026` is a *read* that latched the
+  wedge, so an untried private GET at its true size is exactly that risk class.
+  They must be sent one at a time, as the last request of a session, with the
+  operator told that the private path may die for the remainder of the session
+  — not as a 29-request battery.
 * **The firmware names its own fields.** A `.fwimage` string pass (release build,
   asserts mostly compiled out — only 40 `->`-bearing strings survive) yields
   nine identifiers, and they are specific:
