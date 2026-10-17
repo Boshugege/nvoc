@@ -136,13 +136,16 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                     )?
                 }
                 // The legacy three-sensor thermal view. The array root and the
-                // per-sensor keys are the entry's own; the readings come from
-                // the RUSD temperature sections (live values only), and every
-                // field this backend cannot fill carries its reason, so a null
-                // never has to be read as a measured zero.
-                Command::GetLegacyTempSensor => serde_json::to_value(
-                    run(&target, nvoc_core::QueryMacosRmStatus)?.output.legacy_temp_sensor_report(),
-                )?,
+                // per-sensor keys are the entry's own; the live readings come
+                // from the RUSD temperature sections and the per-sensor reading
+                // range from the public thermal read (0x20800513), which this
+                // query issues read-only. Every field this backend cannot fill
+                // carries its reason, so a null never has to be read as a
+                // measured zero and a refused read never has to be read as a
+                // value that is simply missing.
+                Command::GetLegacyTempSensor => {
+                    serde_json::to_value(run(&target, nvoc_core::QueryMacosRmThermalView)?.output)?
+                }
                 // Decoded by the shared `QueryThrottleReasons` operation (core
                 // serves it from the RM snapshot on macOS), so this surface and
                 // pynvoc's `query_throttle_reasons` cannot drift apart. NVML

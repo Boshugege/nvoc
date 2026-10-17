@@ -196,6 +196,70 @@ uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *session, nvoc_rm_sample *
 uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, void *out,
                                       size_t size, char *error, size_t cap);
 
+/* The public thermal read face: NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2
+ * (0x20800513), an in-tree header-defined opcode batch whose read opcodes
+ * (targets/sensors available, a sensor's reading, its reading range, its target
+ * index, its provider index, that target's type) are declared to return NV_OK on
+ * this kext and were measured to do so. Only reads are issued; nothing here
+ * writes, so it needs no privilege and no gate.
+ *
+ * The batch runs with EXECUTE_FLAGS_IGNORE_FAIL so one unsupported opcode does
+ * not hide the rest, and every instruction reports whether it ran and with what
+ * status: both travel here unchanged, because a range that was never written
+ * must not be read as a range of zero. Naming (which target type a sensor
+ * belongs to) and plausibility stay in Rust.
+ *
+ * Caller must have serialized the transport. The payload is valid only on a
+ * zero return: a wedged GSP answers 0x62 here as it does for every other
+ * control, and that refusal must never be rendered as a temperature or a
+ * bound. */
+#define NVOC_RM_THERMAL_SENSORS_MAX 8
+#define NVOC_RM_THERMAL_TARGET_NONE 0u
+#define NVOC_RM_THERMAL_TARGET_GPU 1u
+#define NVOC_RM_THERMAL_TARGET_MEMORY 2u
+#define NVOC_RM_THERMAL_TARGET_POWER_SUPPLY 4u
+#define NVOC_RM_THERMAL_TARGET_BOARD 8u
+#define NVOC_RM_THERMAL_TARGET_UNKNOWN 0xffffffffu
+
+typedef struct nvoc_rm_thermal_sensor {
+    uint32_t executed;       /* 1 when that instruction ran */
+    uint32_t result;         /* that instruction's own NV_STATUS */
+    uint32_t target_index;   /* 0xffffffff when the target read did not run */
+    uint32_t provider_index; /* 0xffffffff when the provider read did not run */
+    uint32_t target_type;    /* NVOC_RM_THERMAL_TARGET_* looked up by target index */
+    uint32_t target_known;   /* 1 when that lookup had a clean target-type read */
+    int32_t reading;         /* raw driver unit, as published */
+    int32_t range_min;
+    int32_t range_max;
+    uint32_t range_known; /* 1 when the range instruction ran clean */
+} nvoc_rm_thermal_sensor;
+
+typedef struct nvoc_rm_thermal {
+    uint32_t status; /* pass 1 status: counts are valid only when it is 0 */
+    uint32_t target_count;
+    uint32_t sensor_count;
+    uint32_t reported_sensors;   /* how many per-sensor batches were filled */
+    uint32_t target_types_known; /* leading target_types entries that are known */
+    /* Target types are read once per target index, before the sensors, because
+     * the type instruction takes the index the sensor read has not returned
+     * yet: a sensor's own type is looked up here afterwards. */
+    uint32_t target_types[NVOC_RM_THERMAL_SENSORS_MAX];
+    nvoc_rm_thermal_sensor sensors[NVOC_RM_THERMAL_SENSORS_MAX];
+} nvoc_rm_thermal;
+
+/* The per-target batch must fit the control's own instruction list; the .c file
+ * asserts the cap against NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION_MAX_COUNT,
+ * which only that translation unit includes. */
+_Static_assert(sizeof(nvoc_rm_thermal_sensor) == 40, "nvoc_rm_thermal_sensor ABI drift");
+_Static_assert(sizeof(nvoc_rm_thermal) == 372, "nvoc_rm_thermal ABI drift");
+_Static_assert(offsetof(nvoc_rm_thermal, target_types) == 20, "thermal.target_types offset drift");
+_Static_assert(offsetof(nvoc_rm_thermal, sensors) == 52, "thermal.sensors offset drift");
+_Static_assert(offsetof(nvoc_rm_thermal_sensor, reading) == 24,
+               "thermal_sensor.reading offset drift");
+
+uint32_t nvoc_macos_rm_session_thermal(nvoc_rm_session *session, nvoc_rm_thermal *out, size_t size,
+                                       char *error, size_t cap);
+
 /* Release the mapping, the RM objects and both fds. Returns non-zero (and a
  * reason) when the mapping could not be unmapped; the resource is then
  * deliberately left to connection teardown instead of being freed under a
@@ -219,8 +283,10 @@ uint32_t nvoc_macos_rm_session_close(nvoc_rm_session *session, char *error, size
  *  23  NVOC_RM_TEMP_SENSORS                24  NVOC_RM_FAN_MAX_COOLERS
  *  25  NVOC_RM_ENGINES                     26  NVOC_RM_POLL_MASK
  *  27-40  NVOC_RM_RUSD_CLOCK .. NVOC_RM_RUSD_PROC_UTIL (14 section indices)
+ *  41  sizeof(nvoc_rm_thermal)             42  sizeof(nvoc_rm_thermal_sensor)
+ *  43  offsetof(thermal, sensors)
  * Fills up to `count` slots and returns the number this build has. */
-#define NVOC_RM_LAYOUT_SLOTS 41
+#define NVOC_RM_LAYOUT_SLOTS 44
 size_t nvoc_macos_rm_abi_layout(uint64_t *out, size_t count);
 
 #endif

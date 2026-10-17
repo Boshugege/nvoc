@@ -1043,6 +1043,10 @@ pub struct TempSensorView {
     /// the pairing is by name rather than by position.
     pub field: &'static str,
     pub current_c: Option<f64>,
+    /// Which read produced `current_c`: `rusd:<field>` for this snapshot's own
+    /// temperature section, `0x20800513:sensor<n>` for the public thermal read.
+    /// Null when there is no value at all.
+    pub current_source: Option<String>,
     pub min_c: Option<f64>,
     pub max_c: Option<f64>,
     pub controller: Option<&'static str>,
@@ -1057,6 +1061,61 @@ pub struct TempSensorView {
 /// NV_OK and reported sensor 0 with range [0,127] (target type 1=GPU, provider
 /// 0), so what is missing is the client wire-up of that read, not a bound the
 /// driver never publishes.
+/// What a caller's public thermal read produced. The report keeps "not
+/// attempted" apart from "attempted and refused": both leave the range empty,
+/// but only the first still means "not wired in", and a refused read that read
+/// as "not wired in" would hide a working client behind a sick GSP.
+#[derive(Debug, Clone, Copy)]
+pub enum ThermalReadOutcome<'a> {
+    /// This caller did not issue the read.
+    NotAttempted,
+    /// The read was asked for and did not complete, with the device's reason:
+    /// the driver refusing the control, or the session's own RUSD mapping being
+    /// refused (0x62 while the GSP is in its reset-required state) before the
+    /// control is ever sent. Both mean "no range this time", neither means "no
+    /// range on this platform", and the reason says which one it was.
+    Refused(&'a str),
+    /// The read answered.
+    Answered(&'a ThermalReadout),
+}
+
+/// The sensor the public thermal read answered for a given target type.
+///
+/// A sensor counts only when its reading instruction ran clean and the driver
+/// named its target type: without the type there is no way to tell which entry
+/// a range belongs to, and a range from an instruction that never ran would be
+/// a zero the driver never published.
+fn sensor_for_target(read: &ThermalReadout, target_type: u32) -> Option<SensorReading> {
+    read.sensors
+        .iter()
+        .enumerate()
+        .take(read.reported_sensors as usize)
+        .find(|(_, sensor)| {
+            sensor.executed == 1 && sensor.target_known == 1 && sensor.target_type == target_type
+        })
+        .map(|(index, sensor)| SensorReading {
+            index,
+            executed: sensor.executed,
+            provider_index: sensor.provider_index,
+            reading: sensor.reading,
+            range_min: sensor.range_min,
+            range_max: sensor.range_max,
+            range_known: sensor.range_known,
+        })
+}
+
+/// One sensor of the public thermal read, resolved to the entry it belongs to.
+#[derive(Clone, Copy)]
+struct SensorReading {
+    index: usize,
+    executed: u32,
+    provider_index: u32,
+    reading: i32,
+    range_min: i32,
+    range_max: i32,
+    range_known: u32,
+}
+
 pub const THERMAL_RANGE_UNREAD_REASON: &str = "the live reading comes from the RUSD temperature section, which publishes a reading and no bound; the per-sensor range is readable (measured: 0x20800513 EXECUTE_V2 reported sensor 0 range [0,127], target type 1=GPU, provider 0) but this snapshot does not wire that read in yet, so this end is a missing client read rather than a missing driver value";
 
 /// The entry's `controller` names which controller acts on the sensor. The
@@ -1165,40 +1224,105 @@ impl DeviceStatus {
     }
 
     /// One view of the legacy thermal entry: the live reading of every sensor
-    /// this backend knows about, and a reason for every field it cannot fill.
+    /// this backend knows about, the reading range the public thermal read
+    /// publishes for it, and a reason for every field that stays empty.
     ///
     /// The per-sensor keys are the entry's own (`target`, `current_c`, `min_c`,
-    /// `max_c`, `controller`); `field` and `unavailable` are additive, because a
-    /// null has to say *which* null it is -- "not read in this snapshot" and
-    /// "this driver never published it" are different answers and a bare null
-    /// cannot tell them apart.
+    /// `max_c`, `controller`); `field`, `current_source` and `unavailable` are
+    /// additive, because a null has to say *which* null it is -- "not read in
+    /// this snapshot", "this driver never published it" and "the read answered
+    /// for another sensor" are different answers and a bare null cannot tell
+    /// them apart.
     ///
-    /// The target names come from the driver's own decoding of its thermal
-    /// targets (measured: type 1=GPU, 2=MEMORY, 4=POWER_SUPPLY, 8=BOARD), and
-    /// the pairing is by field name: the driver's type order is not the RUSD
-    /// field order (4 is the power-supply type where the block's fourth section
-    /// is the board), so a positional mapping would mislabel two of them.
-    pub fn legacy_temp_sensor_report(&self) -> Vec<TempSensorView> {
+    /// Two reads feed this: the RUSD temperature sections for the live readings
+    /// and the public thermal read (`thermal`) for each sensor's reading range.
+    /// `current_source` names which one produced each number, so merging them
+    /// never turns into an unattributable value.
+    ///
+    /// The target names come from the driver's own target-type bitmask
+    /// (ctrl2080thermal.h, measured on the device: 1=GPU, 2=MEMORY,
+    /// 4=POWER_SUPPLY, 8=BOARD), and the pairing is by field name: the driver's
+    /// type order is not the RUSD field order (4 is the power-supply type where
+    /// the block's fourth section is the board), so a positional mapping would
+    /// mislabel two of them.
+    pub fn legacy_temp_sensor_report(
+        &self,
+        thermal: ThermalReadOutcome<'_>,
+    ) -> Vec<TempSensorView> {
         [
-            ("gpu", "temperature_c", self.temperature_c),
-            ("memory", "temperature_memory_c", self.temperature_memory_c),
-            ("board", "temperature_board_c", self.temperature_board_c),
+            ("gpu", THERMAL_TARGET_GPU, "temperature_c", self.temperature_c),
+            (
+                "memory",
+                THERMAL_TARGET_MEMORY,
+                "temperature_memory_c",
+                self.temperature_memory_c,
+            ),
+            (
+                "board",
+                THERMAL_TARGET_BOARD,
+                "temperature_board_c",
+                self.temperature_board_c,
+            ),
             (
                 "power_supply",
+                THERMAL_TARGET_POWER_SUPPLY,
                 "temperature_power_supply_c",
                 self.temperature_power_supply_c,
             ),
         ]
         .into_iter()
-        .map(|(target, field, current_c)| {
-            let mut unavailable = BTreeMap::from([
-                ("min_c".to_string(), THERMAL_RANGE_UNREAD_REASON.to_string()),
-                ("max_c".to_string(), THERMAL_RANGE_UNREAD_REASON.to_string()),
-                (
-                    "controller".to_string(),
-                    THERMAL_CONTROLLER_UNREAD_REASON.to_string(),
+        .map(|(target, target_type, field, current_c)| {
+            // The sensor the public read answered for, if it answered for this
+            // target: the driver groups sensors under a target, and only that
+            // target's range belongs to this entry.
+            let read = match thermal {
+                ThermalReadOutcome::Answered(read) => sensor_for_target(read, target_type),
+                _ => None,
+            };
+
+            let range_reason = match (thermal, read.as_ref()) {
+                // The read ran and answered for this target: no reason needed,
+                // the range below is the driver's own.
+                (ThermalReadOutcome::Answered(_), Some(_)) => None,
+                (ThermalReadOutcome::Answered(read), None) => Some(format!(
+                    "the public thermal read answered ({} target(s), {} sensor(s), {} read) and named no sensor of target type {target_type}, so it does not report this sensor's range",
+                    read.target_count, read.sensor_count, read.reported_sensors
+                )),
+                (ThermalReadOutcome::Refused(reason), _) => Some(format!(
+                    "the public thermal read did not complete ({reason}), so this sensor's range is unread this time; the read is wired in and needs a healthy GSP"
+                )),
+                (ThermalReadOutcome::NotAttempted, _) => {
+                    Some(THERMAL_RANGE_UNREAD_REASON.to_string())
+                }
+            };
+            let controller_reason = match read {
+                Some(sensor) => format!(
+                    "the public thermal read reports provider index {} for this sensor; the RUSD temperature sections carry the reading only, and how that provider index maps onto this entry's controller field is not established, so it is left null rather than mapped by guesswork",
+                    sensor.provider_index
                 ),
-            ]);
+                None => THERMAL_CONTROLLER_UNREAD_REASON.to_string(),
+            };
+
+            let mut unavailable = BTreeMap::new();
+            if let Some(reason) = &range_reason {
+                unavailable.insert("min_c".to_string(), reason.clone());
+                unavailable.insert("max_c".to_string(), reason.clone());
+            }
+            unavailable.insert("controller".to_string(), controller_reason);
+
+            // The live value: this snapshot's own section first, and the public
+            // read's reading only when that section has nothing, with the source
+            // named either way.
+            let (current_c, current_source) = match current_c {
+                Some(celsius) => (Some(celsius), Some(format!("rusd:{field}"))),
+                None => match read.filter(|sensor| sensor.executed == 1) {
+                    Some(sensor) => (
+                        Some(f64::from(sensor.reading)),
+                        Some(format!("0x20800513:sensor{}", sensor.index)),
+                    ),
+                    None => (None, None),
+                },
+            };
             if current_c.is_none() {
                 unavailable.insert(
                     "current_c".to_string(),
@@ -1208,12 +1332,22 @@ impl DeviceStatus {
                         .unwrap_or_else(|| format!("{field} was not read in this snapshot")),
                 );
             }
+
+            let (min_c, max_c) = match read.filter(|sensor| sensor.range_known == 1) {
+                Some(sensor) => (
+                    Some(f64::from(sensor.range_min)),
+                    Some(f64::from(sensor.range_max)),
+                ),
+                None => (None, None),
+            };
+
             TempSensorView {
                 target,
                 field,
                 current_c,
-                min_c: None,
-                max_c: None,
+                current_source,
+                min_c,
+                max_c,
                 controller: None,
                 unavailable,
             }
@@ -1269,6 +1403,24 @@ impl Device {
         // the block fold, which has no status.
         corroborate_named_offsets(&mut settings, &status);
         Ok(settings)
+    }
+
+    /// The legacy thermal view: the live readings of this snapshot plus the
+    /// reading ranges the public thermal read publishes for them.
+    ///
+    /// Read-only on both sides. The public read needs a healthy GSP, so its
+    /// refusal is reported as that refusal and not as a missing value; the RUSD
+    /// readings come from the same snapshot as the identity check, so a device
+    /// that changed behind the session is rejected here exactly as elsewhere.
+    pub fn thermal_view(&self) -> Result<Vec<TempSensorView>, Error> {
+        let snapshot = self.refreshed_snapshot()?;
+        let status = status_from_snapshot(&snapshot);
+        let read = MacosRmSession::open().and_then(|mut session| session.read_thermal());
+        let outcome = match &read {
+            Ok(readout) => ThermalReadOutcome::Answered(readout),
+            Err(error) => ThermalReadOutcome::Refused(&error.to_string()),
+        };
+        Ok(status.legacy_temp_sensor_report(outcome))
     }
 
     /// One fresh snapshot, with the identity re-checked against this handle.
@@ -1339,6 +1491,24 @@ impl crate::GpuOperation for QueryMacosRmSettings {
     }
 }
 
+/// The legacy thermal view through the common `run` / `run_many` operation API.
+/// Read-only: it issues the public thermal read as well as the RUSD snapshot, and
+/// issues no SET of any kind.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryMacosRmThermalView;
+
+impl crate::GpuOperation for QueryMacosRmThermalView {
+    type Output = Vec<TempSensorView>;
+
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::QueryGpuStatus
+    }
+
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.macos_rm()?.thermal_view()
+    }
+}
+
 /// Version of the private C ABI in core/native/macos_rm_abi.h. Bump both
 /// sides together: the C header pins the same number and the hardware test
 /// compares the two fingerprints.
@@ -1348,7 +1518,7 @@ const ABI_VERSION: u32 = 4;
 /// nvoc_macos_rm_abi_layout(): sizes, field offsets, the ABI version and the
 /// per-field status codes Rust matches on. Keeping them identical is what the
 /// C header's `_Static_assert`s and the hardware test enforce.
-pub const ABI_LAYOUT_SLOTS: usize = 41;
+pub const ABI_LAYOUT_SLOTS: usize = 44;
 
 /// RUSD section indices and value-block sizes, matching macos_rm_abi.h (the
 /// header is the source of truth; the layout fingerprint and the compile-time
@@ -1421,6 +1591,53 @@ struct Telemetry {
     status: u32,
     sample: RawSample,
 }
+
+/// Per-sensor result of the public thermal read: what the driver published and
+/// whether that instruction ran at all. The two are kept apart because an
+/// instruction that did not run leaves its value at zero, and a range of zero
+/// would otherwise be indistinguishable from a driver that answered zero.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+struct ThermalSensorReadout {
+    executed: u32,
+    result: u32,
+    target_index: u32,
+    provider_index: u32,
+    target_type: u32,
+    target_known: u32,
+    reading: i32,
+    range_min: i32,
+    range_max: i32,
+    range_known: u32,
+}
+
+/// The public thermal read (NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2): the
+/// driver's own target type per target index, plus the per-sensor reading,
+/// range, target and provider. Read-only; nothing here is written.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ThermalReadout {
+    status: u32,
+    target_count: u32,
+    sensor_count: u32,
+    reported_sensors: u32,
+    target_types_known: u32,
+    target_types: [u32; THERMAL_SENSORS_MAX],
+    sensors: [ThermalSensorReadout; THERMAL_SENSORS_MAX],
+}
+
+/// Sensors the thermal read asks about, matching the C cap. The control's own
+/// instruction list holds 32, so this transport cap is what binds.
+const THERMAL_SENSORS_MAX: usize = 8;
+
+/// The driver's target types, from ctrl2080thermal.h (and measured on the
+/// device: target 0 came back as type 1). The values are a bitmask, which is
+/// why the names must be looked up rather than counted: the type order puts the
+/// power supply third where the RUSD temperature block puts the board.
+const THERMAL_TARGET_GPU: u32 = 1;
+const THERMAL_TARGET_MEMORY: u32 = 2;
+const THERMAL_TARGET_POWER_SUPPLY: u32 = 4;
+const THERMAL_TARGET_BOARD: u32 = 8;
 
 /// Raw per-field telemetry exactly as produced by the native layer: one
 /// section status + timestamp table plus the value blocks. Every field is a
@@ -1548,6 +1765,13 @@ unsafe extern "C" {
     fn nvoc_macos_rm_session_sample(
         handle: *mut SessionOpaque,
         out: *mut RawSample,
+        size: usize,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
+    fn nvoc_macos_rm_session_thermal(
+        handle: *mut SessionOpaque,
+        out: *mut ThermalReadout,
         size: usize,
         error: *mut u8,
         cap: usize,
@@ -1688,6 +1912,9 @@ pub fn abi_layout() -> [u64; ABI_LAYOUT_SLOTS] {
         SEC_UTIL as u64,
         SEC_PCI as u64,
         SEC_PROC_UTIL as u64,
+        std::mem::size_of::<ThermalReadout>() as u64,
+        std::mem::size_of::<ThermalSensorReadout>() as u64,
+        std::mem::offset_of!(ThermalReadout, sensors) as u64,
     ]
 }
 
@@ -1712,6 +1939,11 @@ const _: () = {
     assert!(std::mem::offset_of!(RawSample, pci_gen_info) == 344);
     assert!(std::mem::offset_of!(RawSample, pstate) == 348);
     assert!(std::mem::offset_of!(RawSample, memory_used_kb) == 356);
+    assert!(std::mem::size_of::<ThermalSensorReadout>() == 40);
+    assert!(std::mem::size_of::<ThermalReadout>() == 372);
+    assert!(std::mem::offset_of!(ThermalReadout, target_types) == 20);
+    assert!(std::mem::offset_of!(ThermalReadout, sensors) == 52);
+    assert!(std::mem::offset_of!(ThermalSensorReadout, reading) == 24);
 };
 
 /// Opaque native session handle; only ever touched through the extern ABI.
@@ -2842,6 +3074,44 @@ impl MacosRmSession {
     /// Read the private clock-offset channel: the domain directory, the
     /// per-domain offset range, and the block that carries the current values.
     ///
+    /// The public thermal read: what sensors this driver exposes, their reading
+    /// range, and each one's target type. Read-only, and a plain refusal (a
+    /// wedged GSP answers 0x62 here like everywhere else) is reported as an
+    /// error rather than as zeroes.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    pub fn read_thermal(&mut self) -> Result<ThermalReadout, Error> {
+        let _guard = lock_transport()?;
+        let mut out = std::mem::MaybeUninit::<ThermalReadout>::uninit();
+        let mut error = [0u8; 256];
+        // SAFETY: C receives a correctly-sized writable buffer and either fills
+        // all of it (return 0) or leaves nothing usable (non-zero), and it does
+        // not retain the pointer.
+        let status = unsafe {
+            nvoc_macos_rm_session_thermal(
+                self.handle,
+                out.as_mut_ptr(),
+                std::mem::size_of::<ThermalReadout>(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Custom(format!(
+                "macOS RM thermal read: {} (0x{status:08x})",
+                text(&error)
+            )));
+        }
+        // SAFETY: a zero return means C initialized the whole struct.
+        Ok(unsafe { out.assume_init() })
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    pub fn read_thermal(&mut self) -> Result<ThermalReadout, Error> {
+        Err(Error::Custom(
+            "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
+        ))
+    }
+
     /// Read-only, so it is safe to call while the write gate is closed. Every
     /// block reports its own outcome, and the call needs a healthy GSP: while
     /// the GSP is in its reset-required state all four come back
@@ -3910,7 +4180,8 @@ mod tests {
         // with a made-up bound.
         let mut s = snapshot();
         s.telemetry.sample = raw_sample();
-        let views = status_from_snapshot(&s).legacy_temp_sensor_report();
+        let views =
+            status_from_snapshot(&s).legacy_temp_sensor_report(ThermalReadOutcome::NotAttempted);
         assert_eq!(views.len(), 4);
         assert_eq!(views[0].target, "gpu");
         assert_eq!(views[0].field, "temperature_c");
@@ -3942,7 +4213,7 @@ mod tests {
         s.telemetry.sample = raw_sample();
         s.telemetry.sample.temperature_fx256[1] = 200 * 256;
         let status = status_from_snapshot(&s);
-        let views = status.legacy_temp_sensor_report();
+        let views = status.legacy_temp_sensor_report(ThermalReadOutcome::NotAttempted);
         assert_eq!(views[1].current_c, None);
         assert_ne!(views[1].current_c, Some(0.0));
         assert_eq!(
@@ -3952,6 +4223,120 @@ mod tests {
         assert!(views[1].unavailable["current_c"].contains("implausible"));
         assert_eq!(views[0].current_c, Some(50.0));
         assert_eq!(views[3].current_c, Some(45.0));
+    }
+
+    /// A thermal read as the device measured it: one GPU sensor, range [0,127],
+    /// reading 47, target 0 of type 1.
+    fn measured_thermal_read() -> ThermalReadout {
+        let mut read = ThermalReadout {
+            target_count: 1,
+            sensor_count: 1,
+            reported_sensors: 1,
+            target_types_known: 1,
+            ..ThermalReadout::default()
+        };
+        read.target_types[0] = THERMAL_TARGET_GPU;
+        read.sensors[0] = ThermalSensorReadout {
+            executed: 1,
+            result: 0,
+            target_index: 0,
+            provider_index: 0,
+            target_type: THERMAL_TARGET_GPU,
+            target_known: 1,
+            reading: 47,
+            range_min: 0,
+            range_max: 127,
+            range_known: 1,
+        };
+        read
+    }
+
+    #[test]
+    fn the_thermal_read_fills_the_range_of_its_own_target_and_nothing_else() {
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        let status = status_from_snapshot(&s);
+
+        // The read answers for the GPU sensor: its range is the driver's own,
+        // the live value stays this snapshot's, and the source says which is
+        // which. The other three sensors keep a reason -- and that reason says
+        // the read answered for another target, not that the range is unread.
+        let read = measured_thermal_read();
+        let views = status.legacy_temp_sensor_report(ThermalReadOutcome::Answered(&read));
+        assert_eq!(views[0].min_c, Some(0.0));
+        assert_eq!(views[0].max_c, Some(127.0));
+        assert_eq!(views[0].current_c, Some(50.0));
+        assert_eq!(
+            views[0].current_source.as_deref(),
+            Some("rusd:temperature_c")
+        );
+        assert!(!views[0].unavailable.contains_key("min_c"));
+        assert!(views[0].unavailable["controller"].contains("provider index 0"));
+        for view in &views[1..] {
+            assert_eq!(view.min_c, None);
+            assert_eq!(view.max_c, None);
+            assert!(view.unavailable["min_c"].contains("named no sensor"));
+            assert!(!view.unavailable["min_c"].contains("does not wire"));
+        }
+
+        // A range the instruction never wrote must not become a range of zero:
+        // the flag, not the value, decides.
+        let mut unwritten = measured_thermal_read();
+        unwritten.sensors[0].range_known = 0;
+        let views = status.legacy_temp_sensor_report(ThermalReadOutcome::Answered(&unwritten));
+        assert_eq!(views[0].min_c, None);
+        assert_eq!(views[0].max_c, None);
+
+        // A sensor whose target type the driver did not name cannot be placed,
+        // so it fills no entry: the type is what says which sensor this is.
+        let mut untyped = measured_thermal_read();
+        untyped.sensors[0].target_known = 0;
+        let views = status.legacy_temp_sensor_report(ThermalReadOutcome::Answered(&untyped));
+        for view in &views {
+            assert_eq!(view.min_c, None);
+            assert!(view.unavailable["min_c"].contains("named no sensor"));
+        }
+
+        // When this snapshot's own section has nothing, the read's reading is
+        // reported with its own source instead of a null.
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        s.telemetry.sample.temperature_fx256[0] = 200 * 256; // implausible
+        let status = status_from_snapshot(&s);
+        let views = status.legacy_temp_sensor_report(ThermalReadOutcome::Answered(&read));
+        assert_eq!(views[0].current_c, Some(47.0));
+        assert_eq!(
+            views[0].current_source.as_deref(),
+            Some("0x20800513:sensor0")
+        );
+    }
+
+    #[test]
+    fn a_refused_thermal_read_is_not_reported_as_an_unwired_one() {
+        // The three states must stay apart: a caller that never asked, a driver
+        // that refused (a wedged GSP answers 0x62 here too), and a read that
+        // answered. Only the first may claim the read is not wired in.
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        let status = status_from_snapshot(&s);
+
+        let views = status.legacy_temp_sensor_report(ThermalReadOutcome::NotAttempted);
+        assert!(views[0].unavailable["min_c"].contains("does not wire that read in yet"));
+
+        let views = status.legacy_temp_sensor_report(ThermalReadOutcome::Refused(
+            "macOS RM thermal read: RUSD allocation/mapping failed: 0x00000062 (0x00000062)",
+        ));
+        assert_eq!(views[0].min_c, None);
+        let reason = &views[0].unavailable["min_c"];
+        assert!(reason.contains("0x00000062"), "{reason}");
+        assert!(reason.contains("did not complete"), "{reason}");
+        assert!(
+            !reason.contains("does not wire that read in yet"),
+            "{reason}"
+        );
+        // A refused read also must not turn the live reading into a null: those
+        // come from a different read.
+        assert_eq!(views[0].current_c, Some(50.0));
     }
 
     #[test]
@@ -4423,6 +4808,9 @@ mod tests {
                 11,
                 12,
                 13,
+                std::mem::size_of::<ThermalReadout>() as u64,
+                std::mem::size_of::<ThermalSensorReadout>() as u64,
+                std::mem::offset_of!(ThermalReadout, sensors) as u64,
             ]
         );
     }

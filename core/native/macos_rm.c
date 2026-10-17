@@ -29,6 +29,7 @@
 #include "ctrl/ctrl2080/ctrl2080bus.h"
 #include "ctrl/ctrl2080/ctrl2080bios.h"
 #include "ctrl/ctrl2080/ctrl2080perf.h"
+#include "ctrl/ctrl2080/ctrl2080thermal.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -637,7 +638,124 @@ uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *s, uint32_t kind, void *o
     return status;
 }
 
+/* The API handshake every batch of this control must carry: the driver checks
+ * these four fields before it looks at the instruction list at all. */
+static void thermal_batch_init(NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS *p)
+{
+    memset(p, 0, sizeof *p);
+    p->clientAPIVersion = THERMAL_SYSTEM_API_VER;
+    p->clientAPIRevision = THERMAL_SYSTEM_API_REV;
+    p->clientInstructionSizeOf = (NvU32) sizeof(NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION);
+    p->executeFlags = NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_FLAGS_IGNORE_FAIL;
+}
+
+/* The public thermal read (see the header note). Three passes: the counts, one
+ * target-type read per target index (the type instruction takes an index the
+ * sensor read has not returned yet, so the types are read first and looked up
+ * afterwards), then one batch per sensor carrying its reading, range, target
+ * index and provider index. Every number here is what the driver published,
+ * including the per-instruction "did it run" and its own status: an instruction
+ * that did not run leaves its value at zero, and only these flags keep that
+ * apart from a driver that really answered zero. */
+uint32_t nvoc_macos_rm_session_thermal(nvoc_rm_session *s, nvoc_rm_thermal *out, size_t size,
+                                       char *error, size_t cap)
+{
+    NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS p;
+    uint32_t status, n;
+
+    _Static_assert(NVOC_RM_THERMAL_SENSORS_MAX <= NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION_MAX_COUNT,
+                   "thermal cap exceeds the instruction-list limit");
+    if (!s || !out) return failure(error, cap, "session thermal without buffers", UINT32_MAX);
+    if (size != sizeof *out) return failure(error, cap, "thermal ABI size", UINT32_MAX);
+    memset(out, 0, size);
+
+    /* Pass 1: how many targets and sensors the driver reports. */
+    thermal_batch_init(&p);
+    p.instructionListSize = 2;
+    p.instructionList[0].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_TARGETS_AVAILABLE_OPCODE;
+    p.instructionList[1].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSORS_AVAILABLE_OPCODE;
+    status = nvx_rm_control(s->ctl, s->client, s->subdevice,
+                            NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2, &p, (NvU32) sizeof p);
+    out->status = status;
+    if (status != 0) return status;
+    if (!p.instructionList[0].executed || !p.instructionList[1].executed) {
+        return failure(error, cap, "thermal counts did not run", UINT32_MAX);
+    }
+    out->target_count = p.instructionList[0].operands.getInfoTargetsAvailable.availableTargets;
+    out->sensor_count = p.instructionList[1].operands.getInfoSensorsAvailable.availableSensors;
+
+    /* Pass 2: the type of each target index we may need. */
+    n = out->target_count < NVOC_RM_THERMAL_SENSORS_MAX ? out->target_count
+                                                        : NVOC_RM_THERMAL_SENSORS_MAX;
+    if (n) {
+        thermal_batch_init(&p);
+        p.instructionListSize = n;
+        for (uint32_t i = 0; i < n; i++) {
+            p.instructionList[i].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_TARGET_TYPE_OPCODE;
+            p.instructionList[i].operands.getInfoTargetType.targetIndex = i;
+        }
+        status = nvx_rm_control(s->ctl, s->client, s->subdevice,
+                                NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2, &p, (NvU32) sizeof p);
+        if (status == 0) {
+            for (uint32_t i = 0; i < n; i++) {
+                if (!p.instructionList[i].executed || p.instructionList[i].result != 0) break;
+                out->target_types[i] = p.instructionList[i].operands.getInfoTargetType.type;
+                out->target_types_known = i + 1;
+            }
+        }
+    }
+
+    /* Pass 3: one batch per sensor. */
+    n = out->sensor_count < NVOC_RM_THERMAL_SENSORS_MAX ? out->sensor_count
+                                                       : NVOC_RM_THERMAL_SENSORS_MAX;
+    for (uint32_t i = 0; i < n; i++) {
+        nvoc_rm_thermal_sensor *slot = &out->sensors[i];
+
+        thermal_batch_init(&p);
+        p.instructionListSize = 4;
+        p.instructionList[0].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_STATUS_SENSOR_READING_OPCODE;
+        p.instructionList[0].operands.getStatusSensorReading.sensorIndex = i;
+        p.instructionList[1].opcode =
+            NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSOR_READING_RANGE_OPCODE;
+        p.instructionList[1].operands.getInfoSensorReadingRange.sensorIndex = i;
+        p.instructionList[2].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSOR_TARGET_OPCODE;
+        p.instructionList[2].operands.getInfoSensorTarget.sensorIndex = i;
+        p.instructionList[3].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSOR_PROVIDER_OPCODE;
+        p.instructionList[3].operands.getInfoSensorProvider.sensorIndex = i;
+        status = nvx_rm_control(s->ctl, s->client, s->subdevice,
+                                NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2, &p, (NvU32) sizeof p);
+        slot->executed = 0;
+        slot->target_index = NVOC_RM_THERMAL_TARGET_UNKNOWN;
+        slot->provider_index = NVOC_RM_THERMAL_TARGET_UNKNOWN;
+        if (status != 0) continue; /* this sensor was refused: leave it all zero */
+        if (p.instructionList[2].executed && p.instructionList[2].result == 0) {
+            slot->target_index = p.instructionList[2].operands.getInfoSensorTarget.targetIndex;
+        }
+        if (p.instructionList[3].executed && p.instructionList[3].result == 0) {
+            slot->provider_index =
+                p.instructionList[3].operands.getInfoSensorProvider.providerIndex;
+        }
+        if (p.instructionList[0].executed && p.instructionList[0].result == 0) {
+            slot->reading = p.instructionList[0].operands.getStatusSensorReading.value;
+            slot->executed = 1;
+        }
+        if (p.instructionList[1].executed && p.instructionList[1].result == 0) {
+            slot->range_min = p.instructionList[1].operands.getInfoSensorReadingRange.minimum;
+            slot->range_max = p.instructionList[1].operands.getInfoSensorReadingRange.maximum;
+            slot->range_known = 1;
+        }
+        if (slot->target_index < NVOC_RM_THERMAL_SENSORS_MAX &&
+            slot->target_index < out->target_types_known) {
+            slot->target_type = out->target_types[slot->target_index];
+            slot->target_known = 1;
+        }
+        out->reported_sensors = i + 1;
+    }
+    return 0;
+}
+
 uint32_t nvoc_macos_rm_session_close(nvoc_rm_session *s, char *error, size_t cap)
+
 {
     if (!s) return 0;
     uint32_t result = session_release(s, error, cap);
@@ -693,6 +811,9 @@ size_t nvoc_macos_rm_abi_layout(uint64_t *out, size_t count)
         NVOC_RM_RUSD_UTIL,
         NVOC_RM_RUSD_PCI,
         NVOC_RM_RUSD_PROC_UTIL,
+        sizeof(nvoc_rm_thermal),
+        sizeof(nvoc_rm_thermal_sensor),
+        offsetof(nvoc_rm_thermal, sensors),
     };
     if (out && count) {
         size_t n = count < NVOC_RM_LAYOUT_SLOTS ? count : NVOC_RM_LAYOUT_SLOTS;
