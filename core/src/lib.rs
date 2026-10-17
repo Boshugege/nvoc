@@ -8,8 +8,8 @@ pub use gpu::nvapi_init_attempted;
 pub mod legacy_vbios_parser;
 pub mod macos_rm;
 pub use macos_rm::{
-    DeviceInfo, DeviceSample, MONITOR_STALE_AFTER, MacosRmSession, QueryMacosRmInfo,
-    QueryMacosRmStatus,
+    ABI_LAYOUT_SLOTS, DeviceInfo, DeviceSample, FieldState, MONITOR_SECTIONS, MONITOR_STALE_AFTER,
+    MacosRmSession, QueryMacosRmInfo, QueryMacosRmStatus, abi_layout, native_abi_layout,
 };
 mod nvapi;
 pub mod nvml;

@@ -28,56 +28,34 @@
 #include <string.h>
 #include <time.h>
 #include "rusd_read.h"
+#include "macos_rm_abi.h"
 
-enum { RUSD_CLOCK, RUSD_TEMP, RUSD_POWER, RUSD_LIMIT, RUSD_FAN, RUSD_UTIL, RUSD_FIELDS };
-typedef struct {
-    uint32_t status, valid, graphics_khz, memory_khz;
-    int32_t temperature_fx256;
-    uint32_t power_mw, limit_mw, fan_rpm, utilization_percent, reserved;
-    uint64_t timestamps[RUSD_FIELDS];
-} nvoc_rm_telemetry;
-
-typedef struct {
-    uint32_t abi_version, rm_gpu_id, domain, bus, slot, function;
-    uint32_t vendor_id, device_id, subsystem_id, revision, board_id, class_count;
-    uint64_t total_bytes, usable_bytes, bar1_bytes, l2_bytes;
-    uint32_t pstate, memory_status, pstate_status, pci_status, bios_status, name_status, class_status;
-    char driver[64], name[64], sku[16], project[16];
-    nvoc_rm_telemetry telemetry;
-} nvoc_rm_snapshot;
-
-_Static_assert(sizeof(nvoc_rm_snapshot) == 360, "Rust/C snapshot ABI mismatch");
-
-/* One coherent read of the mapped page. field_status[i] == 0 means the value
- * was copied under a stable, data-valid RUSD sequence; nonzero means that
- * section could not be read coherently this time and the value is unset. */
-typedef struct {
-    uint32_t abi_version;
-    uint32_t field_status[RUSD_FIELDS];
-    uint32_t graphics_khz, memory_khz;
-    int32_t temperature_fx256;
-    uint32_t power_mw, limit_mw, fan_rpm, utilization_percent;
-    uint32_t pstate, pstate_status;
-    uint64_t timestamps[RUSD_FIELDS];
-} nvoc_rm_sample;
-
-_Static_assert(sizeof(nvoc_rm_sample) == 112, "Rust/C sample ABI mismatch");
+/* The layouts, the field indices and the entry-point signatures live in
+ * macos_rm_abi.h: including it here makes a definition that drifts from the
+ * declared prototype a compile error, and pins the sizes/offsets Rust asserts. */
+enum {
+    RUSD_CLOCK = NVOC_RM_RUSD_CLOCK, RUSD_TEMP = NVOC_RM_RUSD_TEMP,
+    RUSD_POWER = NVOC_RM_RUSD_POWER, RUSD_LIMIT = NVOC_RM_RUSD_LIMIT,
+    RUSD_FAN = NVOC_RM_RUSD_FAN, RUSD_UTIL = NVOC_RM_RUSD_UTIL,
+    RUSD_FIELDS = NVOC_RM_RUSD_FIELDS
+};
 
 /* A persistent read-only session: one connection chain plus one mapped RUSD
  * page, reused for every sample. `abandon_chain` defers RM object reclamation
  * to connection teardown when an explicit unmap fails. */
-typedef struct nvoc_rm_session {
+struct nvoc_rm_session {
     int ctl, dev;
     NvHandle client, device, subdevice;
     NvHandle shared;
     NV00DE_SHARED_DATA *data;
     NvU64 length;
     int abandon_chain;
-} nvoc_rm_session;
+};
 
 static uint32_t failure(char *error, size_t cap, const char *operation, uint32_t status)
 {
-    snprintf(error, cap, "%s: 0x%08x (%s)", operation, status, nvx_status_name(status));
+    if (error && cap)
+        snprintf(error, cap, "%s: 0x%08x (%s)", operation, status, nvx_status_name(status));
     return status ? status : UINT32_MAX;
 }
 
@@ -188,9 +166,17 @@ static uint32_t session_release(nvoc_rm_session *s, char *error, size_t cap)
         }
         s->data = NULL;
     }
-    if (s->shared) nvx_rm_free(s->ctl, s->client, s->subdevice, s->shared);
-    s->shared = 0;
-    if (!s->abandon_chain) nvx_rm_chain_close(s->ctl, s->client, s->device, s->subdevice);
+    /* When the unmap failed, freeing the shared object would release memory
+     * that is still mapped; keeping the mapping alive but never reading it is
+     * the safe order. Both the objects and the mapping belong to this
+     * connection, which the fds below tear down. */
+    if (s->abandon_chain) {
+        s->shared = 0;
+    } else {
+        if (s->shared) nvx_rm_free(s->ctl, s->client, s->subdevice, s->shared);
+        s->shared = 0;
+        nvx_rm_chain_close(s->ctl, s->client, s->device, s->subdevice);
+    }
     if (s->dev >= 0) nvx_close(s->dev);
     if (s->ctl >= 0) nvx_close(s->ctl);
     s->dev = -1; s->ctl = -1;
@@ -244,6 +230,36 @@ static void telemetry_unmap_and_free(nvoc_rm_session *s, nvoc_rm_telemetry *out)
     s->shared = 0;
 }
 
+/* Mapping-time watermark for every polled section: a caller must observe a
+ * later value before it may treat a reading as new. 0 means the driver has no
+ * valid timestamp for that section right now. */
+static void capture_baseline(nvoc_rm_session *s, uint64_t *baseline)
+{
+    baseline[RUSD_CLOCK] = s->data->clkPublicDomainInfos.lastModifiedTimestamp;
+    baseline[RUSD_TEMP] = s->data->temperatures[RUSD_TEMPERATURE_TYPE_GPU].lastModifiedTimestamp;
+    baseline[RUSD_POWER] = s->data->instPowerUsage.lastModifiedTimestamp;
+    baseline[RUSD_LIMIT] = s->data->powerLimitGpu.lastModifiedTimestamp;
+    baseline[RUSD_FAN] = s->data->fanCoolerStatus.lastModifiedTimestamp;
+    baseline[RUSD_UTIL] = s->data->perfDevUtil.lastModifiedTimestamp;
+}
+
+/* Why a polled section produced no value this round. */
+static uint32_t section_state(const volatile NvU64 *timestamp)
+{
+    NvU64 raw = *timestamp;
+    if (raw == RUSD_TIMESTAMP_INVALID) return NVOC_RM_FIELD_UNAVAILABLE;
+    if (!RUSD_SEQ_DATA_VALID(raw) || raw == RUSD_TIMESTAMP_WRITE_IN_PROGRESS)
+        return NVOC_RM_FIELD_UNSTABLE;
+    return NVOC_RM_FIELD_OK;
+}
+
+/* A copy that failed although the section looked valid raced with the poller. */
+static uint32_t section_failure_status(const volatile NvU64 *timestamp)
+{
+    uint32_t state = section_state(timestamp);
+    return state ? state : NVOC_RM_FIELD_UNSTABLE;
+}
+
 /* One coherent, non-advancing read. Used by the continuous monitor, which
  * decides field freshness/updates in Rust from the returned timestamps. */
 static uint32_t sample_read(nvoc_rm_session *s, nvoc_rm_sample *out)
@@ -264,25 +280,25 @@ static uint32_t sample_read(nvoc_rm_session *s, nvoc_rm_sample *out)
         out->memory_khz = clocks.info[RUSD_CLK_PUBLIC_DOMAIN_MEMORY].actualClkKHz;
         out->timestamps[RUSD_CLOCK] = ts;
     } else {
-        out->field_status[RUSD_CLOCK] = 1;
+        out->field_status[RUSD_CLOCK] = section_failure_status(&s->data->clkPublicDomainInfos.lastModifiedTimestamp);
     }
     if (COPY(s->data->temperatures[RUSD_TEMPERATURE_TYPE_GPU], temp, RUSD_TEMP)) {
         out->temperature_fx256 = temp.temperature;
         out->timestamps[RUSD_TEMP] = ts;
     } else {
-        out->field_status[RUSD_TEMP] = 1;
+        out->field_status[RUSD_TEMP] = section_failure_status(&s->data->temperatures[RUSD_TEMPERATURE_TYPE_GPU].lastModifiedTimestamp);
     }
     if (COPY(s->data->instPowerUsage, power, RUSD_POWER)) {
         out->power_mw = power.info.instGpuPower;
         out->timestamps[RUSD_POWER] = ts;
     } else {
-        out->field_status[RUSD_POWER] = 1;
+        out->field_status[RUSD_POWER] = section_failure_status(&s->data->instPowerUsage.lastModifiedTimestamp);
     }
     if (COPY(s->data->powerLimitGpu, limit, RUSD_LIMIT)) {
         out->limit_mw = limit.info.enforcedmW;
         out->timestamps[RUSD_LIMIT] = ts;
     } else {
-        out->field_status[RUSD_LIMIT] = 1;
+        out->field_status[RUSD_LIMIT] = section_failure_status(&s->data->powerLimitGpu.lastModifiedTimestamp);
     }
     if (COPY(s->data->fanCoolerStatus, fan, RUSD_FAN)) {
         out->fan_rpm = 0;
@@ -290,13 +306,13 @@ static uint32_t sample_read(nvoc_rm_session *s, nvoc_rm_sample *out)
             if (fan.info.rpmCurr[i] > out->fan_rpm) out->fan_rpm = fan.info.rpmCurr[i];
         out->timestamps[RUSD_FAN] = ts;
     } else {
-        out->field_status[RUSD_FAN] = 1;
+        out->field_status[RUSD_FAN] = section_failure_status(&s->data->fanCoolerStatus.lastModifiedTimestamp);
     }
     if (COPY(s->data->perfDevUtil, util, RUSD_UTIL)) {
         out->utilization_percent = util.info.gpuPercentBusy;
         out->timestamps[RUSD_UTIL] = ts;
     } else {
-        out->field_status[RUSD_UTIL] = 1;
+        out->field_status[RUSD_UTIL] = section_failure_status(&s->data->perfDevUtil.lastModifiedTimestamp);
     }
 #undef COPY
     /* P-state is a live RM control, not a RUSD section: re-read it each sample
@@ -313,14 +329,8 @@ static uint32_t sample_read(nvoc_rm_session *s, nvoc_rm_sample *out)
  * by the single-shot path) so the first exposed sample is known-fresh. */
 static void sample_wait_fresh(nvoc_rm_session *s, nvoc_rm_telemetry *out)
 {
-    const NvU64 baseline[RUSD_FIELDS] = {
-        s->data->clkPublicDomainInfos.lastModifiedTimestamp,
-        s->data->temperatures[RUSD_TEMPERATURE_TYPE_GPU].lastModifiedTimestamp,
-        s->data->instPowerUsage.lastModifiedTimestamp,
-        s->data->powerLimitGpu.lastModifiedTimestamp,
-        s->data->fanCoolerStatus.lastModifiedTimestamp,
-        s->data->perfDevUtil.lastModifiedTimestamp,
-    };
+    NvU64 baseline[RUSD_FIELDS];
+    capture_baseline(s, baseline);
     for (unsigned attempt = 0; attempt < 16; attempt++) {
         RUSD_CLK_PUBLIC_DOMAIN_INFOS clocks;
         RUSD_TEMPERATURE temp;
@@ -374,6 +384,7 @@ static void sample_wait_fresh(nvoc_rm_session *s, nvoc_rm_telemetry *out)
 uint32_t nvoc_macos_rm_snapshot(nvoc_rm_snapshot *out, size_t size, uint32_t telemetry,
                                char *error, size_t cap)
 {
+    if (!out) return failure(error, cap, "snapshot without output buffer", UINT32_MAX);
     if (size != sizeof(*out)) return failure(error, cap, "snapshot ABI size", UINT32_MAX);
     memset(out, 0, sizeof(*out));
     nvoc_rm_session s;
@@ -397,10 +408,15 @@ uint32_t nvoc_macos_rm_snapshot(nvoc_rm_snapshot *out, size_t size, uint32_t tel
 /* ---- persistent session ABI (continuous monitoring) ---- */
 
 uint32_t nvoc_macos_rm_session_open(nvoc_rm_session **out_session, nvoc_rm_snapshot *info,
-                                   size_t info_size, char *error, size_t cap)
+                                   size_t info_size, uint64_t *baseline, size_t baseline_count,
+                                   char *error, size_t cap)
 {
-    if (!out_session || info_size != sizeof(*info))
+    if (!out_session || !info)
+        return failure(error, cap, "session open without output buffers", UINT32_MAX);
+    if (info_size != sizeof(*info))
         return failure(error, cap, "session info ABI size", UINT32_MAX);
+    if (baseline && baseline_count != RUSD_FIELDS)
+        return failure(error, cap, "session baseline ABI size", UINT32_MAX);
     *out_session = NULL;
     memset(info, 0, sizeof(*info));
     nvoc_rm_session *s = calloc(1, sizeof(*s));
@@ -410,7 +426,11 @@ uint32_t nvoc_macos_rm_session_open(nvoc_rm_session **out_session, nvoc_rm_snaps
         uint32_t status = 0;
         /* No wait here: the first sample() reports advancement relative to the
          * mapping-time baseline, so the Rust caller owns the wait policy. */
-        if (telemetry_map(s, &status)) result = failure(error, cap, "RUSD allocate/map", status);
+        if (telemetry_map(s, &status)) {
+            result = failure(error, cap, "RUSD allocate/map", status);
+        } else if (baseline) {
+            capture_baseline(s, baseline);
+        }
     }
     if (result) {
         session_release(s, error, cap);
@@ -424,7 +444,7 @@ uint32_t nvoc_macos_rm_session_open(nvoc_rm_session **out_session, nvoc_rm_snaps
 uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *s, nvoc_rm_sample *out, size_t size,
                                      char *error, size_t cap)
 {
-    if (!s) return failure(error, cap, "session sample without session", UINT32_MAX);
+    if (!s || !out) return failure(error, cap, "session sample without buffers", UINT32_MAX);
     if (size != sizeof(*out)) return failure(error, cap, "sample ABI size", UINT32_MAX);
     if (!s->data || s->length < sizeof(*s->data))
         return failure(error, cap, "RUSD page not mapped", UINT32_MAX);
@@ -437,4 +457,40 @@ uint32_t nvoc_macos_rm_session_close(nvoc_rm_session *s, char *error, size_t cap
     uint32_t result = session_release(s, error, cap);
     free(s);
     return result;
+}
+
+/* Cross-language ABI fingerprint: the ignored hardware test compares these
+ * numbers with size_of/offset_of! on the Rust side, so a layout change cannot
+ * pass unnoticed on either side. See NVOC_RM_LAYOUT_* in
+ * core/tests/macos_rm_readonly.rs for the slot meanings. */
+size_t nvoc_macos_rm_abi_layout(uint64_t *out, size_t count)
+{
+    const uint64_t layout[NVOC_RM_LAYOUT_SLOTS] = {
+        sizeof(nvoc_rm_snapshot),
+        sizeof(nvoc_rm_sample),
+        sizeof(nvoc_rm_telemetry),
+        offsetof(nvoc_rm_snapshot, telemetry),
+        offsetof(nvoc_rm_snapshot, driver),
+        offsetof(nvoc_rm_telemetry, timestamps),
+        offsetof(nvoc_rm_telemetry, temperature_fx256),
+        offsetof(nvoc_rm_sample, graphics_khz),
+        offsetof(nvoc_rm_sample, pstate),
+        offsetof(nvoc_rm_sample, timestamps),
+        NVOC_RM_ABI_VERSION,
+        NVOC_RM_RUSD_FIELDS,
+        NVOC_RM_FIELD_OK,
+        NVOC_RM_FIELD_UNSTABLE,
+        NVOC_RM_FIELD_UNAVAILABLE,
+        NVOC_RM_RUSD_CLOCK,
+        NVOC_RM_RUSD_TEMP,
+        NVOC_RM_RUSD_POWER,
+        NVOC_RM_RUSD_LIMIT,
+        NVOC_RM_RUSD_FAN,
+        NVOC_RM_RUSD_UTIL,
+    };
+    if (out && count) {
+        size_t n = count < NVOC_RM_LAYOUT_SLOTS ? count : NVOC_RM_LAYOUT_SLOTS;
+        for (size_t i = 0; i < n; i++) out[i] = layout[i];
+    }
+    return NVOC_RM_LAYOUT_SLOTS;
 }
