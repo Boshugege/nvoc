@@ -1263,9 +1263,14 @@ python3 probe-macos-rm/tools/dump-gsp-families.py gsp-table.tsv \
 | --- | --- | --- | --- | --- | --- |
 | `0x10` | **CLK** (`0x90` / `0xd0`) | 75 (74 legacy + 1 public) | 19 | 1 | `0x2080901b@2108`, `0x20809025@7188`, `0x20809061@776`, `0x2080d01c@2108` |
 | `0x32` | **VOLT** (`0xb2` / `0xf2`) | 13 | 4 | 0 | `0x2080b201@2444`, `0x2080b202@3232`, `0x2080b213@1036`, `0x2080f214@1036` |
-| `0x05` | **THERMAL** (`0x85` / `0xc5`) | 30 (29 + the public `0x20800513`) | 6 | 1 | `0x20808501@1036`, `0x20808524@4`, `0x2080852a@1784`, `0x2080852b@3324` |
-| `0x26` | **PMGR** (`0xa6` / `0xe6`) | 35 (34 + the public `0x20802609`) | 12 | 1 | `0x2080a60b@1928`, `0x2080a610@42000`, `0x2080a611@73868` |
-| `0x20` | **PERF** (`0xa0` / `0xe0`) | 120 (114 + 6 public) | 31 | 6 | `0x2080a001@16`, `0x2080e019@8` |
+| `0x05` | **THERMAL** (`0x85` / `0xc5`) | 32 (31 + the public `0x20800513`) | 6 | 1 | `0x20808501@1036`, `0x20808524@4`, `0x2080852a@1784` (read-only), `0x2080852b@3324` |
+| `0x26` | **PMGR** (`0xa6` / `0xe6`) | 40 (39 + the public `0x20802609`) | 12 | 1 | `0x2080a60b@1928`, `0x2080a610@42000`, `0x2080a611@73868` |
+| `0x20` | **PERF** (`0xa0` / `0xe0`) | 142 (129 + 13 public) | 32 | 6 | `0x2080a001@16`, `0x2080e019@8` |
+
+(GET/SET columns and the entries flagged read-only are the recounted values of
+§17, taken from the corrected 1118-row table.  Sections written before the
+recount carry the older 889-row arithmetic and are corrected there.)
+
 | `0x0a` | **INTERNAL** PM/PFM (no legacy half) | 169 | 0 | 169 | `0x20800a00@268`, `0x20800a01@32` |
 | `0x23` / `0x27` / `0x28` | INTERNAL / GC6 / LPWR | 8 / 11 / 3 | 0 / 0 / 2 | 8 / 1 / 0 | `0x2080a304@132`, `0x2080a702@4`, `0x2080a801@1028` |
 | `0x15`, `0x33`, `0x37` | **unidentified** (no public define) | 11 + 1 + 4 | 3 + 7 + 0 | 0 | `0x20809500@1164`, `0x2080b301@1`, `0x2080b700@6212` |
@@ -1775,3 +1780,84 @@ extraction correction matters.
 probe-macos-rm/tools/extract-gsp-method-table.py  /Users/Shared/nvfw/nvidia/610.57.04/gsp_tu10x.bin
 probe-macos-rm/tools/extract-nvrm-method-table.py /Library/Extensions/NVRM.kext/Contents/MacOS/NVRM
 ```
+
+## 17. The GET→SET twin rule, stated once and generally (2026-10-17, static)
+
+§13 and §16.3 described the pairing by *family*, listing a `0x90`/`0xd0` step per
+category. That description is arithmetically right for the five families it was
+measured on and **cannot express the rest of the table** — and building it as "a
+per-family category step" is what produced a false pair. The rule has one form
+for all 1118 rows, because `0x40` is not a family step at all: it is **bit 14 of
+the id's second byte**, the privileged marker that `dump-gsp-families.py` (and
+§13's own text) already documents. Bit 15 is the legacy marker.
+
+    second byte = [bit15 legacy][bit14 privileged][6-bit interface]
+    GET half = legacy set,  privileged clear   (0x90 -> interface 0x10)
+    SET half = legacy set,  privileged set     (0xd0 -> interface 0x10)
+
+So a GET id and its SET twin differ by **flipping bit 14 and advancing the
+index by one**, with the interface index and bit 15 untouched:
+
+    0x2080_901b  (iface 0x10, idx 27, read)  <->  0x2080_d01c (iface 0x10, idx 28, write)
+
+`probe-macos-rm/tools/gsp-handler-map.py` implements exactly this and
+`--selftest` asserts it, including the counter-example below. Checking the rule
+in both directions over the whole table yields the **same 63 pairs** (63 from
+the bit14-clear side, 63 from the bit14-set side, identical as sets) — a rule
+that were only right in one direction would show up as a mismatch.
+
+**The false pair this replaces.** An earlier version of the tool kept a
+five-entry family table and computed the twin as
+`(mid & ~0x3F00) | ((fam_write << 8) | ((mid & 0xFF) + 1))`. Two bugs were
+stacked in that expression: masking with `~0x3F00` leaves bit 7 of the
+interface byte standing, and the low byte was **OR**-ed rather than replaced
+(`0x1b | 0x1c == 0x1f`). The result for `0x2080852a` was `0x2080852b`: an id that
+**exists in the table**, so a spot check passes, but which is itself a
+bit14-clear *read* control. The real SET twin is `0x2080c52b`, which is
+**absent** — `0x2080852a@1784` is a read-only control like its neighbours. The
+lesson is narrow and worth keeping: *an id that exists is not evidence that the
+derivation is right*, because a wrong rule over a dense id space lands on a real
+row constantly. `--selftest` now asserts `twin_of(0x2080852a) == 0x2080c52b`
+**and** that `0x2080852b` has bit 14 clear, so the old answer cannot come back
+silently.
+
+**Corrected family split** (GET = bit14 clear, SET = bit14 set; the public
+`0x2080xxxx` rows of the same interface are listed separately because they
+carry neither legacy bit):
+
+| interface | family | GET | SET | examples of the SET half |
+| --- | --- | --- | --- | --- |
+| `0x10` | CLK | 75 = 74 (`0x90`) + 1 public (`0x20801037`) | **19** (`0xd0`) | `0x2080d01c@2108`, `0x2080d02d@4116`, `0x2080d041@648` |
+| `0x32` | VOLT | 13 (`0xb2`) | **4** (`0xf2`) | `0x2080f214@1036` |
+| `0x05` | THERMAL | 32 = 31 (`0x85`) + 1 public (`0x20800513`) | **6** (`0xc5`) | — |
+| `0x26` | PMGR | 40 = 39 (`0xa6`) + 1 public (`0x20802609`) | **12** (`0xe6`) | — |
+| `0x20` | PERF | 142 = 129 (`0xa0`) + 13 public (`0x208020xx`) | **32** (`0xe0`) | — |
+
+The CLK/VOLT numbers here are the ones §13 recorded after its 11:50Z
+correction (CLK 74 + 19, VOLT 13 + 4); the THERMAL/PMGR/PERF GET counts in that
+table were written before the 1118-row recount and are corrected above by
+counting the corrected table's marker bits directly.
+
+**Write-only rows.** Under the general rule 49 SET rows have no GET row at their
+index-1, and they are not all trivial: the CLK interface has two,
+`0x2080d067@4` and `0x2080d069@76`, whose read halves `0x20809066`/`0x20809068`
+are genuinely **absent from the firmware table**. They are writeable controls
+with no readable counterpart, so any "read the block, edit one dword, write it
+back" recipe has no GET to seed from for them. (The `NULL/VGPU` interface
+accounts for most of the remaining 47.)
+
+**Sizes still differ, and that conclusion is untouched.** Equal paramSize is the
+common case, not a law: `0x20809040@4808` pairs with `0x2080d041@648`, and
+`0x20809500@1164` with `0x2080d501@76`. The SET is validated by the GSP against
+its own row, so a SET id must never inherit the GET's size. Connecting the two
+halves of this section: because the twin is now derived from a *bit*, the size
+comparison is meaningful for all 63 pairs rather than for the 58 a family table
+happened to cover — and 16 of them are size-mismatched.
+
+**What this does and does not change for G1.** It changes nothing about the
+offset channel's status: `0x2080901b@2108 <-> 0x2080d01c@2108` was already the
+pair, both sizes are equal, and the missing piece is still the *field identity*
+inside the 64 B record (§15.3). What it fixes is the surrounding map — the 63
+pairs are now enumerable from the table alone, and the false `0x2080852a` pair
+is retracted before it could be used to justify a write to a read-only control.
+
