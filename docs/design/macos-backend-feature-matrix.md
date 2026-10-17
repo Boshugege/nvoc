@@ -1223,3 +1223,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (2) **不做具名域字段的理由** ✔：776 的域位是驱动自己的位，只有 `0x10` 能凭仓库内 NVAPI 副本命名 MCLK（其频率与实时显存时钟一致 ✔），其余十个位无名 ⇒ 升格会**猜名字**；note 逐位列值只报实测值 ✔。
 (3) **验证范围** ✔：客户端 fmt/clippy（`--workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings`）/`cargo test -p nvoc-core --all-targets` 全绿（93 passed）✔；**本机不编译 C 与 macOS 门控代码** ✗ ⇒ 测试机 `cargo build -p nvoc-core`（`OGKM=` 带上）build script 实执行＋编译通过 ✔，另以同一组 include 直接 `cc -fsyntax-only macos_rm.c` 通过 ✔；覆盖前核对四个文件 sha256 与 `b413f42^` 逐一相同 ⇒ 未覆盖新工作 ✔。
 (4) **状态**：`0x20809061@776` 读面在客户端 = **已实现待实测** ✔（其**形态**被驱动接受已在第 53 轮由探针实测 ✔，两者不混同）；**设备侧本轮未读** ✗（GSP 仍 `0x62`）⇒ 无新增设备访问计数 ✔；未执行任何写入 ✔，写入门槛保持关闭 ✔。
+
+### 本轮追加六十六（2026-10-18，**公共接口**：`clock_offsets` ＋一处过期断言更正）
+
+(1) **选择依据** ✔：原目标第 5 条要求接入公共 core/CLI/Python 接口；第 31 轮只写进 note，用户拿不到数值 ✗。另发现 `CLOCK_OFFSET_UNREADABLE_REASON` 仍写"offset itself is not reported as a number" ✗ —— 已被第 53 轮实测推翻 ⇒ 必须更正 ✔。
+(2) **落地** ✔：`core/src/macos_rm.rs` 新增 `ClockOffsetReading{domain_bit, frequency_khz, offset_khz}`（带 `Serialize`）与 `DeviceSettings.clock_offsets: Option<Vec<...>>`，由 `apply_offset_channel` 从 `parse_clock_document` 的**实测载荷**填充；**拒绝/畸形保持 `None`**（非空数组）⇒ "未读到"永不渲染成"偏移为零"。`core/src/lib.rs` 并入 re-export；`nvoc-python/src/lib.rs` 增加 `clock_offsets` 数组；`cli` 的 `get-settings` macOS 路径本就整块 `serde_json::to_value(...)` ⇒ **无需新管线**，JSON 自动携带 ✔（人读格式器是否显示**尚未确认** ✗）。
+(3) **域位保留不换名字** ✔：同时给 `domain_bit` 与 `frequency_khz`；只有 `0x10` 能凭仓库内 NVAPI 副本命名 MCLK，且其频率即该会话实测显存时钟 ⇒ 用频率当**实测**标识 ✔。
+(4) **保留的决定** ✔：`unavailable` 中 `core_clock_offset`/`memory_clock_offset` **故意保留**（读已实现但**尚未设备实测** ✗；这两族仍开放的是旧的 `0x2080901B` 槽位身份与"无任何 SET"）⇒ 原因字符串已改写为只陈述这两点，等实测后再决定是否移除键 ✔。
+(5) **验证范围** ✔：客户端 fmt/clippy（`--workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings`）/`cargo test -p nvoc-core --all-targets` **94 passed**（新增一例用**捕获载荷**断言 bit 1 = 1 530 000/−1、bit 0x10 = 6 000 984/−126，并断言 `Refused(0x62)` ⇒ `None`）/`cargo check -p pynvoc` ✔；测试机 `cargo build -p nvoc-core -p nvoc-cli`（`OGKM=`）通过 ⇒ macOS 门控代码与 CLI macOS 路径均编译 ✔；覆盖前三个文件 sha256 与 `c3f24e1` 相同 ✔。
+(6) **状态**：`clock_offsets` = **已实现待实测** ✔；**设备侧本轮未读** ✗（无重启，uptime `1 day, 3:48`，同一 boot）⇒ 无新增设备访问 ✔；未执行任何写入 ✔，写入门槛保持关闭 ✔。

@@ -1157,3 +1157,23 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - **覆盖前先核对**：测试机上四个文件改前 sha256 与 `b413f42^`（即第 54 轮提交态）**逐一相同** ✔（`macos_rm.rs b0492d91…`、`macos_rm.c 56217cae…`、`macos_rm_abi.h 169278c6…`、`macos_offset.rs 48fd7af3…`）⇒ 未覆盖任何新工作 ✔。
 - **设备侧：未读** ✗ —— GSP 仍 `0x62`（uptime `1 day, 3:44`，同一 boot ✔）⇒ 新客户端路径状态 = **已实现待实测** ✔（`0x20809061@776` 这一**形态**被驱动接受这件事本身已在第 53 轮由探针实测 ✔，两者不混同 ✔）。
 - 未执行任何写入 ✔，`SETTINGS_WRITE_SUPPORTED`/`SETTINGS_RESTORE_SUPPORTED` 仍为 `false` ✔。
+
+## 32. 偏移进入公共接口：`clock_offsets` 与一处**过期断言**的更正（2026-10-18）
+
+**选择依据** ✔：原目标第 5 条要求"接入现有公共 core/CLI/Python 接口"✗；第 31 轮只把偏移写进 note ✗ ⇒ 用户仍拿不到数值 ✔。同时发现一处**已经过期**的断言 ✗：`CLOCK_OFFSET_UNREADABLE_REASON` 仍写着"the offset itself is not reported as a number" ✗，而第 53 轮起该结论已被 `0x20809061` 的实测推翻 ✗ ⇒ 属必须更正的诚实性问题 ✔。
+
+### 32.1 落地
+- `core/src/macos_rm.rs`：新增公开类型 `ClockOffsetReading{domain_bit, frequency_khz, offset_khz}` ✔（含 `Serialize` ✔）与 `DeviceSettings.clock_offsets: Option<Vec<ClockOffsetReading>>` ✔，由 `apply_offset_channel` 从 `parse_clock_document` 的**实测载荷**填充 ✔；**拒绝/畸形时保持 `None`** ✗（不是空数组 ✗）⇒ "未读到" 永不渲染成"偏移为零" ✔。
+- `core/src/lib.rs`：把 `ClockOffsetReading` 并入公开 re-export ✔。
+- `nvoc-python/src/lib.rs`：`settings_macos_rm_to_map` 增加 `clock_offsets` 数组（`domain_bit`/`frequency_khz`/`offset_khz` ✔）。
+- `cli`：`get-settings` 的 macOS 路径本来就是 `serde_json::to_value(QueryMacosRmSettings.output)` ✔（`cli/src/macos_rm.rs:47`）⇒ **无需新管线**，JSON 自动带上该字段 ✔；人读格式器是否显示该字段**尚未确认** ✗（见 32.3）。
+### 32.2 域位保留而不换成名字 ✔
+`clock_offsets` 同时给出 `domain_bit` 与 `frequency_khz` ✔：域位是**驱动自己的**位 ✔，仓库内只有 `0x10` 能凭 NVAPI 副本命名为 MCLK ✔，且其频率正是该会话实测的显存时钟 ✔ ⇒ 用名字替换位会把"名字"变成猜测，而频率是**实测** ✔。
+### 32.3 明确保留的决定与未知 ✔
+- `unavailable` 里的 `core_clock_offset`/`memory_clock_offset` **保留** ✗（**故意** ✔）：读虽已实现但**尚未在设备上实测** ✗（GSP 仍 wedge ✗），且这两族仍开放的问题是**旧的 `0x2080901B` 槽位身份**与"没有任何 SET"✗ ⇒ 原因字符串已改写为**只陈述这两点** ✔，不再说"偏移没被报出"✗。等设备实测答复后再决定是否**移除**这两个键 ✔（那时才可证伪/确认 ✔）。
+- CLI **人读**输出是否显示 `clock_offsets` **尚未确认** ✗；JSON 路径已确认 ✔。
+### 32.4 实际验证范围 ✔
+- 客户端：`cargo fmt --all -- --check` 干净 ✔；`cargo clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 干净 ✔；`cargo test -p nvoc-core --all-targets` **94 passed** ✔（新增一例：用**捕获的 776 载荷**填字段并断言 bit 1 = 1 530 000/−1、bit 0x10 = 6 000 984/−126 ✔，并断言 `Refused(0x62)` ⇒ `None` ✔ 且 note 同时含 `0x20809061` 与 `0x00000062` ✔）；`cargo check -p pynvoc` 通过 ✔（本机 pyo3 只做 check，不链接 ✔）。
+- 测试机（macOS，`OGKM=` 带上）：`cargo build -p nvoc-core -p nvoc-cli` 通过 ✔ ⇒ macOS 门控代码与 **CLI 自身 macOS 路径**均编译 ✔；`nvapi-sys` 的 `unused variable: id` 警告为**既有** ✗、与本轮无关 ✔。
+- 覆盖前核对 ✔：三个改动文件在测试机上的 sha256 与 `c3f24e1` 提交态**逐一相同** ✔ ⇒ 未覆盖新工作 ✔。
+- **设备侧：本轮未读** ✗ —— 无重启，uptime `1 day, 3:48`（同一 boot ✔）；因此 `clock_offsets` 状态 = **已实现待实测** ✔。未执行任何写入 ✔，写入门槛保持关闭 ✔。
