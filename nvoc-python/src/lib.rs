@@ -118,9 +118,12 @@ fn refuse_without_source(entry: &str, reason: &str) -> PyResult<()> {
 
 /// The refusal text, kept separate from raising it so a unit test can assert on
 /// it without starting an interpreter (the same reason the other message tests
-/// here only check `is_err`).
+/// here only check `is_err`). The wrapper adds nothing but the entry name: the
+/// first version said "query_pstates reads NVML's per-P-state clock table: the
+/// per-pstate clock table has no source here: ...", naming the shape twice
+/// because the reason already names it.
 fn source_less_message(entry: &str, reason: &str) -> String {
-    format!("{entry}: {reason}")
+    format!("{entry} is not implemented on macOS: {reason}")
 }
 
 fn parse_backend(raw: &str) -> PyResult<&'static str> {
@@ -2383,7 +2386,7 @@ fn query_power_limits(py: Python<'_>, gpu: &str, backends: Option<&str>) -> PyRe
 #[pyfunction]
 fn query_pstates(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
     refuse_without_source(
-        "query_pstates reads NVML's per-P-state clock table",
+        "query_pstates",
         nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON,
     )?;
     let value = with_target(gpu, "nvml", normalize_pstates)?;
@@ -2404,7 +2407,7 @@ fn query_fan_info(py: Python<'_>, gpu: &str, backends: Option<&str>) -> PyResult
 #[pyfunction]
 fn query_cooler_info(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
     refuse_without_source(
-        "query_cooler_info reads the private NVAPI cooler family",
+        "query_cooler_info",
         nvoc_core::FAN_PERCENT_UNREADABLE_REASON,
     )?;
     let value = with_target(gpu, "nvapi", normalize_cooler_info)?;
@@ -2414,7 +2417,7 @@ fn query_cooler_info(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 fn query_temperature_thresholds(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
     refuse_without_source(
-        "query_temperature_thresholds reads NVML's threshold table",
+        "query_temperature_thresholds",
         nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON,
     )?;
     let value = with_target(gpu, "nvml", normalize_temperature_thresholds)?;
@@ -6063,6 +6066,13 @@ mod tests {
             assert!(
                 !text.contains("NVAPI/NVML are not available"),
                 "{entry} must not blame the platform"
+            );
+            // The wrapper adds the entry name and nothing else: the reason
+            // already names the shape, and restating it in the wrapper (the
+            // first version did) reads as a stutter.
+            assert!(
+                text.starts_with(&format!("{entry} is not implemented on macOS: ")),
+                "{entry} must add nothing but its own name: {text}"
             );
             // Each reason must name the layer rather than pass a verdict.
             assert!(

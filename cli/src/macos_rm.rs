@@ -42,9 +42,8 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         Ok(())
     } else if command == Command::GetTemperatureThresholds {
         Err(CliError::new(format!(
-            "get-temp-thresholds is unavailable on macOS RM: it reads the NVML threshold table, \
-             and {} -- on macOS the live reading of every sensor this backend knows is reported \
-             by get-legacy-temp-sensor instead.",
+            "get-temp-thresholds is unavailable on macOS RM: {} -- on macOS the live reading \
+             of every sensor this backend knows is reported by get-legacy-temp-sensor instead.",
             nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON
         )))
     } else if command == Command::GetPstateFreqRange {
@@ -52,9 +51,9 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         // does answer P-state questions (get-status reports the current one),
         // so the list would read as "no P-state here".
         Err(CliError::new(format!(
-            "get-pstate-freq-range is unavailable on macOS RM: it reads the per-pstate clock \
-             table, and {} -- on macOS get-status reports the current P-state and \
-             get-pstate-global-freq-offset reports the per-domain offsets instead.",
+            "get-pstate-freq-range is unavailable on macOS RM: {} -- on macOS get-status \
+             reports the current P-state and get-pstate-global-freq-offset reports the \
+             per-domain offsets instead.",
             nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON
         )))
     } else {
@@ -535,6 +534,25 @@ mod tests {
             "{pstate}"
         );
         assert!(pstate.contains("get-pstate-global-freq-offset"), "{pstate}");
+        // Both refusals open with the entry name, then the shared constant, then
+        // the entry that does answer -- and nothing that restates the shape the
+        // reason already names: the first version stuttered ("it reads the
+        // per-pstate clock table, and the per-pstate clock table has no source
+        // here"). This prefix check is what keeps that from coming back.
+        let thresholds_prefix = "get-temp-thresholds is unavailable on macOS RM: ";
+        assert!(allowed.starts_with(thresholds_prefix), "{allowed}");
+        assert!(
+            allowed[thresholds_prefix.len()..]
+                .starts_with(nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON),
+            "{allowed}"
+        );
+        let pstate_prefix = "get-pstate-freq-range is unavailable on macOS RM: ";
+        assert!(pstate.starts_with(pstate_prefix), "{pstate}");
+        assert!(
+            pstate[pstate_prefix.len()..]
+                .starts_with(nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON),
+            "{pstate}"
+        );
         // The entries that ask for a *reading* this backend really has no source
         // for keep the list-shaped refusal.
         let list_shaped = validate(Command::GetTempSim).unwrap_err().to_string();
