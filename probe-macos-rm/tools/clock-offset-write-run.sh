@@ -127,6 +127,36 @@ bundle="$out_root/stage-clkoffset-write-$stamp"
 mkdir -p "$bundle"
 echo "bundle: $bundle"
 
+# The candidate, the revision and the binary that will carry the write go into
+# the bundle before the write: a gated run happens once, and afterwards
+# "which candidate was that?" must be answerable from the artifact.  The vehicle
+# here is the full-profile probe, not the idle one, so it is named explicitly.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$root/tools/record-run-provenance.py" \
+        --bundle "$bundle" \
+        --label "gated clock-offset write (single domain, one field, one step)" \
+        --binary "$root/probe-macos-rm" \
+        --source "$root" \
+        --ogkm "$ogkm" \
+        --case "$cand (bit:off:delta_khz)" \
+        --id "0x2080d01c:2108 (SET twin of the 0x2080901b control GET)" \
+        --preregistered "success = SET answers NV_OK AND the named dword reads back orig+delta AND every other value dword is byte-identical AND the restored block is byte-identical" \
+        --preregistered "a live frequency change is not a criterion, in either direction (NVK issues its own PERF_BOOST)" \
+        --preregistered "root is a precondition, not politeness: 0x2080d01c carries (cmd & 0xC000) == 0xC000 and is refused with 0x1b below root" \
+        || echo "  (provenance stamp failed; the logs are still the artifact)" >&2
+fi
+
+stamp_sums() {
+    # Same digest pass as the read runbook, so a quoted byte can be checked from
+    # the artifact alone.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$root/tools/record-run-provenance.py" --bundle "$bundle" --sums \
+            || echo "  (digest pass failed; the logs are still the artifact)" >&2
+    else
+        (cd "$bundle" && shasum -a 256 ./*.txt > SHA256SUMS 2>/dev/null || true)
+    fi
+}
+
 # 2. preflight: the driver's own state check, before anything is written.
 echo "== anchor (decides whether the GSP is able to answer at all) =="
 "$root/probe-macos-rm" --anchor-read > "$bundle/anchor.txt" 2>&1 && arc=0 || arc=$?
@@ -136,6 +166,9 @@ if grep -q "NV_ERR_RESET_REQUIRED" "$bundle/anchor.txt" || \
     echo "  !! the GSP is not answering normally; NOT writing." >&2
     echo "     A 0x62 below would make a rejected write unreadable -- reboot" >&2
     echo "     first, then rerun this script. Nothing was written this run." >&2
+    # The refusal is an artifact too: it is the record that the GSP, not the
+    # candidate, is why no write happened.
+    stamp_sums
     exit 3
 fi
 
@@ -165,4 +198,7 @@ else
 fi
 echo "note: a frequency change (or its absence) is not evidence; the lines above" 
 echo "      are. Rerun the read runbook afterwards to confirm the blocks agree."
+
+# Digests last, so they cover the finished logs.
+stamp_sums
 exit $wrc

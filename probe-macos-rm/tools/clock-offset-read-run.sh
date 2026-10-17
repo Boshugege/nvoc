@@ -75,6 +75,42 @@ bundle="$out_root/stage-clkctl-readrun-$stamp"
 mkdir -p "$bundle"
 echo "bundle: $bundle"
 
+# What produced this bundle, written before the first request: a healthy window
+# cannot be repeated (a later rejection can wedge the session), so the revision,
+# the binary's identity and its build freshness have to be in the artifact
+# rather than in the operator's memory.  A binary older than the sources prints
+# STALE -- the failure that once cost this project a "row is missing" hunt.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$root/tools/record-run-provenance.py" \
+        --bundle "$bundle" \
+        --label "clock-offset read battery (read-only; idle profile)" \
+        --binary "$root/probe-macos-rm-idle" \
+        --source "$root" \
+        --ogkm "$ogkm" \
+        --case "clkctl-hex: full byte dump, first case 0x2080901b@2108 in@4=0xFF on an 0xA5 background" \
+        --case "clkctl-read: the wider battery, refusing 0x20809026@5332" \
+        --case "fan-read: 0x20808532 and its public twin, 336 B on 0xA5" \
+        --case "hwfs-read: 0x20808540, 24 B" \
+        --id "0x2080901b:2108 (offset control GET)" \
+        --id "0x20809025:7188 (offset range)" \
+        --id "0x20809019:12336 (domain directory)" \
+        --id "0x2080901d:32680 (record stride still open)" \
+        --preregistered "0x2080901d: a third occurrence at +268 means a 128 B period; at +1160 means the 32x1020 split; at both or neither, both readings are wrong" \
+        --preregistered "any non-zero value dword in the 0x2080901b record is the first G1 current-offset candidate" \
+        --preregistered "a 0x62 or 0x65 anywhere stops the run: read the bytes, do not retry" \
+        || echo "  (provenance stamp failed; the logs are still the artifact)" >&2
+fi
+
+stamp_sums() {
+    # One digest implementation for both runbooks, over every file in the bundle.
+    if command -v python3 >/dev/null 2>&1; then
+        python3 "$root/tools/record-run-provenance.py" --bundle "$bundle" --sums \
+            || echo "  (digest pass failed; the logs are still the artifact)" >&2
+    else
+        (cd "$bundle" && shasum -a 256 ./*.txt > SHA256SUMS 2>/dev/null || true)
+    fi
+}
+
 run_one() {
     name=$1
     shift
@@ -98,6 +134,9 @@ if [ "${wedge:-0}" -ne 0 ]; then
     echo "     legacy path is wedged (see the doc, section 6). STOPPING here --" >&2
     echo "     the wider battery would answer 0x62 for every id. Reboot, then" >&2
     echo "     rerun; nothing was written." >&2
+    # The abort bundle is an artifact too -- the wedge datapoint -- so it gets its
+    # digests before the run ends, not only on the healthy path.
+    stamp_sums
     exit 5
 fi
 
@@ -119,8 +158,5 @@ if command -v python3 >/dev/null 2>&1; then
     echo "  decode -> $bundle/decode.txt"
 fi
 
-(
-    cd "$bundle"
-    shasum -a 256 ./*.txt > SHA256SUMS 2>/dev/null || true
-)
+stamp_sums
 echo "done: $bundle"
