@@ -629,8 +629,8 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 Command::GetPstateGlobalFreqOffset,
                 CommandSpec {
                     adapters: &BOTH_BACKENDS,
-                    options: Box::leak(Box::new(["domain", "pstate"])),
-                    ..CommandSpec::new("get-pstate-global-freq-offset", Group::Clock, "Read clock offset in MHz")
+                    options: Box::leak(Box::new(["domain", "pstate", "plan-delta"])),
+                    ..CommandSpec::new("get-pstate-global-freq-offset", Group::Clock, "Read clock offset in MHz; --plan-delta also evaluates a step against the same reading without writing it (macOS RM only)")
                 },
             ),
             (
@@ -1977,6 +1977,12 @@ fn command_specific_arg(name: &'static str) -> Arg {
             .action(ArgAction::Append)
             .global(true)
             .help("P-State such as P0 or P2"),
+        "plan-delta" => Arg::new("plan-delta")
+            .long("plan-delta")
+            .value_name("DELTA")
+            .action(ArgAction::Append)
+            .global(true)
+            .help("get-pstate-global-freq-offset: evaluate one bounded offset step against the same read-only snapshot and print it, without writing anything (macOS RM only). Signed magnitude with an optional khz/mhz unit, e.g. +8mhz; the answer reports which record the step resolves to, what that record holds now, and whether the step stays inside the window the driver reported"),
         "fan" => Arg::new("fan")
             .long("fan")
             .value_name("FAN")
@@ -6986,6 +6992,18 @@ fn get_clock_offset(
     adapter: BackendAdapter,
     invocation: &Invocation,
 ) -> CliResult<Value> {
+    // `--plan-delta` asks whether a step is bounded, which needs a window to
+    // measure it against. This function's NVAPI/NVML paths report the delta
+    // without the driver's range, so the flag is answered by the macOS RM
+    // backend (the arm in `macos_rm`) and by `nvoc macos-eval --plan`; an
+    // entry that accepts a flag and ignores it would be the worse answer.
+    if option_one(invocation, "plan-delta").is_some() {
+        return Err(CliError::new(
+            "--plan-delta evaluates an offset step against the window the driver reports, and \
+             this backend's offset read does not report one. Supported by the macOS RM backend \
+             (`--macos-rm`) and by `nvoc macos-eval --plan <target>=<delta>`.",
+        ));
+    }
     let domain = option_domain(invocation, ClockDomain::Graphics)?;
     match adapter {
         BackendAdapter::Nvapi => {
@@ -8438,6 +8456,29 @@ mod tests {
         assert_eq!(mode0_offset_effect_mhz(0, 2000.0), 0.0);
         // non-Pascal axis divides by 1000
         assert!((mode0_offset_effect_mhz((-50_000_i32) as u32, 1000.0) + 50.0).abs() < 1e-9);
+    }
+
+    /// `--plan-delta` is wired at this surface, not merely advertised: it
+    /// parses on the offset read, and its value goes through the same core
+    /// grammar the optimizer's `--plan` uses, so the two entries cannot start
+    /// accepting different request spellings.
+    #[test]
+    fn the_offset_read_accepts_the_dry_run_step_flag() {
+        let invocation = parse_args([
+            "get-pstate-global-freq-offset",
+            "--macos-rm",
+            "--domain",
+            "memory",
+            "--plan-delta",
+            "+8mhz",
+        ])
+        .expect("the flag is accepted on this command");
+        assert_eq!(
+            invocation.options.get("plan-delta").map(Vec::as_slice),
+            Some(["+8mhz".to_string()].as_slice())
+        );
+        assert_eq!(nvoc_core::parse_offset_delta("+8mhz"), Ok(8_000));
+        assert!(nvoc_core::parse_offset_delta("fast").is_err());
     }
 
     /// `get-vbios -i <file>` 离线模式：不触碰 GPU 发现/NvAPI，直接产出与

@@ -53,7 +53,14 @@ fn macos_eval_command() -> Command {
              applied: the offset write path exists (0x2080d01c, same block as the \
              readable 0x2080901b) but a write waits on authorisation, a healthy \
              session and the field identity only the write itself can give, so \
-             this is the preflight + load + verify step only.",
+             this is the preflight + load + verify step only.\n\n\
+             --dry-run drops the load entirely and adds the plan: --plan \
+             <target>=<delta> is evaluated against the read-only snapshot and \
+             reports, per step, which record it resolves to, what that record \
+             holds now, whether the step stays inside the window the driver \
+             reported, and which of those facts is missing when it cannot say. \
+             A step is never applied, and `settings_write` reports whether this \
+             backend would write at all.",
         )
         .arg(
             Arg::new("duration")
@@ -88,6 +95,25 @@ fn macos_eval_command() -> Command {
                 .num_args(1)
                 .default_value("")
                 .help("Path to stress-macos/metal_check; empty skips the verifier"),
+        )
+        .arg(
+            Arg::new("dry-run")
+                .long("dry-run")
+                .action(ArgAction::SetTrue)
+                .help("Preflight and plan only: no Vulkan load, no Metal verifier, no writes"),
+        )
+        .arg(
+            Arg::new("plan")
+                .long("plan")
+                .value_name("TARGET=DELTA")
+                .num_args(1)
+                .action(ArgAction::Append)
+                .help(
+                    "Evaluate one bounded offset step without writing it, e.g. \
+                     --plan graphics=+8mhz or --plan bit:0x1=-2000; repeatable. \
+                     TARGET is a public domain or bit:<n>; DELTA is signed kHz, \
+                     optionally suffixed khz/mhz",
+                ),
         )
         .arg(
             Arg::new("out")

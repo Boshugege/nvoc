@@ -2389,6 +2389,40 @@ fn query_clock_offset(
 }
 
 #[pyfunction]
+#[pyo3(signature = (gpu, target, delta, backends = None))]
+fn plan_clock_offset_step(
+    py: Python<'_>,
+    gpu: &str,
+    target: &str,
+    delta: &str,
+    backends: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let gpu = gpu.to_string();
+    // The request grammar is the core one, so this call accepts exactly the
+    // spellings `nvoc-cli ... --plan-delta` and `nvoc macos-eval --plan` accept.
+    let requested = nvoc_core::parse_offset_target(target).map_err(invalid_value)?;
+    let delta_khz = nvoc_core::parse_offset_delta(delta).map_err(invalid_value)?;
+    let backends = backends.unwrap_or("macos-rm").to_string();
+    let value = py.detach(|| {
+        with_target(&gpu, &backends, |target_gpu| {
+            if !target_gpu.has_macos_rm() {
+                return Err(invalid_value(
+                    "the offset plan is measured against the window the macOS RM backend \
+                     reports; this target is not a macOS RM device",
+                ));
+            }
+            let device = target_gpu.macos_rm().map_err(to_py_err)?;
+            // The production settings path, so the snapshot this plans against
+            // is the same one `query_settings` reports -- names included.
+            let settings = device.settings().map_err(to_py_err)?;
+            let step = nvoc_core::plan_offset_step(&settings, &requested, delta_khz);
+            serde_json::to_value(&step).map_err(to_py_err)
+        })
+    })?;
+    py_value(py, &value)
+}
+
+#[pyfunction]
 #[pyo3(signature = (gpu, domain = None, infer_missing_default = true))]
 fn query_public_vftable(
     py: Python<'_>,
@@ -5660,6 +5694,7 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(get_display_list, m)?)?;
     m.add_function(wrap_pyfunction!(query_edid, m)?)?;
     m.add_function(wrap_pyfunction!(query_clock_offset, m)?)?;
+    m.add_function(wrap_pyfunction!(plan_clock_offset_step, m)?)?;
     m.add_function(wrap_pyfunction!(query_public_vftable, m)?)?;
     m.add_function(wrap_pyfunction!(query_vbios_vf_curve, m)?)?;
     m.add_function(wrap_pyfunction!(query_vfp_point_voltage, m)?)?;

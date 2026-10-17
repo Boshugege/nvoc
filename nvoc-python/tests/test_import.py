@@ -29,6 +29,7 @@ EXPECTED_EXPORTS = [
     "get_pmgr_arbiter",
     "get_rated_tdp",
     "get_temp_sim",
+    "plan_clock_offset_step",
     "probe_voltage_limits",
     "query_api_restriction",
     "query_auto_boost",

@@ -64,6 +64,23 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                     let name = domain_label(domain);
                     let settings = run(&target, nvoc_core::QueryMacosRmSettings)?.output;
                     let named = settings.named_clock_offset(name).map_err(CliError::new)?;
+                    // The optional dry-run step. It is computed from this same
+                    // snapshot with the core planner the optimizer and the
+                    // Python bindings call, so all three accept the same request
+                    // grammar and report the same verdicts; nothing is written.
+                    let plan = match option_one(invocation, "plan-delta") {
+                        None => serde_json::Value::Null,
+                        Some(token) => {
+                            let delta_khz =
+                                nvoc_core::parse_offset_delta(token).map_err(CliError::new)?;
+                            let step = nvoc_core::plan_offset_step(
+                                &settings,
+                                &nvoc_core::OffsetStepTarget::Domain(name.to_string()),
+                                delta_khz,
+                            );
+                            serde_json::to_value(&step)?
+                        }
+                    };
                     json!({
                         "domain": name,
                         // The backend's own P-state reading; this command's
@@ -76,6 +93,7 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "offset_khz": named.offset_khz,
                         "frequency_khz": named.frequency_khz,
                         "corroboration": named.corroboration,
+                        "plan": plan,
                     })
                 }
                 // Decoded by the shared `QueryThrottleReasons` operation (core

@@ -83,7 +83,11 @@ pub struct DeviceStatus {
 
 /// Capability flags for the settings surface, so a consumer can disable a
 /// control for the right reason instead of guessing.
-#[derive(Debug, Clone, Copy, Serialize)]
+///
+/// `Default` is the "nothing was asked yet" state: every flag false. It exists
+/// so a caller that only wants to fill in the flags it read does not have to
+/// write out flags it did not -- never as a claim about a backend.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct SettingsCapabilities {
     /// The backend can report the driver's current configuration.
     pub settings_read: bool,
@@ -288,7 +292,12 @@ pub struct ClockOffsetDomain {
 /// This deliberately contains only what the RM session actually reports, and
 /// names every configuration family it does *not* report with a reason. A
 /// missing family is never represented by a default-looking zero.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Default` is therefore the "nothing has been read yet" state, not a reading:
+/// every field is absent except the capability flags, which are false until a
+/// session fills them in. It is what lets a caller outside this crate build the
+/// projection by hand instead of having to spell out every field.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DeviceSettings {
     pub pstate: Option<u32>,
     /// Current enforced power limit (the live TGP wall) in mW.
@@ -649,6 +658,272 @@ pub fn unnamed_offset_reason(name: &str) -> String {
          A single bounded domain write is still the falsification path that settles a \
          domain no comparison can."
     )
+}
+
+/// The public domain names the entries accept, in the order the naming layer
+/// tries them. A name outside this list is rejected at parse time rather than
+/// silently becoming "unnamed": a typo must not read like a device finding.
+pub const PUBLIC_OFFSET_DOMAINS: [&str; 4] = ["graphics", "memory", "video", "processor"];
+
+/// Which record a dry-run step refers to.
+///
+/// Both forms exist because they prove different things. A public name is only
+/// usable where the naming layer corroborated it against the live clock (see
+/// [`NamedClockOffset`]). A device bit needs no corroboration: the document
+/// publishes a record for it and the caller names the device's own coordinate --
+/// which is exactly what the write's selection mask carries, so the bit form is
+/// the one that works before any naming.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OffsetStepTarget {
+    Domain(String),
+    DomainBit(u32),
+}
+
+impl OffsetStepTarget {
+    /// The request as the caller spelled it, for the report.
+    pub fn token(&self) -> String {
+        match self {
+            Self::Domain(name) => name.clone(),
+            Self::DomainBit(bit) => format!("bit:{bit:#x}"),
+        }
+    }
+}
+
+/// Why a dry-run step can or cannot be issued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OffsetStepVerdict {
+    /// The record is known and the step lands inside the window the driver
+    /// reported. It does *not* mean the step was applied.
+    Ready,
+    /// The offset channel was not read, so nothing is known about any record.
+    ChannelUnread,
+    /// A public name no record corroborated in this snapshot.
+    DomainUnnamed,
+    /// A device bit the document published no record for.
+    RecordAbsent,
+    /// The step is computable but the range block was not read, so the driver's
+    /// bounds are unknown and a *bounded* step cannot be claimed.
+    WindowUnknown,
+    /// The resulting offset would fall outside the reported window.
+    OutsideWindow,
+}
+
+/// What one requested offset change would do, decided from a read-only snapshot.
+///
+/// Nothing here writes. The point is to answer, before a write is worth issuing,
+/// the questions the write gate asks: which record the caller means, what it
+/// holds now, whether the requested step stays inside the window the driver
+/// reported, and -- when it cannot answer -- which of those facts is missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct OffsetStep {
+    /// The request as the caller spelled it (`graphics`, `bit:0x1`).
+    pub requested: String,
+    /// The device bit, once the target resolved to one.
+    pub domain_bit: Option<u32>,
+    /// The public name known for that bit in this snapshot, if any. Never
+    /// invented: it comes from [`NamedClockOffset`] only.
+    pub domain: Option<String>,
+    /// How the target was resolved, so a reader can judge the identification.
+    pub identity: String,
+    pub current_offset_khz: Option<i32>,
+    pub delta_khz: i32,
+    pub target_offset_khz: Option<i32>,
+    /// The window the range block reported, in kHz (absent when not read).
+    pub window_min_khz: Option<i32>,
+    pub window_max_khz: Option<i32>,
+    pub verdict: OffsetStepVerdict,
+    /// Why the verdict is what it is, in the terms of the deciding layer.
+    pub detail: String,
+}
+
+/// Plan one bounded offset step from a read-only snapshot.
+///
+/// This is the dry-run of the write path, and it is deliberately not a policy:
+/// the caller supplies the step (`delta_khz`), the device supplies the current
+/// value and the window, and the only judgements made here are the two the
+/// evidence supports -- is the record identified, and does the sum land inside
+/// the window the driver itself reported. `applied` is a property of the plan
+/// that carries these steps, never of a step.
+pub fn plan_offset_step(
+    settings: &DeviceSettings,
+    target: &OffsetStepTarget,
+    delta_khz: i32,
+) -> OffsetStep {
+    let mut step = OffsetStep {
+        requested: target.token(),
+        domain_bit: None,
+        domain: None,
+        identity: String::new(),
+        current_offset_khz: None,
+        delta_khz,
+        target_offset_khz: None,
+        window_min_khz: settings.clock_offset_limits_khz.as_ref().map(|w| w.min_khz),
+        window_max_khz: settings.clock_offset_limits_khz.as_ref().map(|w| w.max_khz),
+        verdict: OffsetStepVerdict::ChannelUnread,
+        detail: String::new(),
+    };
+
+    let Some(records) = settings.clock_offsets.as_ref() else {
+        step.identity = "nothing: the offset channel was not read in this snapshot".into();
+        step.detail = format!(
+            "the offset channel was not read, so the current value of {} is unknown; see the \
+             settings notes for the per-block outcome",
+            target.token()
+        );
+        return step;
+    };
+
+    // Resolve the request to a record. A name has to be corroborated; a bit is
+    // the device's own coordinate and only has to exist.
+    let record = match target {
+        OffsetStepTarget::Domain(name) => match settings.named_clock_offset(name) {
+            Ok(named) => {
+                step.domain = Some(named.name.clone());
+                step.identity = format!(
+                    "named by the same-snapshot comparison: {}",
+                    named.corroboration
+                );
+                records
+                    .iter()
+                    .find(|record| record.domain_bit == named.domain_bit)
+            }
+            Err(reason) => {
+                step.identity = format!("asked by name; no record matched ({})", reason);
+                step.verdict = OffsetStepVerdict::DomainUnnamed;
+                step.detail = reason;
+                return step;
+            }
+        },
+        OffsetStepTarget::DomainBit(bit) => {
+            let found = records.iter().find(|record| record.domain_bit == *bit);
+            let name = settings
+                .clock_offsets_named
+                .as_ref()
+                .and_then(|named| named.iter().find(|entry| entry.domain_bit == *bit))
+                .map(|entry| entry.name.clone());
+            step.domain = name.clone();
+            step.identity = match &name {
+                Some(name) => format!(
+                    "asked by device bit, which the same-snapshot comparison also named {name}"
+                ),
+                None => {
+                    "asked by device bit; no public name was corroborated for it in this snapshot"
+                        .to_string()
+                }
+            };
+            match found {
+                Some(_) => found,
+                None => {
+                    step.verdict = OffsetStepVerdict::RecordAbsent;
+                    step.detail = format!(
+                        "the clock document published {} records and none carries bit {bit:#x}",
+                        records.len()
+                    );
+                    return step;
+                }
+            }
+        }
+    };
+
+    let Some(record) = record else {
+        step.verdict = OffsetStepVerdict::RecordAbsent;
+        step.detail = format!(
+            "the clock document published no record for {}",
+            target.token()
+        );
+        return step;
+    };
+
+    step.domain_bit = Some(record.domain_bit);
+    step.current_offset_khz = Some(record.offset_khz);
+    let wanted = i64::from(record.offset_khz) + i64::from(delta_khz);
+    step.target_offset_khz = i32::try_from(wanted).ok();
+
+    let (Some(min), Some(max)) = (step.window_min_khz, step.window_max_khz) else {
+        step.verdict = OffsetStepVerdict::WindowUnknown;
+        step.detail = "the range block (0x20809025) was not read, so the driver's bounds are \
+                       unknown and a bounded step cannot be claimed"
+            .into();
+        return step;
+    };
+
+    if wanted < i64::from(min) || wanted > i64::from(max) {
+        step.verdict = OffsetStepVerdict::OutsideWindow;
+        step.detail = format!(
+            "{} {} kHz + {:+} kHz = {} kHz falls outside the reported window {}..{} kHz",
+            target.token(),
+            record.offset_khz,
+            delta_khz,
+            wanted,
+            min,
+            max
+        );
+        return step;
+    }
+
+    step.verdict = OffsetStepVerdict::Ready;
+    step.detail = format!(
+        "bit {:#x} holds {} kHz; {:+} kHz gives {} kHz, inside the reported window {}..{} kHz. \
+         Nothing has been written: the step is bounded and identified, which is what the write \
+         gate asks before a write is worth issuing",
+        record.domain_bit, record.offset_khz, delta_khz, wanted, min, max
+    );
+    step
+}
+
+/// Parse the dry-run target grammar every entry shares: one of
+/// [`PUBLIC_OFFSET_DOMAINS`], or `bit:<n>` for one of the device's own domain
+/// bits (decimal or `0x`-prefixed hexadecimal).
+pub fn parse_offset_target(token: &str) -> Result<OffsetStepTarget, String> {
+    let trimmed = token.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(rest) = lower.strip_prefix("bit:") {
+        let rest = rest.trim();
+        let (digits, radix) = match rest.strip_prefix("0x") {
+            Some(hex) => (hex, 16),
+            None => (rest, 10),
+        };
+        return u32::from_str_radix(digits, radix)
+            .map(OffsetStepTarget::DomainBit)
+            .map_err(|_| {
+                format!("{trimmed:?} is not a device bit: expected decimal or 0x-prefixed hex after \"bit:\"")
+            });
+    }
+    if PUBLIC_OFFSET_DOMAINS.contains(&lower.as_str()) {
+        return Ok(OffsetStepTarget::Domain(lower));
+    }
+    Err(format!(
+        "{trimmed:?} is neither a public domain ({}) nor a device bit (bit:<n>); the public \
+         names are the ones the naming layer can corroborate against a live clock, and a device \
+         bit is the coordinate the write's selection mask uses",
+        PUBLIC_OFFSET_DOMAINS.join(", ")
+    ))
+}
+
+/// Parse a step size: a signed integer in kHz, optionally suffixed `khz` or
+/// `mhz` (case-insensitive). The unit may not be omitted silently -- `khz` is
+/// the default, and the suffix exists so a caller can say `+8mhz` and mean it.
+pub fn parse_offset_delta(token: &str) -> Result<i32, String> {
+    let trimmed = token.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let (digits, scale) = if let Some(head) = lower.strip_suffix("mhz") {
+        (head, 1000i64)
+    } else if let Some(head) = lower.strip_suffix("khz") {
+        (head, 1i64)
+    } else {
+        (lower.as_str(), 1i64)
+    };
+    let value: i64 = digits.trim().parse().map_err(|_| {
+        format!(
+            "{trimmed:?} is not a step size: expected a signed integer in kHz, optionally \
+             suffixed \"khz\" or \"mhz\" (for example +8mhz or -2000)"
+        )
+    })?;
+    let khz = value.checked_mul(scale).ok_or_else(|| {
+        format!("{trimmed:?} overflows kHz: {value} x {scale} does not fit a 32-bit kHz value")
+    })?;
+    i32::try_from(khz).map_err(|_| format!("{trimmed:?} is outside the 32-bit kHz range"))
 }
 
 impl DeviceSettings {
@@ -2793,6 +3068,142 @@ mod tests {
             "{:?}",
             settings.notes
         );
+    }
+
+    /// The settings a plan is computed from: two records, one of them named by
+    /// the same-snapshot comparison, plus the window the range block reported.
+    fn planned_settings() -> DeviceSettings {
+        let mut settings = bare_settings();
+        settings.clock_offsets = offsets(&[(1, 1_575_000, -126), (0x10, 6_000_984, -126)]);
+        settings.clock_offset_limits_khz = Some(ClockOffsetLimits {
+            min_khz: -18_750,
+            max_khz: 18_750,
+            records: 3,
+        });
+        corroborate_named_offsets(
+            &mut settings,
+            &DeviceStatus {
+                graphics_clock_khz: Some(1_575_000),
+                memory_clock_khz: Some(6_000_984),
+                ..Default::default()
+            },
+        );
+        settings
+    }
+
+    #[test]
+    fn a_planned_step_is_ready_only_inside_the_window_the_driver_reported() {
+        let settings = planned_settings();
+        let step = plan_offset_step(&settings, &OffsetStepTarget::Domain("memory".into()), 8_000);
+        assert_eq!(step.verdict, OffsetStepVerdict::Ready);
+        assert_eq!(step.domain_bit, Some(0x10));
+        assert_eq!(step.domain.as_deref(), Some("memory"));
+        assert_eq!(step.current_offset_khz, Some(-126));
+        assert_eq!(step.target_offset_khz, Some(7_874));
+        assert!(
+            step.identity.contains("same-snapshot comparison"),
+            "{}",
+            step.identity
+        );
+        assert!(
+            step.detail.contains("inside the reported window")
+                && step.detail.contains("Nothing has been written"),
+            "{}",
+            step.detail
+        );
+
+        // The same request, big enough to leave the window, is refused with the
+        // numbers that decided it.
+        let out = plan_offset_step(
+            &settings,
+            &OffsetStepTarget::Domain("memory".into()),
+            -20_000,
+        );
+        assert_eq!(out.verdict, OffsetStepVerdict::OutsideWindow);
+        assert!(
+            out.detail.contains("-20126 kHz") && out.detail.contains("-18750"),
+            "{}",
+            out.detail
+        );
+    }
+
+    #[test]
+    fn a_planned_step_names_the_layer_it_could_not_resolve() {
+        let settings = planned_settings();
+        // A device bit the document published no record for.
+        let absent = plan_offset_step(&settings, &OffsetStepTarget::DomainBit(9), 1_000);
+        assert_eq!(absent.verdict, OffsetStepVerdict::RecordAbsent);
+        assert!(absent.detail.contains("2 records"), "{}", absent.detail);
+        // A public name no live clock corroborated.
+        let unnamed = plan_offset_step(&settings, &OffsetStepTarget::Domain("video".into()), 1_000);
+        assert_eq!(unnamed.verdict, OffsetStepVerdict::DomainUnnamed);
+        assert!(unnamed.detail.contains("not named"), "{}", unnamed.detail);
+        // A channel that was never read.
+        assert_eq!(
+            plan_offset_step(&bare_settings(), &OffsetStepTarget::DomainBit(1), 1_000).verdict,
+            OffsetStepVerdict::ChannelUnread
+        );
+        // A record that exists, but no reported window to bound a step with.
+        let mut windowless = planned_settings();
+        windowless.clock_offset_limits_khz = None;
+        let unbounded = plan_offset_step(&windowless, &OffsetStepTarget::DomainBit(1), 1_000);
+        assert_eq!(unbounded.verdict, OffsetStepVerdict::WindowUnknown);
+        assert!(
+            unbounded.detail.contains("0x20809025"),
+            "{}",
+            unbounded.detail
+        );
+    }
+
+    #[test]
+    fn a_device_bit_needs_no_name_and_reports_that_it_had_none() {
+        // The bit form is the one that works before any naming, so it must not
+        // borrow a name from elsewhere -- and it must say it had none.
+        let mut settings = bare_settings();
+        settings.clock_offsets = offsets(&[(4, 999_000, 300)]);
+        settings.clock_offset_limits_khz = Some(ClockOffsetLimits {
+            min_khz: -18_750,
+            max_khz: 18_750,
+            records: 3,
+        });
+        corroborate_named_offsets(&mut settings, &DeviceStatus::default());
+        let step = plan_offset_step(&settings, &OffsetStepTarget::DomainBit(4), -1_000);
+        assert_eq!(step.verdict, OffsetStepVerdict::Ready);
+        assert_eq!(step.domain, None);
+        assert_eq!(step.target_offset_khz, Some(-700));
+        assert!(
+            step.identity.contains("no public name was corroborated"),
+            "{}",
+            step.identity
+        );
+    }
+
+    #[test]
+    fn the_request_grammar_is_shared_and_rejects_typos() {
+        assert_eq!(
+            parse_offset_target("graphics"),
+            Ok(OffsetStepTarget::Domain("graphics".into()))
+        );
+        assert_eq!(
+            parse_offset_target(" BIT:0X10 "),
+            Ok(OffsetStepTarget::DomainBit(0x10))
+        );
+        assert_eq!(
+            parse_offset_target("bit:16"),
+            Ok(OffsetStepTarget::DomainBit(16))
+        );
+        // A typo must not arrive as "unnamed": it is refused, and the message
+        // says both accepted forms.
+        let typo = parse_offset_target("grphics").unwrap_err();
+        assert!(typo.contains("graphics") && typo.contains("bit:"), "{typo}");
+        assert!(parse_offset_target("bit:").is_err());
+
+        assert_eq!(parse_offset_delta("+8mhz"), Ok(8_000));
+        assert_eq!(parse_offset_delta("-2000"), Ok(-2_000));
+        assert_eq!(parse_offset_delta("1500khz"), Ok(1_500));
+        let bad = parse_offset_delta("fast").unwrap_err();
+        assert!(bad.contains("kHz"), "{bad}");
+        assert!(parse_offset_delta("99999999999").is_err());
     }
 
     fn bare_settings() -> DeviceSettings {

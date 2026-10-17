@@ -15,7 +15,9 @@
 
 use clap::ArgMatches;
 use nvoc_core::{
-    DeviceStatus, Error, GpuTarget, QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus, run,
+    DeviceSettings, DeviceStatus, Error, GpuTarget, OffsetStepTarget, QueryMacosRmInfo,
+    QueryMacosRmSettings, QueryMacosRmStatus, parse_offset_delta, parse_offset_target,
+    plan_offset_step, run,
 };
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -45,6 +47,61 @@ pub struct StockEvalOptions {
     pub metal_check: Option<PathBuf>,
     pub out: Option<PathBuf>,
     pub vulkan: VulkanArgs,
+    /// Preflight and plan only: no load, no verifier, no writes.
+    pub dry_run: bool,
+    pub plan: Vec<PlanRequest>,
+}
+
+/// One `--plan <target>=<delta>` request, already parsed with the grammar the
+/// core crate shares with the CLI and the Python bindings, so all three accept
+/// and refuse exactly the same requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanRequest {
+    pub target: OffsetStepTarget,
+    pub delta_khz: i32,
+}
+
+fn parse_plan_requests(values: &[String]) -> Result<Vec<PlanRequest>, Error> {
+    values
+        .iter()
+        .map(|value| {
+            let (target, delta) = value.split_once('=').ok_or_else(|| {
+                error(format!(
+                    "--plan {value:?} is not <target>=<delta>: expected e.g. --plan \
+                     graphics=+8mhz or --plan bit:0x1=-2000"
+                ))
+            })?;
+            Ok(PlanRequest {
+                target: parse_offset_target(target).map_err(error)?,
+                delta_khz: parse_offset_delta(delta).map_err(error)?,
+            })
+        })
+        .collect()
+}
+
+/// The dry-run plan: what each requested step would do, decided from the
+/// read-only snapshot. Pure, so the decision path is exercised without a device
+/// and without a write.
+fn dry_run_plan(settings: &DeviceSettings, requests: &[PlanRequest]) -> Result<Value, Error> {
+    let mut steps = Vec::with_capacity(requests.len());
+    for request in requests {
+        let step = plan_offset_step(settings, &request.target, request.delta_khz);
+        steps.push(
+            serde_json::to_value(&step)
+                .map_err(|e| error(format!("failed to serialise a planned step: {e}")))?,
+        );
+    }
+    Ok(json!({
+        "applied": false,
+        "settings_write": settings.capabilities.settings_write,
+        "requests": requests.len(),
+        "note": "Dry run: every step below comes from the read-only snapshot and nothing was \
+                 written. `ready` means the step names a record and stays inside the window the \
+                 driver reported -- not that it was applied. `settings_write` reports whether \
+                 this backend would write at all, so a ready step with settings_write = false is \
+                 a step waiting on the backend, not a failed one.",
+        "steps": steps,
+    }))
 }
 
 fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
@@ -78,6 +135,10 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         shells: matches.get_one::<u32>("vulkan-shells").copied(),
         iters: matches.get_one::<u32>("vulkan-iters").copied(),
     };
+    let plan_values: Vec<String> = matches
+        .get_many::<String>("plan")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default();
     Ok(StockEvalOptions {
         duration,
         interval,
@@ -85,6 +146,8 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         metal_check,
         out,
         vulkan,
+        dry_run: matches.get_flag("dry-run"),
+        plan: parse_plan_requests(&plan_values)?,
     })
 }
 
@@ -155,27 +218,17 @@ fn fps_tail(stdout: &[u8]) -> Vec<String> {
     lines
 }
 
-pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result<(), Error> {
-    if !cfg!(target_os = "macos") {
-        return Err(error(
-            "macos-eval drives the native NullMoth RM backend and is macOS-only",
-        ));
-    }
-    let gpu = match targets {
-        [gpu] => gpu,
-        [] => return Err(error("no macOS RM GPU is available for evaluation")),
-        _ => {
-            return Err(error(
-                "macos-eval evaluates exactly one GPU; pass a single --gpu selector",
-            ));
-        }
-    };
-    let opts = parse_options(matches)?;
+/// The load half of the stock evaluation, reused verbatim from stage 9. Split
+/// out so the dry-run mode skips it as a whole instead of reporting an empty
+/// summary as if a load had happened.
+struct LoadRun {
+    under_load: Value,
+    stressor: Value,
+    post: Value,
+    exit_code: Option<i32>,
+}
 
-    let info = run(gpu, QueryMacosRmInfo)?.output;
-    let settings = run(gpu, QueryMacosRmSettings)?.output;
-    let pre = run(gpu, QueryMacosRmStatus)?.output;
-
+fn run_bounded_load(gpu: &GpuTarget<'_>, opts: &StockEvalOptions) -> Result<LoadRun, Error> {
     // Bounded stock load: the original stage-9 Vulkan path, unmodified.
     let mut command = Command::new(&opts.stressor);
     command
@@ -234,9 +287,30 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         object.insert("throttle".into(), throttle_summary(&under_load));
     }
 
-    // Correctness: the rendering load only proves excitation; this verifier is
-    // the only bit-exact evidence (see stress-macos/README.md).
-    let verifier = match &opts.metal_check {
+    Ok(LoadRun {
+        under_load: under_load_report,
+        stressor: json!({
+            "exit_code": output.status.code(),
+            "elapsed_s": elapsed,
+            "fps_tail": fps_tail(&output.stdout),
+        }),
+        post: serde_json::to_value(&post)
+            .map_err(|e| error(format!("failed to serialise the post-load status: {e}")))?,
+        exit_code: output.status.code(),
+    })
+}
+
+/// Correctness: the rendering load only proves excitation; this verifier is
+/// the only bit-exact evidence (see stress-macos/README.md). A dry run has no
+/// load to verify and says so, rather than reporting a pass it never ran.
+fn run_verifier(path: Option<&PathBuf>, dry_run: bool) -> Result<Value, Error> {
+    if dry_run {
+        return Ok(json!({
+            "ran": false,
+            "reason": "dry-run: no load was run, so there is nothing to verify",
+        }));
+    }
+    Ok(match path {
         None => json!({"ran": false, "reason": "no --metal-check path supplied"}),
         Some(path) if !path.exists() => {
             json!({"ran": false, "reason": format!("verifier not found at {}", path.display())})
@@ -256,10 +330,56 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                 "stdout": String::from_utf8_lossy(&out.stdout).trim().to_owned(),
             })
         }
+    })
+}
+
+pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result<(), Error> {
+    if !cfg!(target_os = "macos") {
+        return Err(error(
+            "macos-eval drives the native NullMoth RM backend and is macOS-only",
+        ));
+    }
+    let gpu = match targets {
+        [gpu] => gpu,
+        [] => return Err(error("no macOS RM GPU is available for evaluation")),
+        _ => {
+            return Err(error(
+                "macos-eval evaluates exactly one GPU; pass a single --gpu selector",
+            ));
+        }
+    };
+    let opts = parse_options(matches)?;
+
+    let info = run(gpu, QueryMacosRmInfo)?.output;
+    let settings = run(gpu, QueryMacosRmSettings)?.output;
+    let pre = run(gpu, QueryMacosRmStatus)?.output;
+
+    // The preflight + plan mode stops here: no stressor, no verifier, no write,
+    // and the load sections stay null rather than becoming an empty summary.
+    let load = if opts.dry_run {
+        LoadRun {
+            under_load: Value::Null,
+            stressor: Value::Null,
+            post: Value::Null,
+            exit_code: Some(0),
+        }
+    } else {
+        run_bounded_load(gpu, &opts)?
+    };
+    let verifier = run_verifier(opts.metal_check.as_ref(), opts.dry_run)?;
+    // A `--plan` request is evaluated against the snapshot read above, whether
+    // or not a load follows it: the plan is about the state, not the load. In a
+    // dry run the section is always present, so an empty request list reads as
+    // "nothing was asked" rather than as a missing feature.
+    let plan = if opts.plan.is_empty() && !opts.dry_run {
+        Value::Null
+    } else {
+        dry_run_plan(&settings, &opts.plan)?
     };
 
     let report = json!({
         "schema": "nvoc/macos-stock-eval/1",
+        "mode": if opts.dry_run { "dry-run" } else { "stock-load" },
         "gpu": {
             "index": gpu.index,
             "gpu_id": gpu.id.0,
@@ -277,6 +397,8 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                 "shells": opts.vulkan.shells,
                 "iters": opts.vulkan.iters,
             },
+            "dry_run": opts.dry_run,
+            "plan_requests": opts.plan.len(),
         },
         "settings_written": false,
         "write_gate": "read-only: no candidate applied. The write path exists \
@@ -284,15 +406,13 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             pre-record, read-back and restore implemented; a write waits on \
             authorisation, a healthy post-reboot session, and the field identity \
             only the write itself can give. The measured window is reported in \
-            settings (see get-settings notes).",
+            settings (see get-settings notes), and a --plan request is evaluated \
+            against that same snapshot without writing anything.",
+        "plan": plan,
         "pre": pre,
-        "under_load": under_load_report,
-        "post": post,
-        "stressor": {
-            "exit_code": output.status.code(),
-            "elapsed_s": elapsed,
-            "fps_tail": fps_tail(&output.stdout),
-        },
+        "under_load": load.under_load,
+        "post": load.post,
+        "stressor": load.stressor,
         "verifier": verifier,
         "settings": settings,
     });
@@ -307,10 +427,10 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
     }
     println!("{pretty}");
 
-    if !output.status.success() {
+    if !opts.dry_run && load.exit_code != Some(0) {
         return Err(error(format!(
             "the Vulkan stressor exited with {:?}",
-            output.status.code()
+            load.exit_code
         )));
     }
     Ok(())
@@ -379,5 +499,65 @@ mod tests {
         let log = b"x\n1 fps\n2 fps\n3 fps\n4 fps\n5 fps\n";
         let tail = fps_tail(log);
         assert_eq!(tail, vec!["3 fps", "4 fps", "5 fps"]);
+    }
+
+    #[test]
+    fn plan_requests_use_the_shared_grammar_and_reject_typos() {
+        let requests = parse_plan_requests(&["graphics=+8mhz".into(), "bit:0x1=-2000".into()])
+            .expect("both forms are accepted");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0].target,
+            OffsetStepTarget::Domain("graphics".into())
+        );
+        assert_eq!(requests[0].delta_khz, 8_000);
+        assert_eq!(requests[1].target, OffsetStepTarget::DomainBit(1));
+        assert_eq!(requests[1].delta_khz, -2_000);
+
+        // A missing '=' is the flag's own error, a typo is the shared grammar's,
+        // and neither may arrive as a silently unnamed domain.
+        let no_delta = parse_plan_requests(&["graphics".into()]).unwrap_err();
+        assert!(
+            format!("{no_delta}").contains("<target>=<delta>"),
+            "{no_delta}"
+        );
+        let typo = parse_plan_requests(&["grphics=1".into()]).unwrap_err();
+        assert!(format!("{typo}").contains("bit:"), "{typo}");
+    }
+
+    #[test]
+    fn a_dry_run_plan_is_never_applied_and_says_whether_this_backend_writes() {
+        let settings = DeviceSettings {
+            clock_offset_limits_khz: Some(nvoc_core::ClockOffsetLimits {
+                min_khz: -18_750,
+                max_khz: 18_750,
+                records: 1,
+            }),
+            clock_offsets: Some(vec![nvoc_core::ClockOffsetReading {
+                domain_bit: 0x10,
+                frequency_khz: 6_000_984,
+                offset_khz: -126,
+            }]),
+            ..Default::default()
+        };
+        let requests = parse_plan_requests(&["bit:0x10=+8mhz".into(), "bit:0x9=+1mhz".into()])
+            .expect("parses");
+        let plan = dry_run_plan(&settings, &requests).expect("serialises");
+        assert_eq!(plan["applied"], json!(false));
+        assert_eq!(plan["settings_write"], json!(false));
+        assert_eq!(plan["requests"], json!(2));
+        assert_eq!(plan["steps"][0]["verdict"], json!("ready"));
+        assert_eq!(plan["steps"][0]["target_offset_khz"], json!(7_874));
+        // The second bit has no record, and the plan says which layer is missing
+        // instead of guessing a value for it.
+        assert_eq!(plan["steps"][1]["verdict"], json!("record_absent"));
+        assert_eq!(plan["steps"][1]["target_offset_khz"], json!(Value::Null));
+        assert!(
+            plan["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("nothing was written")),
+            "{}",
+            plan["note"]
+        );
     }
 }
