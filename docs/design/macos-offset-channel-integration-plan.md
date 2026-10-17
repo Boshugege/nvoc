@@ -122,7 +122,18 @@ The family may be reported as *implemented and measured* only when all of:
   GSP answering `NV_OK` with a zeroed structure would make `publish_live`'s
   "advancing" claim wrong -- i.e. exactly the fake-zero this project forbids.
   Not resolved here, because a healthy *idle* baseline has never been recorded:
-  an idle card may legitimately read 0. **Planned check:** immediately after the
+  an idle card may legitimately read 0.
+  *Sharpened 2026-10-17 with the header evidence (backend doc, "What the live
+  `pstate` value means"): the declared value set makes `0` = `UNDEFINED` /
+  `CLEAR_FORCED` and `P0` = `0x1`, the driver's own code never reads those
+  constants, and the word is filled by the GSP over the RPC path -- so the
+  healthy value can differ in base from the NVML index this project publishes
+  elsewhere, while the `P{n}` rendering asserts the index base. If a healthy
+  *idle* session reproduces the pre-wedge `1` for the same state, the zero is
+  explained by the wedge and the base question is answered together with it; if
+  it reproduces `0`, then either the base differs or the card really is
+  undefined while idle, and the rendering must be revisited rather than the
+  number. **Planned check:** immediately after the
   next restart, before any load, read `get-status --macos-rm` on the idle card;
   a non-zero heap or P-state there means the wedge was zeroing them. No code
   change is justified until that reading exists -- guessing here would be its own

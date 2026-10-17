@@ -87,6 +87,37 @@ set (`publish_all`).
 | live RM control | `pstate` | `NV2080_CTRL_CMD_PERF_GET_CURRENT_PSTATE`, re-read every sample |
 | live RM control | `memory_used_bytes` | `NV2080_CTRL_CMD_FB_GET_INFO_V2` heap size − heap free (the used/free pair nvml reports) |
 
+### What the live `pstate` value means (and why a zero is not a state)
+
+`currPstate` is the driver's raw word, and three facts have to be kept apart:
+
+* The SDK header declares its value set as a **bit set**:
+  `NV2080_CTRL_PERF_PSTATES_UNDEFINED` / `..._CLEAR_FORCED` = `0x0`,
+  `..._P0` = `0x1`, `..._P1` = `0x2`, … `..._P15` = `0x4000`
+  (`ctrl2080perf.h`), and the command's own doc comment points at that set.
+  So under the declared convention `0` means "undefined", **not** P0.
+* Nothing in the driver enforces that convention: the constants live only in that
+  header, and `src/nvidia` never references any of them (grep for `P0`, `P8`
+  and `UNDEFINED` there finds no use outside the SDK header).
+* The value is filled by the GSP over the RPC path, not by host code:
+  `subdeviceCtrlCmdPerfGetCurrentPstate_VF` (`kern_perf_ctrl.c:330`) calls
+  `RmRpcPerfGetCurrentPstate`, and the only host implementation in the tree
+  (`rpc.c:8944`) is the vGPU one, reading
+  `NV_VGPU_SHARED_MEMORY_POINTER_CURRENT_PSTATE`.
+
+Consequences, which are the implemented behaviour: the raw answer is published
+rather than a decoded name, and `0` is not turned into "P0" in prose. What is
+still asserted, and is therefore a parity question rather than a fact, is the
+`P{n}` rendering this project applies to the field (`cli/src/lib.rs:3043`,
+`cli/src/output.rs:342`), because on Linux `pstate` is the NVML index this
+project maps with `nvml_pstate_to_index` (`P0` → 0 … `P15` → 15, i.e. an index
+whose base is 0). The macOS value must not be assumed to share that base.
+
+The pair measured on this boot is what makes the question live rather than
+academic: the same command answered `1` before the wedge and `0` under it, and
+`0` is a value the declared set defines as "undefined". The healthy *idle*
+reading has never been recorded, so plan §6 keeps the check open.
+
 `memEcc` and `memRowRemap` are deliberately **not** carried: even with
 `NV00DE_RUSD_POLL_MEMORY` requested the 610.57.04 driver leaves both at
 `RUSD_TIMESTAMP_INVALID` on this board, so they would be permanent `null`
