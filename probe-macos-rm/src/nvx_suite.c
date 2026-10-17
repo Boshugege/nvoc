@@ -559,10 +559,11 @@ static void item_pstate(nvx_ctx *c)
              st == 0 ? "P%u" : "-", st == 0 ? ps : 0xffffffffu);
 }
 
-static void item_legacy_probes(nvx_ctx *c)
+/* Tier-B GET probes: IDs are campaign-sourced (see nvx_defs.h), layouts
+ * partially decoded. Read-only; verdicts measure firmware acceptance. Split
+ * out of the default battery so they only run on an explicit request. */
+static void item_tierb_reads(nvx_ctx *c)
 {
-    /* Tier-B GET probes: IDs are campaign-sourced (see nvx_defs.h), layouts
-     * partially decoded. Read-only; verdicts measure firmware acceptance. */
     static uint8_t buf[32 * NVX_VFPOINTS_RECORD_STRIDE];
 
     memset(buf, 0, NVX_RAILS_INFO_STRIDE);
@@ -588,6 +589,21 @@ static void item_legacy_probes(nvx_ctx *c)
              st == 0 ? "rec0 raw 0x%08x 0x%08x 0x%08x" : "-",
              st == 0 ? ((NvU32 *)buf)[0] : 0, st == 0 ? ((NvU32 *)buf)[1] : 0,
              st == 0 ? ((NvU32 *)buf)[2] : 0);
+}
+
+static void item_legacy_probes(nvx_ctx *c)
+{
+    item_tierb_reads(c);
+}
+
+int nvx_stage2_tierb_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.tierb", "tierb-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_tierb_reads(c);
+    return 0;
 }
 
 static void item_bios_sku(nvx_ctx *c)

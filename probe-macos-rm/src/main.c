@@ -59,6 +59,8 @@ static void usage(void)
         "  --stages <set>   stage subset, e.g. 012 (default 012); 3=writes, 4=loop, 5=channel smoke\n"
         "  --write          allow stage-3 write tests (boost / powerstate / EDPp)\n"
         "  --sample <sec>   run the 1 Hz telemetry loop for <sec> seconds\n"
+        "  --tierb-read     run the campaign-sourced read-only Tier-B GETs\n"
+        "                   (voltage rails + V/F points; explicit opt-in)\n"
         "  --jsonl <file>   also write every result/sample as JSON lines\n"
         "  --gpu <id>       attach explicit gpuId (default: first from CARD_INFO)\n"
         "  --quiet          suppress text detail, keep JSONL\n"
@@ -73,6 +75,7 @@ int main(int argc, char **argv)
     const char *stages = "012";
     const char *jsonl_path = NULL;
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
+    int tierb_read = 0;
     NvU32 gpuId = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -94,6 +97,7 @@ int main(int argc, char **argv)
             gpuId = (NvU32)value;
             explicit_gpu = 1;
         }
+        else if (!strcmp(argv[i], "--tierb-read")) tierb_read = 1;
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
         else if (!strcmp(argv[i], "--help")) { usage(); return 0; }
         else { usage(); return 2; }
@@ -165,6 +169,11 @@ int main(int argc, char **argv)
             fprintf(stderr, "unknown stage '%c'\n", *p);
             return 2;
         }
+    }
+
+    if (tierb_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_tierb_read(&g_ctx) != 0) rc = 1;
     }
 
     if (sample_sec > 0 && !strchr(stages, '4')) {
