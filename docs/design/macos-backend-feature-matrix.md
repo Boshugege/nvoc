@@ -1491,3 +1491,17 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 3. **可执行化**：`decode-clk-containers.py` 新增 `cross_check_rust_field_map()` 并接入 `--selftest`——**直接读两处 Rust 源**断言上述字段常量、断言工具打印的五个槽恰等于"该四字段加下一个减 `0x24`"、断言 `v1_marshalable` 仍覆盖 3/8/9、断言 V2 的 `BASE/STRIDE` 属另一代；任一侧漂移即报错（负向验证：打印槽 16→28 ⇒ `([8,12,20,24,28],[8,12,16,20,24])`）。门控写脚本候选顺序改为 **`+8` 先、`+44` 兜底**（只改脚本与注释，**未发写**）。
 4. **仍保留的不确定性（写进门槛前的最后一句）**：`0x24` 实测于兄弟容器，跨用到 `0x2080901b` 仍是一步跨容器。**最终裁决只能是**写入门槛满足后的单域最小步长写入＋**同字段回读**（写 dword 读回 `orig+delta`、其余值 dword 逐字节不变、恢复后整块逐字节相同），且**不以实时频率变化为判据**。
 5. **验证范围（如实）**：设备访问**仅 1 次只读 anchor**（`0x00000062`，uptime `1 day, 6:46`，无重启）；**零 SET、未提权**；未改 Rust/C ⇒ 不重跑构建；改动＝工具（Python）＋门控脚本注释＋纠错表 §50，三件与测试机 md5 一致。
+
+---
+
+### 追加九十一：阶段 11 第 5 项——三入口与后端的能力/范围/错误一致性审计，查实并修好两处（2026-10-18）
+
+按"后端已实现的面 × CLI/pynvoc/srv 三个入口"逐面核对，**查实两处真实不一致并修好**（commit `9925228`、`b9900ef`），其余三处"装不下/缺函数/跑不起来"点名为缺口并给出依据。**不改变任何一行既有分类**。
+
+1. **修好：pynvoc 的风扇与功耗入口在 macOS 上"一律拒绝"**。`query_fan_info`／`query_power_limits` 原把后端**硬编码 `"nvml"`**，而 `with_target` 先过 `ensure_backend_available()`（macOS 只放行 `macos-rm`）⇒ 两者各自的 macOS 分支是**死代码**，后端能答而入口一律拒绝 —— 正是本条禁止的第一种形态。改为按平台取默认（macOS `macos-rm`，其余平台仍 `nvml` ⇒ 非 macOS 逐字节不变）＋显式 opt-in 参数，并加回归测试把"旧值被拒"钉住。
+2. **修好：CLI 对 macOS 逐传感器范围的描述与实现相反**。`get-legacy-temp-sensor` 的说明仍称范围"null and not wired in"，而 `legacy_temp_sensor_report` 已在公开热读答复时回填 `min_c`/`max_c` 并区分"本次没读到/根本没接线"⇒ 描述低报了能力，已改写（`cargo test -p nvoc-cli --lib` 87 passed）。
+3. **一致性表（本轮核对结论）**：风扇 rpm（core `FanReport`／CLI `get-fan-info`／pynvoc 本轮修好／srv 由 `read_gpu_info_json` 输出 `fan_rpm`）＝**三入口可达**；功耗（请求值/墙/策略）同；温度读数（4 target）同；**域偏移读**（776 文档 `clock_offsets`）＝ core／CLI `get-pstate-global-freq-offset`／pynvoc `query_settings` 与 `plan_clock_offset_step`／srv 具名理由 ✔。srv 的两处 `None`（风扇占空比、功耗窗口）与 pynvoc 的写面拒绝都是**同一具名拒绝**、非静默 ⇒ 与后端一致。
+4. **点名缺口 1（缺失层＝客户端接口层）**：pynvoc **没有温度传感器/范围函数** ⇒ Python 入口拿不到 `TempSensorView` 的 `min_c/max_c/controller`。追加八十六 曾以"这 4 个读数经 `query_status` 出口"为由不新增函数——该理由覆盖**读数**，但 `status.sensors` 是 `(descriptor, temp)` 对，**不含范围**，而范围是追加八十八新接入的能力 ⇒ 缺口成立；core 已有该投影，补一个函数＋注册即可（下一步小步）。
+5. **点名缺口 2（环境/前置条件，不是协议）**：pynvoc 在测试机**无法链接**（`cargo build -p pynvoc` 报 `_PyBool_Type`/`_PyBytes_AsString` 未定义），因本机 `python3` 是 Xcode 3.9 且 **`Py_ENABLE_SHARED=0`**。⇒ Python 入口在 macOS **从未实跑**，其后端行为目前只有静态读码＋Linux 单测级证据；macOS 侧唯一可用验证是 `cargo check -p pynvoc`（本轮已过）。**不写成"pynvoc 不可用"**。
+6. **点名缺口 3**：srv 的类型面（`FanReading.percent`、`SensorBundle`、`MonitorSample.fan_pct`）装不下 rpm 与范围——不伪造百分比是**正确**的（注释已写明 rpm 在此结构无处安放），rpm 已由 `read_gpu_info_json` 输出；是否扩类型＝待决小步，非缺陷。`query_temperature_thresholds` 在 macOS 报平台级拒绝而 CLI 报"策略未发布"，同一拒绝、措辞不同，记为**待统一措辞**，本轮未动以免影响其他平台默认。
+7. **验证范围（如实）**：**0 次新 GPU 请求**（wedge 仍 `0x00000062`，uptime 1 day 6:53，未重启）；本机 `cargo check -p pynvoc` ✔／`clippy -p pynvoc -D warnings` ✔／`cargo test -p pynvoc --lib` 13 passed（含新测试）／`cargo check -p nvoc-cli` ✔／`cargo test -p nvoc-cli --lib` 87 passed；测试机 `cargo check -p pynvoc` ✔、`cargo build -p pynvoc` ❌（缺口 5，既有）。
