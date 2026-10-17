@@ -24,6 +24,10 @@
 #                     kept only 40 of its 106 changed dwords, so the full dump
 #                     below is still the authority.
 #   2. --clkctl-read  the wider battery; it refuses 0x20809026@5332 outright
+#                     (that call is the one that latched the 2026-10-17 wedge;
+#                     the in-tree NVAPI copy sizes this id at 2508 for its own
+#                     caller struct, so "the id is dangerous" would overstate it
+#                     -- it is the RM-sized form this battery stays away from)
 #                     and aborts on the first 0x65/0x62
 #
 # Nothing here is a write: the probe refuses every documented SET id before it
