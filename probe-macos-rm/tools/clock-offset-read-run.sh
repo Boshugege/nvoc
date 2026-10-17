@@ -29,6 +29,17 @@
 # A 0x62 anywhere means the GSP is still wedged from an earlier session and
 # the run has to stop until the machine is rebooted.
 #
+# Order matters after a reboot, and every step but the last one is a read:
+#   1. this script's first run answers whether the GSP is healthy again (a 0x62
+#      in its very first case means stop; do not retry the battery).
+#   2. `nvoc-cli get-settings --macos-rm` -- read-only, and the first look at the
+#      measured offset window and the offset domains on the real device. Those
+#      fields exist in the code and in pynvoc (asserted at -18750/+18750); the
+#      2026-10-16 stage-10 report predates them, so no device record shows them
+#      yet and this is what turns "implemented" into "measured".
+#   3. only then, and only with authorisation, the single gated write:
+#      sh tools/clock-offset-write-run.sh <bit>:<off>:<delta_khz>
+#
 # Usage:
 #   OGKM=/path/to/ogkm610 sh tools/clock-offset-read-run.sh [/path/to/outputs]
 #   (default output root: $HOME/Desktop/macOS-nvoc-develop/outputs)
