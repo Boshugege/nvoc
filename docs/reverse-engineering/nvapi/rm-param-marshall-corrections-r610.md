@@ -691,3 +691,36 @@ probe 里派生的 `0x2080206d`（RATED_TDP **status**）：SDK 未导出 CMD �
 与 336 **都不吻合** ⇒ 该私有行属于 **cooler/policy 面** ✔，但它**精确对应哪个客户端结构尚未定位** ✗。
 ⇒ 因此**风扇的恢复计划只能定为"先成功读到原值，再写回原值"** ✔——**不得假设存在一条恢复命令** ✔（这与客户端
 确有两个 `Restore*` 入口并不矛盾：那是 NVAPI 面，我们的 RM 私有行没有对应孪生 ✔）。
+
+## 13. 复制资料的封送规则正对本命令：**值 dword 只对固定的记录类型集合拷贝**；并给出一个可判定的槽位预测（2026-10-18）
+
+### 13.1 副本对 `0x2080901b` 的记载（与本项目读到的同一条命令）
+`nvapi-rs/src/clock.rs`（`ClkDomainControlEntry`）：*"One controllable clock-domain entry from the private
+ClockClient **GetControl (RM 0x2080901b, ID 0xF58938F5)**"* ✔；`bit` = 可控掩码位 = 域索引 = MEASURE_FREQ 的
+`domain_index` ✔；文章里的 XBAR 域 = `ClockDomainId::Xbar`（掩码位 `0x2`）✔。
+**最要紧的一条**：`value_modifiable` —— *"derived purely from the record **TYPE byte**, NOT a driver capability bit …
+the driver-side remap (`sub_18015BB30/BD20`) maps protocol ↔ internal types and the per-record switch **only copies
+value dwords for a fixed internal-type set**（V2 magic `0x261A4` → protocol `{1,3..=10,15}`；V1 `0x10964` → `{1,3..=9}`）。
+Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封送** —— SetControl 会**静默丢弃** —— 但这些时钟
+仍可能**可读**（MEASURE_FREQ/GetAllClocks）… **Readability and writability are independent per domain.**"* ✔
+⇒ 这就是"**值可能被静默丢弃**"的机制性依据 ✔（与本项目既有的"不得假设 type-03 记录接受写入"一致 ✔）。
+
+### 13.2 由该规则推出的**可判定预测**（供健康会话第一读直接判读）
+副本还写了两个版本读值 dword 的窗口：V2 从 `rec+268..296`（8 dwords）✔，**V1 回退从 `rec+44..60` 填 slot 0..4** ✔。
+本项目在 macOS 上**实测**的是十二个值 dword，位于记录相对偏移 `{8,12,16,20,24,28,32,36,40,44,52,56}` ✔。
+⇒ 若副本的 `rec` 与我们这个 64 B 记录同基，则 **V1 窗口 `44..60` 恰好覆盖我们那十二个里的最后四个 `{44,52,56}`（及 48）** ✔，
+而 **V2 的 `268..296` 完全落在 64 B 之外** ✗。由此得到**一条可在首次健康读取时立刻判定的预测**：
+**非零值只出现在末四个槽 ⇒ 主机走的是 V1 值窗口；前段槽位出现非零 ⇒ 另有布局** ✔。
+（注意前提：副本的 `rec` 是 NVAPI **调用方**记录（72 B），与我们的 64 B RM 记录**未必同基** ⇒ 该预测是**待验证**的，不作为结论 ✔。）
+
+### 13.3 一处**张力**（如实记录，不强行调和）
+副本的 `v1_marshalable` **包含类型 3** ✔，但本项目实测注释记载"**type 03 记录只写自己的 stamp、不写值 dword**" ✔
+（`probe-macos-rm/src/nvx_suite.c` 实测注释）⇒ 二者要么说的不是同一层的"type"，要么拷贝规则在另一层生效 ✗ ——
+**尚未定位** ✔。但结论方向一致：**收到 stamp 变化 ≠ 值被接受** ✔。
+
+### 13.4 写入门控的现状核对（goal 第 4/5 条）
+`settings_write` / `settings_restore` 在 macOS 后端定义 ✔、导出到 Python（`nvoc-python/src/lib.rs:1497-1499`，
+含等价的 `performance_writes` ✔）、并有测试断言 ✔（全树 19 处命中）。但**`cli/`、`auto-optimizer/`、`srv/` 里
+没有任何分支读它们** ✔ ⇒ 目前它是**被如实上报的能力标志**，**强制执行点尚未接线** ✔ ——这与"自动优化（阶段 10）
+尚未接到 macOS 后端"一致 ✔；**接线时就该在这里短路性能写入** ✔（本轮不提前改代码，遵循 goal 的
+"未完成代码不必为切换方向仓促提交" ✔）。
