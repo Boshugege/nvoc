@@ -470,8 +470,11 @@ window <= 0x300) give a *lead* and a *trap*:
   to proof: the handler is entered through a vtable slot (§4.1/§4.4), so there
   is no call edge from a literal id to these addresses, and a store-offset
   match does not identify a struct field. The `0x01010000` constant the head
-  writes at `+8` is not a usable anchor either -- `lui x, 0x01010` occurs 18+
-  times inside `0x4c00000..0x4ce0000` alone.
+  writes at `+8` is not a usable anchor either: `lui x, 0x01010` (= 0x01010000)
+  occurs **257 times** across `.text`, several of them as the `lui a5, 0x1010;
+  addiw a5, a5, 0x101` idiom that builds 0x01010101 for a byte-average, and the
+  rest as compare bounds.
+
 
 So the field identity in §4.3 stays where it was: *live blocks* plus the
 NVAPI-record correspondence, with the per-bit counter map (§4.2) as the
