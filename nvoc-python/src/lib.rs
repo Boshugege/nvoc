@@ -6034,17 +6034,27 @@ mod tests {
             (
                 "query_temperature_thresholds",
                 nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON,
+                // Names the layer: the opcode that would carry a threshold is
+                // not in the family this host answers, so the field is
+                // unlocated rather than absent.
+                "no severity/threshold opcode exists in the family this host answers",
             ),
             (
                 "query_pstates",
                 nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON,
+                // Names the layer: the read that could feed the table exists
+                // but is private, and the one measurement came back empty.
+                "not implemented here for want of a read source",
             ),
             (
                 "query_cooler_info",
                 nvoc_core::FAN_PERCENT_UNREADABLE_REASON,
+                // Names the layer: the field has no source, and inventing a
+                // scale is exactly what this backend refuses to do.
+                "would need an invented scale",
             ),
         ];
-        for (entry, reason) in cases {
+        for (entry, reason, layer) in cases {
             let text = source_less_message(entry, reason);
             assert!(
                 text.contains(reason),
@@ -6054,13 +6064,17 @@ mod tests {
                 !text.contains("NVAPI/NVML are not available"),
                 "{entry} must not blame the platform"
             );
-            // Every shared reason must name a layer rather than a verdict:
-            // "not located", "no source" or the entry that does answer.
+            // Each reason must name the layer rather than pass a verdict, and
+            // the three must not collapse into one sentence: the earlier
+            // get-settings run showed what a single shared sentence costs (an
+            // unread family reported as a missing one).
             assert!(
-                reason.contains("no source")
-                    || reason.contains("unlocated")
-                    || reason.contains("not implemented"),
+                reason.contains(layer),
                 "{entry}'s reason must name the layer: {reason}"
+            );
+            assert!(
+                reason != cases[0].1,
+                "{entry} must not reuse the first family's sentence"
             );
             if cfg!(target_os = "macos") {
                 assert!(refuse_without_source(entry, reason).is_err());
