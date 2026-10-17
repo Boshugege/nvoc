@@ -15,8 +15,8 @@ Five earlier claims were wrong and are corrected here:
 | "the responder is not located; TU116 runs host-side RM without GSP" | the responder **is the GSP firmware** reached by the host's legacy-non-privileged forwarding path |
 | "no GSP firmware file exists under `/Library/Extensions`, `/Library/NullMoth` or `/usr/local`" | the firmware lives at `/Users/Shared/nvfw/nvidia/610.57.04/{gsp_tu10x.bin,gsp_ga10x.bin,ucodes_*.bin}` — outside every path that was searched |
 | "the private ids have no implementation body on this machine" | they have none in the host NVOC table, but **169 CLK + 151 VOLT rows** exist in the GSP's own export table |
-| "`0x2080b201` is answered outside the GSP path" (first version of §7) | it is **not** host-side — the host has no CLK/VOLT row and no id literal at all (§7); it is answered by the GSP, which survives a wedge that kills its own category sibling `0x2080b202` |
-| "a `0x62` sweep tells host-implemented rows from GSP-dispatched ones" (first version of §6.1) | refuted by that same pair: the gate is **per command**, so `0x62` classifies a *gated handler/subsystem*, not a dispatch path (§7) |
+| "`0x2080b201` is answered outside the GSP path" (first version of §7) — reversed at 11:11Z, **restored at 11:29Z** | **host-side is right**: §12's anchor battery shows the legacy forward is *dead* (`0x2080a0ff` `0x56` -> `0x62`), so its `NV_OK` cannot be a GSP answer. The 11:11Z argument (no host row, no literal) does not follow from its own premises: a 0-hit search is not a proof of absence, and b201's `paramSize >= 2444` gate is one the NVOC exact-match gate cannot produce |
+| "a `0x62` sweep tells host-implemented rows from GSP-dispatched ones" (first version of §6.1) — reversed at 11:11Z, **restored at 11:29Z** | today it **does** separate them, because the forward is down: `0x62` means "this control needs the GSP". The 11:11Z "per command" reading came from a census that contained only CLK/VOLT ids; §12's `--reg-read` A/B shows public PERF/PMGR/thermal controls going `NV_OK -> 0x62` in the same window |
 
 The host table result is unchanged and still true: the loaded NVRM's NVOC
 export table has **1** CLK row (`0x20801037/6024`), **0** VOLT rows and **0**
@@ -692,25 +692,37 @@ also goes to the GSP — *including* ids that **are** in the host table. So bein
 registered in the host NVOC table does **not** mean the host answers a command;
 several registered perf/pmgr/clk rows are GSP-implemented too.
 
-**Correction (2026-10-17T11:11Z, §7).** The last sentence of the previous
-version — "a `0x62` sweep is therefore a cheap way to tell host-implemented
-rows from GSP-dispatched ones" — does not hold. `0x2080b201` answers `NV_OK`
-*while* its own category sibling `0x2080b202` answers `0x62`, in the same
-session, on the same forwarding path, and **neither** has a host handler (§7
-proves both facts from source and from the loaded binaries). A post-latch
-`0x62` therefore identifies a **gated handler/subsystem**, not a dispatch path;
-do not use it to classify host-vs-GSP.
+**Correction history.** The 11:11Z version of this paragraph withdrew the last
+sentence — "a `0x62` sweep is therefore a cheap way to tell host-implemented
+rows from GSP-dispatched ones" — because `0x2080b201` answered `NV_OK` while its
+category sibling `0x2080b202` answered `0x62` in the same session.
 
-## 7. `0x2080b201` survives the wedge: the gate is per command
+**Correction (2026-10-17T11:29Z, §12).** The oracle is **restored**: §12's
+anchor battery measures `0x2080a0ff` (the "forwarded, no such method" anchor)
+going `0x56 -> 0x62`, i.e. the forward step is broken, so *no* private id is
+GSP-answered and `0x2080b201`'s `NV_OK` puts it on the host side. The oracle
+holds **while the forward is down** — the condition that makes it useful — and
+must not be used to classify an answer that came through a *live* forward. The
+rest of the paragraph stands: three of the seven `0x62` ids above are in the
+host NVOC table, so registration is not a statement about who answers.
+
+## 7. `0x2080b201` survives the wedge because it is *host*-answered (anchor battery, 2026-10-17T11:29Z)
 
 While every GSP-forwarded id above answered `0x62 NV_ERR_RESET_REQUIRED`,
 `0x2080b201 @2444` kept answering `NV_OK` with its usual
 `mask 0xFF + 800000 µV / 756250 µV` payload — while *registered* GSP-backed
 commands like `0x2080200b` and `0x20802609` were `0x62` (see §6.1).
 
-**Correction (2026-10-17T11:11Z).** The first version of this section read that
-as "`0x2080b201` is answered *outside* the GSP path". Two measurements exclude
-it:
+**Correction history.** The first version read the contrast as "`0x2080b201` is
+answered *outside* the GSP path". At 11:11Z that was reversed, on the strength
+of the two measurements below, into "the gate is per command" — a reading that
+had *only* CLK/VOLT ids in its census. At 11:29Z the anchor battery (§12)
+refuted it: the legacy forward does not reach the GSP at all any more, so
+`NV_OK` from `0x2080b201` **cannot** be a GSP answer. The first version was
+right about the mechanism; what follows is what is still true of the two
+measurements that were used against it, and §12 is the evidence that settles it.
+
+Two measurements that were read as "therefore it is GSP-served":
 
 1. **The host has no handler for any CLK/VOLT private id.** The host's only
    deprecated-control rows are the eight in
@@ -731,7 +743,13 @@ it:
    `0x2080122a` twice. A host-side handler would have to compare against a
    literal; there is none.
 
-So `0x2080b201` is served by the GSP, and the wedge is **command-selective**.
+Those two measurements are real, but neither follows: point 1 shows the host has
+no *deprecated-table* row and no size check on the forward — not that a host
+path cannot exist elsewhere (the doc's own §10 rule: a 0-hit literal search, or
+a 0-hit extraction, is not a proof of absence; `0x2080b201` also accepts
+`paramSize >= 2444`, i.e. 2448/2480/2500/500008, which the NVOC gate in
+`control.c:448-458` *cannot* produce — a host gate that is not the NVOC gate is
+exactly what is needed, not what is excluded).
 `probe-macos-rm --tierb-read` (read-only, one zeroed block per id at the size
 the GSP's own table gives) now walks the whole VOLT (`0x32`) read half and
 records exactly that, in one session
@@ -744,15 +762,18 @@ records exactly that, in one session
 | `0x2080b205` `b207` `b209` `b210` `b211` `b212` `b213` `b214` `b216` `b217` `b218` | GSP table sizes | `0x62` (all eleven) |
 | `0x208090a2` vfpoints-get | 524 | `0x62` |
 
-Read that as: the private VOLT read half is not uniformly alive *or* uniformly
-dead; exactly one of the thirteen read ids still answers. Whether the gate sits
-in the host's physical-RM shim (a command-selective "GSP client reset pending"
-check) or in the GSP itself is **not** separated yet — both earlier readings
-("all legacy-forwarded ids die", "b201 is host-side") are excluded, this one is
-not. The pass therefore treats the two codes differently: `0x65
-NV_ERR_TIMEOUT` stops the pass (it is the latch of §6), `0x62` is recorded and
-the pass continues, because "which read faces still answer" *is* the
-measurement.
+Read that as: exactly one of the thirteen read ids still answers. That "one"
+is the whole point, and §12's anchor battery shows it is host-served: the
+`0x2080a0ff` negative anchor — *"forwarded, but the GSP has no such method"*,
+measured as `0x56` before the wedge — now also returns `0x62`. The forward step
+itself is broken, so nothing in that table comes from the GSP, and `NV_OK` can
+only have come from the host. The offset read the goal is after
+(`0x2080901b @2108`) returns `0x62` in the same session: it **is** GSP-served,
+and therefore it is unavailable until the machine is rebooted.
+
+The pass treats the two codes differently: `0x65 NV_ERR_TIMEOUT` stops the pass
+(it is the latch of §6), `0x62` is recorded and the pass continues, because
+"which read faces still answer" *is* the measurement.
 
 ## 8. Reproducing
 
@@ -889,7 +910,7 @@ absent, which is a *different* statement from "the driver does not know it".
 | 5 | `0x2080b213` | "voltage-rail control read" | GSP table @**1036** | `voltrails-family-full-layout-r610.md` | out: mask `0xFF` + `32 x 32` B records (all zero at stock) | `--tierb-read` (now walks the whole VOLT read half) | healthy: `NV_OK`; **wedged: `0x62`** |
 | 6 | `0x208090a2` | "all V/F paths fail" | GSP table @**524**, `flags 0x48` = **read** | — | read half of the `0xd0a3` pair | `--tierb-read` | it is a GET and *was* sendable; wedged: `0x62`. The old "all V/F paths fail" wording was wrong |
 | 7 | `0x20809025` | "offset range source" | GSP table @**7188** | same | `20 + 32*224`: `rec+8` = max VF kHz (`1638400`), `rec+20`/`rec+24` = `-18750`/`+18750` | `--clkctl-hex` | `NV_OK`; this is the **range**, not the current offset |
-| 8 | "`0x62` after the wedge tells host-implemented from GSP-dispatched" | — | refuted by §7 (b201 `NV_OK` vs b202 `0x62`, neither has a host row or literal) | — | — | `--tierb-read` | **correction**: the gate is per command |
+| 8 | "`0x62` after the wedge tells host-implemented from GSP-dispatched" | — | **holds again, and now with a separating instrument**: §12's anchor battery shows the forward itself is dead (`0x2080a0ff` `0x56` -> `0x62`), so today `0x62` == "this needs the GSP"; `NV_OK` from a private id then means host-served | the 11:11Z reading ("per command") is **withdrawn** | `--anchor-read` + `--reg-read` A/B | **correction of the correction**: `0x62` is a *having-a-live-GSP* oracle, not a per-command one; `0x2080b201` is host-answered |
 | 9 | "the write face is missing protocol / driver support" | — | host gate: `rmapi_gss_legacy_control.c` returns `0x1b` for `(cmd & 0xC000) == 0xC000` when `privLevel < RS_PRIV_LEVEL_USER_ROOT` | §2.1 | — | — | **correction**: what is missing is **privilege**; the GSP body exists (§4.4) |
 
 Two rules this table is meant to enforce, because both were violated by earlier
@@ -1040,3 +1061,90 @@ precondition that is one line of macOS glue (§11.4) and is satisfiable by uid 0
 — and behind it the *step/field* question of §11.3. It is not a protocol gap,
 not a missing firmware body (§4.4), and not a marshalling gap (the 2108 B
 geometry is measured on both halves).
+
+## 12. The anchor battery: the legacy forward is dead, so `0x2080b201` is host-answered
+
+New in this round: a four-request battery that separates *"this id needs the
+GSP"* from *"this id is answered on the host"* without a reboot. It sends only
+ids and sizes this host has already measured, so it is not a scan; all four are
+GET-only and three of them are anchors the rest of the suite already uses.
+
+```
+probe-macos-rm-idle --anchor-read          # bundle: outputs/anchor-20261017T112952Z/
+```
+
+| request | size | pre-wedge | 2026-10-17T11:29Z | reading |
+| --- | --- | --- | --- | --- |
+| `0x2080b201` volt rails **info** | 2444 | `NV_OK` | **`NV_OK`** (16 non-zero dwords, first @0 last @68) | answered, and *not* by the forward (below) |
+| `0x2080b202` volt rails **status** | 3232 | `NV_OK` | `0x62` | needs the GSP |
+| `0x2080a0ff` non-privileged, **no such method** | 776 | **`0x56`** | **`0x62`** | the forward no longer reaches the GSP at all |
+| `0x2080ffff` privileged bits, unprivileged caller | 776 | `0x1b` | `0x1b` | the host privilege gate still fires — it is *before* the forward and independent of it |
+
+The third row is the decisive one, and it is a *negative* anchor doing real
+work: `0x2080a0ff` used to prove "the forward works and the GSP answers 'no
+such method'". Now it answers `0x62`, i.e. the RPC step fails, so **no** private
+id can be GSP-answered in this session. `0x2080b201` answering `NV_OK` in the
+same block of four therefore places it on the **host** side. The fourth row
+confirms the host half of the legacy path is still being entered (the privilege
+check runs and returns its documented `0x1b`), so the failure is specifically
+the GSP RPC, not the host's `NV_ESC_RM_CONTROL` plumbing.
+
+### 12.1 The same picture from the public surface (`--reg-read` A/B)
+
+Twenty-two ids the loaded NVRM really registers, sent at their live NVOC
+`paramSize`, pre-wedge (`outputs/stage-reg-20261017T082800Z/`) vs now
+(`outputs/wedge-scope-20261017T112552Z/`). Seven changed, and all seven are the
+same subsystem:
+
+| id | 08:28Z | 11:25Z |
+| --- | --- | --- |
+| `perf-get-current-pstate` | `NV_OK` | `0x62` |
+| `perf-get-powerstate` | `NV_OK` | `0x62` |
+| `perf-level-info-v2` | `NV_OK` | `0x62` |
+| `pmgr-get-module-info` | `NV_OK` | `0x62` |
+| `perf-get-gpumon-util-samples` | `0x1f` | `0x62` |
+| `perf-get-vid-eng-perfmon` | `0x1f` | `0x62` |
+| `clk-pmumon-domains` | `0x56` | `0x62` |
+
+Unchanged and still answering: `fb-get-static-bar1-info` (`NV_OK`),
+`kgr-get-gfx-gpc-tpc-info` (`NV_OK`), `kgr-get-gpc-mask` (`NV_OK`),
+`fb-get-info-v2` / `gpu-get-info-v2` / `kgr-get-info` (`0x1f` = the handler ran
+and rejected the size), the `internal-*` ids (`0x56` = handler ran and refused),
+`timer-gpu-cpu-correlation` (`0x56`). The stage-2 battery says the same in the
+other direction: `fb-get-info-v2`, `fb-stats-get`, `perf-current-pstate`,
+`perf-get-powerstate`, `rated-tdp-get-control`, `gpumon-util-samples-v2`,
+`pmumon-clk-samples`, `perf-level-info-v2`, `rusd-page` and both thermal
+`EXECUTE_V2` forms were `NV_OK` before the wedge and are `0x62` now, while
+`bios-sku-info` and `bus-get-pci-info` (host deprecated-table rows) are still
+`NV_OK`.
+
+Two consequences worth keeping:
+
+* **`0x62` now outranks the parameter-size check.** `perf-get-gpumon-util-samples`
+  and `perf-get-vid-eng-perfmon` returned `0x1f` (size rejected) pre-wedge and
+  `0x62` now, i.e. the reset-required answer is produced **before** per-id
+  handler dispatch. So on this box today, "which ids still answer" measures
+  "which ids avoid the GSP", not "which handlers exist".
+* **The wedge is not CLK-scoped and not private-id-scoped.** It covers the
+  public PERF/PMGR/PMU and thermal surfaces too, which is why §9's remaining
+  probes (`--tupleb-read`, the VFP family, any new private id) cannot be
+  advanced on this session: they are all downstream of the same dead RPC.
+
+### 12.2 What is still open about `0x2080b201`
+
+If it is host-answered, the host path is *not* any of the three the repo knows:
+
+* not the 8-row `rmDeprecatedControlTable` (no CLK/VOLT row);
+* not the extracted 604-row NVOC export table (the id is absent from it, and
+  that table's gate is exact-size equality — `control.c:448-458` — while b201
+  accepts anything `>= 2444`);
+* not a literal-comparison handler (0 little-endian hits in every loaded host
+  binary).
+
+So there is a fourth host path for that id: a handler reached without a
+comparable literal and with a `>=` size gate. Naming it is an open item; the
+measurement above only fixes *which side* of the RPC it lives on. Until it is
+named, `0x2080b201` may **not** be used as evidence that a private id is
+readable "without the GSP", and the clock-domain offset read
+(`0x2080901b`, which is GSP-served and answers `0x62`) stays blocked on the
+reboot exactly as §6/§9 say.
