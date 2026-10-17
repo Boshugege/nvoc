@@ -1316,3 +1316,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (4) **配方** ✔：同一次 ssh 内先读 verdict、仅 `0x00000000` 才跑 `tools/clock-offset-read-run.sh` ✔（两次 ssh 间隔数秒＝本轮错过窗口的原因 ✗）；runbook 自带守门 ✔，首例 `0x62`/`0x65` 即停并声明 **nothing was written** ✔。
 (5) **导出表复核（口径降级）** ✗：本次 dump 实得 **1081 行**（与交接文档 1118 行差 37 ⇒ 待核 ✔）；`flags & 0x4000` 命中 **19 行**而 capture 的 `GET/SET` 列全标 GET ✗（`0x2080206f` flags `0x40048` 明明带 bit14 ✗）⇒ **该列不可作方向依据** ✔，方向只认逐条证据（处理函数名／set 身份 `(cmd & 0xC000)==0xC000`）✔，94 行 `SET` 一并降级为线索 ✔。
 (6) **设备访问** ✔：轮询 1＋诊断 1＋门控重试 3＋后台门控重试（每 60 s 一次 anchor，命中即跑只读 battery）⇒ 全只读 ✔，未重启、未写入、无性能 SET ✔。
+
+### 本轮追加七十六（2026-10-18，私有 id 空间结构由仓库内材料给出：写半边＝接口字节 +0x40、消息 id +1（304/304），并纠正三处算式）
+
+(1) **选择依据** ✔：原目标要求"从实际封送逻辑还原偏移 GET/SET""不得用'头文件搜不到'代替核对仓库已有材料"；且代码里流传一条**算术不成立**的孪生等式 ✗。
+(2) **约定来源** ✔：`ctrl2080thermal.h:136-137` 两行注释显示同一 MESSAGE_ID 配 `THERMAL_INTERFACE_ID`（得 `0x20800513`）与 `THERMAL_LEGACY_NON_PRIVILEGED_INTERFACE_ID`（得 `0x20808513`）⇒ **接口字节 bit7 ＝ legacy non-privileged 别名** ✔（与该仓库自带工具文档"0x80-0xBF category byte is the legacy non-privileged read half"一致 ✔）；`ctrl2080clk.h`／`clkavfs.h`／`fan.h`／`thermal.h` 均在 ✔，但 `0x2080901b`／`0x2080d01c` 及全部实测 THERMAL id **未在头文件声明** ✗ ⇒ 公开树给约定与公开半区，私有族名仍属尚未定位 ✔。
+(3) **写半边规则（实测）** ✔：read 半区 304 行中 **304（100%）** 的孪生指向写半区且低位 **+1**；低位相同的裸 `|0x4000` 命中 **0** ✗；write 半区 75 行 **75/75** 指回 read ✔；四族一致（THERMAL `852c→c52d`、`8540→c541`，CLK `901b→d01c`，PERF `a06e→e06f`）⇒ 规则＝**接口字节 +0x40（bit6）、消息 id +1** ✔。
+(4) **纠错** ✗：`0x2080D01C = 0x2080901B | 0x4000` 实际得 `0x2080D01B` ⇒ 已修三处面向用户的理由串（`core/src/macos_rm.rs:122`、`:364`、`cli/src/macos_rm.rs:20`）✔，结论（0xC0-0xFF 写半边在 root 以下被 `0x1b` 拒）依据实测 `0x1b` 与 host 表无特权行，不依赖该等式 ✔；同步修 `summarise-method-table.py` 的孪生枚举与文档（现先试相邻 id 再试裸形式 ✔；本机运行 ⇒ 71 对／同尺寸 43）✔。
+(5) **行数卫生** ✗：`gsp-table*.tsv`＝890 行、families capture＝1081 行、交接文档记 1118 行 ⇒ 三个不同 artifact；且 families capture **可证不完整**（304 个 read 行的孪生指向写 id，文件里仅 75 个写行存在）⇒ 引用行数必须写明文件 ✔。
+(6) **验证** ✔：本机 fmt rc0；`cargo test -p nvoc-core -p nvoc-cli -p nvoc-srv` ⇒ 82／94／53 passed、0 failed（36＋8 ignored 为 GPU 相关 ✔）；设备访问仅后台门控重试（attempt 1-4 皆 `0x62`）⇒ 未重启、未写入、无性能 SET ✔。

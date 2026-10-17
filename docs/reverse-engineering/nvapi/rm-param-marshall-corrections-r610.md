@@ -1400,3 +1400,26 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - `flags & 0x4000`（bit14）命中的行 ＝ **19 行** ✔，而该 capture 的 `GET/SET` 列把这 19 行**全标成 GET** ✗；但 `0x2080206f` 的 flags `0x00040048` 明明带 bit14 ✗ ⇒ **该列不是方向的可信来源** ✗ ⇒ 纠错：方向只认逐条证据（生成分发表的处理函数名如 `...SetControl` ✔，或 set 身份 `(cmd & 0xC000) == 0xC000` ✔）；该 capture 里 94 行 `SET` 同样**降级为线索** ✔。
 ### 41.5 设备访问 ✔
 本轮设备调用 ✔：轮询 1 次（`0x62` ✔）＋诊断 1 次 ✔＋门控重试 3 次（各 1 次 anchor ✔）＋后台门控重试（每 60 s 一次 anchor，命中即跑只读 battery ✔）⇒ **全部只读** ✔，未重启、未写入、无性能 SET ✔。
+
+## 42. 私有 id 空间的结构由**仓库内材料**直接给出：接口字节 + 消息 id，写半边是「+0x40 接口字节、+1 消息 id」（304/304 实测）2026-10-18
+
+**选择依据** ✔：原目标要求"从**实际封送逻辑**还原偏移 GET/SET""不得用'头文件搜不到'代替对仓库已有材料的核对"✔；第 41 轮把"某 capture 的 `GET/SET` 列"降级后又发现代码里流传着一条**算术上不成立**的孪生等式 ✗ ⇒ 本轮据仓库内材料与实测把它彻底定清 ✔。
+### 42.1 编码约定是 SDK 自己写出来的 ✔
+- `reference/open-gpu-kernel-modules-610.57.04/src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080thermal.h:136-137` 相邻两行 ✔：
+  `NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2 (0x20800513U)` ← `(…_THERMAL_INTERFACE_ID << 8) | …_MESSAGE_ID` ／ `NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2_PHYSICAL (0x20808513U)` ← `(…_THERMAL_LEGACY_NON_PRIVILEGED_INTERFACE_ID << 8) | 同 一 MESSAGE_ID` ✔ ✔
+  ⇒ 同一条消息 id、两个接口字节（`0x05` ／ `0x85`）✔ ⇒ **接口字节的 bit7 ＝ legacy non-privileged 别名** ✔（且该结构与 `probe-macos-rm/tools/summarise-method-table.py` 自带文档"a 0x80-0xBF category byte is the legacy **non-privileged** read half"完全一致 ✔）。
+- 同一目录下 `ctrl2080clk.h`／`ctrl2080clkavfs.h`／`ctrl2080fan.h`／`ctrl2080thermal.h` 都在 ✔（我早前几次检索用错了目录层级 ✗ ⇒ 已纠正 ✔）；但 `0x2080901b`／`0x2080d01c` 以及全部实测 THERMAL id **在这些头文件里都没有声明** ✗ ⇒ 公开树只给出**约定与公开半区** ✔，私有一族的名字仍属尚未定位 ✔ ✔。
+### 42.2 写半边规则：不是 `id | 0x4000`，而是**接口字节 +0x40 且消息 id +1** ✔
+- 实测（`gsp-families-610.57.04.txt`，本机复核 ✔）：read 半区（字节 `0x80-0xBF`）共 **304** 行 ✔，其中 **304 行（100%）** 的孪生列指向写半区（字节 `0xC0-0xFF`）且低位 **+1** ✔；低位**相同**的 `|0x4000` 形式命中 **0 行** ✗ ✔；write 半区 75 行，**75/75** 都指回 read 半区 ✔。
+- 四族一致 ✔：THERMAL `0x2080852c → 0x2080c52d` ✔、THERMAL `0x20808540 → 0x2080c541` ✔、CLK 偏移 `0x2080901b → 0x2080d01c` ✔、PERF `0x2080a06e → 0x2080e06f` ✔ ⇒ 规则 ✔：**写 id ＝ 读 id 的接口字节 +0x40（bit6）、消息 id +1** ✔。
+### 42.3 纠错：三处**面向用户的理由串**里那条等式是**算术错的** ✗
+- 原文：`0x2080D01C = 0x2080901B | 0x4000` ✗ —— 实际 `0x2080901B | 0x4000 = 0x2080D01B` ✗（消息 id 没进一）⇒ 与孪生列记的 `0x2080D01C` 差 1 ✔。
+- 已修 ✔：`core/src/macos_rm.rs` 的 `WRITE_NEEDS_PRIVILEGE_REASON`（L122）与写能力理由（L364）、`cli/src/macos_rm.rs` 的拒绝文案（L20）三处均改为按 42.2 的口径叙述 ✔（结论不变：0xC0-0xFF 的写半边在 root 以下被 host forwarder 以 `0x1b` 拒 ✔ —— 该结论的依据是**实测 `0x1b`** 与 host 表无特权行 ✔，不依赖原等式 ✔）。
+- 工具同修 ✔：`probe-macos-rm/tools/summarise-method-table.py` 的孪生枚举原来只试 `mid | 0x4000` ✗ ⇒ 现改为**先试相邻 id、再试裸形式** ✔ 并在文档串与输出行里写明 ✔（在本机对 `gsp-table-full.tsv` 运行 ⇒ 71 对、其中同尺寸 43 ✔）。
+### 42.4 行数卫生（三个 artifact、三个数）✗
+- `nvoc-analysis/gsp-table.tsv`／`gsp-table-full.tsv` ⇒ **890 行**（工具报 889 行有效 ✔）；`gsp-families-610.57.04.txt` ⇒ **1081 行**；交接文档记 **1118 行** ✗ ⇒ 三者是**不同 artifact** ✔。
+- 且 families capture **可证不完整** ✗：304 个 read 行的孪生指向写 id，但该文件里只有 **75** 个写行存在 ✔ ⇒ 引用"表的行数"必须同时写明**哪个文件** ✔ ✔。
+### 42.5 验证范围 ✔
+- 本机（客户端分析，不构建 ✔）：python3 跑修好的工具 ✔；awk 复核 304/304 与 0/304 ✔。
+- Rust 侧 ✔：`cargo fmt --all -- --check` rc 0 ✔；`cargo test -p nvoc-core -p nvoc-cli -p nvoc-srv` ⇒ **82／94／53 passed，0 failed**（GPU 相关 36＋8 ignored ✔）✔。
+- 设备访问 ✔：仅后台门控重试（每 60 s 一次 anchor 只读读 ✔，本轮 attempt 1-4 皆 `0x62` ✗）⇒ 未重启、未写入、无性能 SET ✔。

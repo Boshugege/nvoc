@@ -17,9 +17,14 @@ What it reports, each with counts rather than adjectives:
   * the `accessRight` column, which on this driver is 0 for every row but one --
     i.e. it does not encode the privilege that makes the write path refuse
     below root, so it must not be cited for that;
-  * read/write sibling pairs found by the id arithmetic (write = read | 0x4000),
-    split by whether the two paramSizes match, because a same-size sibling is
-    what makes "the SET block is the same struct" a supported reading.
+  * read/write sibling pairs found by the id arithmetic, split by whether the two
+    paramSizes match, because a same-size sibling is what makes "the SET block is
+    the same struct" a supported reading. The arithmetic is *not* a bare
+    `read | 0x4000`: clearing bit 14 lands on the sibling's category byte, but on
+    this driver the write row's message id is the read row's **plus one**
+    (0x2080901B -> 0x2080D01C, 0x2080852C -> 0x2080C52D), which is also the form
+    the dump's own twin column shows. Both candidates are therefore offered, and
+    the pair is reported only when one of them is a real row.
 
 Usage: summarise-method-table.py <table.tsv> [--pairs]
 """
@@ -87,12 +92,18 @@ def main(argv):
     for mid, size, flags, access in rows:
         if half(mid) != "read":
             continue
-        twin = mid | 0x4000
-        if twin in by_id:
-            pairs.append((mid, size, flags, twin, by_id[twin]))
+        # The sibling is not a bare `mid | 0x4000`: that flips the category byte
+        # into the write half but leaves the message id, while this driver's dump
+        # records the write row one message id higher (0x2080901B -> 0x2080D01C).
+        # Try the adjacent id first, then the bare form, and keep whichever is a
+        # real row.
+        for candidate in ((mid | 0x4000) + 1, mid | 0x4000):
+            if candidate in by_id:
+                pairs.append((mid, size, flags, candidate, by_id[candidate]))
+                break
     same = [p for p in pairs if p[1] == p[4][0]]
-    print(f"read ids with a present |0x4000 twin: {len(pairs)}; "
-          f"same paramSize: {len(same)}")
+    print(f"read ids with a present write sibling (adjacent id, then bare |0x4000): "
+          f"{len(pairs)}; same paramSize: {len(same)}")
     if "--pairs" in argv:
         for mid, size, flags, twin, (tsize, tflags, _) in pairs:
             mark = "same" if size == tsize else "DIFF"
