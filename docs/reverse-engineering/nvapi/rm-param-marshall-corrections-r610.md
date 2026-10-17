@@ -631,3 +631,38 @@ probe 里派生的 `0x2080206d`（RATED_TDP **status**）：SDK 未导出 CMD �
 本族我们**实际发出过**的读是 `NV2080_CTRL_CMD_INTERNAL_PERF_GPU_BOOST_SYNC_GET_INFO (0x20800a80)`（16 B），
 **实测返回 `0x56` = NOT_SUPPORTED** ✔ ⇒ 分类为**驱动明确拒绝** ✔（不是"调查未知"、更不是"命令不存在" ✔）。
 承载 volt-rails 控制的 **RM id 尚未定位** ✔（该副本给的是 NVAPI 侧接口名与 escape 家族，未给 RM id）。
+
+## 11. escape ↔ 端点映射（含一处对**我自己**亲近推断的纠正）与温度策略链的客户端定位（2026-10-18）
+
+### 11.1 温度"策略/上限"链已在客户端定位到接口级（缺的只剩 escape/RM 端点）
+在副本里查到该族的**真实调用点**（`gpu.rs:5676` 起）：
+`NvAPI_GPU_ClientThermalPoliciesGetInfo` ✔（`NV_GPU_CLIENT_THERMAL_POLICIES_INFO` —— 策略集）、
+`NvAPI_GPU_ClientThermalPoliciesGetStatus` ✔（`..._POLICIES_STATUS` —— 当前上限状态，即 §26 记录的 `ThermalLimit`）、
+`NvAPI_GPU_ClientThermalPoliciesSetStatus` ✔（写入面），以及私有的
+`NvAPI_GPU_ClientThermalPoliciesPrivateGetInfo` ✔（`..._PRIVATE_INFO`）。
+私有那条的注释记录了**策略索引的权威发现规则**：*"GPS index if the VBIOS exposes one, else the acoustics index
+(desktop fallback = NVML AcousticCurr), else None. ... replaces hardcoding idx 2. **RE'd from the ref-tool CLI
+`GPUHandle::queryTargetTemperature` (sub_14002C410)**"* ✔。
+⇒ 该族**缺的只有"这些 NVAPI 入口背后的 escape / RM 端点"** ✔，**尚未定位** ✔；定位方法与我们当年做 cooler
+那条（`0x07000038 → cmd 0x20800532`）**同法**：测量 escape 号 → 与 RM 方法表 id 对齐 ✔。
+
+### 11.2 escape 映射表（把已"命名/实测"的与"未命名"的分开）
+| escape | 归属 | 依据 |
+|---|---|---|
+| `0x07000002` | GetAllClockFrequencies | 注释点名 ✔ |
+| `0x0700004A` | VFP 曲线 | **在 391/Kepler 上内核未实现** ✔ |
+| `0x0700004F` | —— | **在 `0x0700004A` 不可用的地方成功**，注释称其为"通往 VFP 曲线的可行路径" ✔ |
+| `0x07000049` | 私有命令/SetControl | `SetControl (RM 0x2080D024, ID 0xFEC00D04)`，标注 **DANGEROUS V/F** ✔ |
+| `0x0700004E` | **GetBarInfo（PCI BAR 拓扑）** | 未加戳、只读、无能力门、无需提权 ✔ |
+| `0x07000053` / `0x0700006D` | volt / 其它只读面 | `0x07000053`（`fn(hGpu,width)`）、`0x0700006D`（0x3BD32008）✔ |
+| `0x07000038` | cooler | 与 `cmd 0x20800532` 对应（本项目实测 ✔） |
+**纠正**：我曾据"身处 volt 段落"推断 `0x0700004E` 属于电压族 ✗——实际读注释后确认它属于 **`GetBarInfo`** ✔。
+（教训与 goal 要求一致：近邻推断必须读原文确认 ✔。）
+
+### 11.3 电压族：**范围 / 原状态**证据已存在于副本，且是**在本机同型号卡上实测**的
+`VoltVoltDevicesGetInfo`（NDA `0xA38ACF9D`，stamp `0x10F48`）的注释写：它是 `volt_rails` 的**兄弟面**
+（"same escape family, different RM endpoint"），`VoltRails` 报**各轨实时墙**，而它报每个域的**可控窗口**
+（min/step/max/default µV），并直接给出**实测**：*"R465 live on the **1650 SUPER**: 300 mV / 6.25 mV /
+1300 mV / 1000 mV, matching the rail clamp floor"* ✔。
+⇒ goal 要求的"范围 / 原状态"证据**在同型号卡上已经有过一次** ✔（**R465** 时）；但本机驱动是 **R610** ⇒
+**必须重测、不得直接套用** ✔。该条已写入电压增强族的**用户可见成因串** ✔。

@@ -970,3 +970,13 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **四、电压增强族（最后未审计的读族）**：客户端侧是 **volt-rails control**（`NV_GPU_CLIENT_VOLT_RAILS_CONTROL{percent}` 的 Get/Set ✔）⇒ 此"boost"是**百分比** ✔；**不得**与 `BaseBoostMode`（base/boost **频率表**）、`set_dynamic_boost`（PPAB **使能**）、`NV2080_CTRL_CMD_PERF_BOOST`（**硬件 boost 动作**）混为一谈 ✔。我们实际发过的读 `0x20800a80`（16 B）**实测 `0x56` NOT_SUPPORTED** ⇒ 归类**驱动明确拒绝** ✔；承载 volt-rails 的 RM id **尚未定位** ✔。
 
 **验证范围**：本轮**无 Rust 改动**（仅文档），故未跑 cargo 门（上一轮同源齐套结果仍有效 ✔）；核对依据是本机方法表逐行查询与 SDK/副本源码（含表格数字）✔。**设备访问 1 次**（anchor 轮询）、**无写入、未提权**、客户端未构建 ✔。
+
+### 本轮追加三十九（2026-10-18，温度策略链定位到接口级 + escape 映射表 + 电压族"范围/原状态"既有实测）
+
+**一、温度策略/上限链已在客户端定位到**接口级**：`NvAPI_GPU_ClientThermalPoliciesGetInfo`（策略集）/`...GetStatus`（当前上限，即 `ThermalLimit`）/`...SetStatus`（写面）/私有 `...PrivateGetInfo`（`gpu.rs:5676` 起 ✔）。私有那条注释记录了**策略索引的权威发现规则**（GPS 索引 → 否则声学索引 → 否则 None；取代硬编码 idx 2；**RE 自参考工具 CLI `queryTargetTemperature`，sub_14002C410**）✔ ⇒ 该族**只剩"这些 NVAPI 入口背后的 escape/RM 端点"未定位** ✔（定位方法与 cooler 那条同法 ✔）。
+
+**二、escape 映射表（区分"已命名/已测"与"未命名"）**：`0x07000002`=GetAllClockFrequencies ✔；`0x0700004A`=VFP 曲线但**在 391/Kepler 内核未实现** ✔，而 `0x0700004F` **在它不可用处成功**（"通往 VFP 曲线的可行路径" ✔）；`0x07000049`=私有命令/`SetControl(RM 0x2080D024, ID 0xFEC00D04)`，标注 **DANGEROUS V/F** ✔；`0x0700004E`=**GetBarInfo（PCI BAR 拓扑）** ✔；`0x07000053`/`0x0700006D` ✔；`0x07000038`→cooler `cmd 0x20800532`（本项目实测 ✔）。**含一处对我自己推断的纠正**：`0x0700004E` 不属电压族 ✗（近邻推断反常，读原文后改正 ✔）。
+
+**三、电压族"范围/原状态"证据已存在且同型号实测**：`VoltVoltDevicesGetInfo` 报**可控窗口**（min/step/max/default µV），注释给出 **R465 在 1650 SUPER 上的实测：300/6.25/1300/1000 mV**（"matching the rail clamp floor"）✔ ⇒ 但本机是 **R610**，**必须重测不得套用** ✔。已写入该族用户可见成因串（并澄清该族**并非读盲**：客户端侧有 volt-rails 读面；我们实发的 `0x20800a80` 实测 `0x56` ⇒ **驱动拒绝**而非缺失 ✔）。
+
+**验证范围**：core 改动＝该族成因串；fmt clean、clippy（core/cli/auto-optimizer，`-D warnings`）无 error、core tests 89+5+15 全绿 ✔。**设备访问 1 次**（anchor 轮询）、**无写入、未提权**、客户端未构建 ✔。

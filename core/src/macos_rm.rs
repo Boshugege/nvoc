@@ -140,7 +140,7 @@ pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "the thermal family itself is 
 
 /// The boost path is a SET, so it sits behind the same gate as the write
 /// families; nothing about it has been read, and nothing is claimed.
-pub const VOLTAGE_BOOST_UNREADABLE_REASON: &str = "the boost path is a SET, so it sits behind the same write gate; no read of it is claimed (see notes)";
+pub const VOLTAGE_BOOST_UNREADABLE_REASON: &str = "the boost *write* is a SET and sits behind the same privilege gate -- but the family is not read-blind: the client side exposes a read of it as the volt-rails control (a percentage), and the read we actually issued is the internal boost-sync info, which the driver answered 0x56 NOT_SUPPORTED, so this is refused rather than absent; the in-tree copy also carries a controllable window measured live on this very card model at R465 (minimum 300 mV, step 6.25 mV, maximum 1300 mV, default 1000 mV, matching the rail clamp floor), which must be re-measured at R610 rather than reused; the RM endpoint behind the volt-rails escape is still not located (see notes)";
 
 /// The two clock-offset families are the one family where a summary sentence
 /// would overstate the gap: the driver answers a per-domain offset
