@@ -220,14 +220,29 @@ def check_geometry() -> None:
         assert header + 32 * stride == size, (hex(mid), size, header, stride)
 
 
+# (id, size) -> the case label the dump printed, so a report says which run it
+# came from when one capture holds the same block twice.
+BLOCK_LABELS: dict[tuple[int, int], str] = {}
+
+
 def parse_blocks(text: str) -> dict[tuple[int, int], bytes]:
-    """Pull every `(id, size) -> payload` pair out of a --clkctl-hex dump."""
+    """Pull every `(id, size) -> payload` pair out of a --clkctl-hex dump.
+
+    Two cases of the same (id, size) -- like 0x2080901d's zero background and its
+    0xA5 one -- land in the same slot and the later dump wins, so the case label
+    is kept alongside in BLOCK_LABELS and decode() prints it: which of the two
+    runs a report came from is not something a reader should have to infer from
+    the order of a file.
+    """
     blocks: dict[tuple[int, int], bytearray] = {}
     current: tuple[int, int] | None = None
     for line in text.splitlines():
         match = BLOCK_RE.search(line)
         if match and "hex follows" in line:
             current = (int(match.group(1), 16), int(match.group(2)))
+            label = re.search(r"V2\.clkctl\s+(.*?)\s+status", line)
+            if label:
+                BLOCK_LABELS[current] = label.group(1).strip()
             blocks.setdefault(current, bytearray())
             continue
         if current is None:
@@ -513,6 +528,86 @@ def _dwords(buf: bytes, limit: int) -> list[str]:
     return out
 
 
+A5_UNTOUCHED = 0xA5A5A5A5
+
+
+def written_offsets(buf: bytes) -> set[int]:
+    """Dwords the handler left something in.
+
+    On an 0xA5 background every dword it did not touch still reads 0xa5a5a5a5, so
+    the written set is visible end to end (including the dwords it wrote as
+    zero).  On a zero background only the non-zero writes are visible, which is
+    why this returns the set and the caller reports the background it saw.
+    """
+    out = set()
+    for off in range(0, len(buf) - 3, 4):
+        value = struct.unpack_from("<I", buf, off)[0]
+        if value not in (0, A5_UNTOUCHED):
+            out.add(off)
+    return out
+
+
+def report_one_d_stride(buf: bytes, out=sys.stdout) -> None:
+    """Say which 0x2080901d reading the bytes in front of it support.
+
+    Two readings are on the table (doc section 51.2): records 128 B apart (255 of
+    them) or 1020 B apart (the 32 the GEOMETRY split assumes).  Both copies of the
+    measured +12..+56 run are already known -- +12 and +140 -- so the decisive
+    measurement is the *third* occurrence: +268 follows from 128, +1160 from 1020.
+
+    An earlier version of this function scored how many written dwords have a
+    written neighbour at each lag.  Its own selftest caught it tying 24/36 to
+    24/36 with the third run sitting at +1160, so it now measures the one thing
+    the candidates disagree about instead of a proxy that can tie.
+    """
+    background = (
+        "0xA5 (untouched dwords stay 0xa5a5a5a5)"
+        if any(
+            struct.unpack_from("<I", buf, off)[0] == A5_UNTOUCHED
+            for off in range(0, len(buf) - 3, 4)
+        )
+        else "zero (only non-zero writes are visible)"
+    )
+    written = written_offsets(buf)
+    print(f"  stride: background {background}; {len(written)} dwords written", file=out)
+    if not written:
+        print(
+            "  stride: nothing written, so this dump cannot argue either way", file=out
+        )
+        return
+    first_run = [12 + 4 * i for i in range(12)]  # the measured +12..+56 dwords
+    anchor_run = [off + 128 for off in first_run]  # the same run again at +140..+184
+    anchor_visible = all(off in written for off in anchor_run)
+    if not anchor_visible:
+        print(
+            "  stride: the +140..+184 run is not fully visible in this dump, so the"
+            " third occurrence cannot be read off it -- this is the zero-background"
+            " case's blind spot, not evidence",
+            file=out,
+        )
+    for third, meaning in (
+        (268, "records 128 B apart (the run at +140 plus 128)"),
+        (1160, "records 1020 B apart (the +40 split plus 1020)"),
+    ):
+        state = "written" if third in written else "untouched/or zero"
+        print(f"  stride probe: +{third} is {state} -- {meaning}", file=out)
+    verdict = []
+    if 268 in written and 1160 not in written:
+        verdict.append("+268 alone => the 128 B period holds")
+    if 1160 in written and 268 not in written:
+        verdict.append("+1160 alone => the 1020 B record stride holds")
+    if 268 in written and 1160 in written:
+        verdict.append("both => one of them is a coincidence, not a table")
+    if not verdict:
+        verdict.append("neither => both readings are wrong, go back to the bytes")
+    print(
+        "  stride verdict: "
+        + "; ".join(verdict)
+        + f" (anchor run visible: {anchor_visible})",
+        file=out,
+    )
+
+
 def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
     """Print the header words and every non-zero record word of one block."""
     if mid not in GEOMETRY:
@@ -541,6 +636,11 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
         file=out,
     )
     print(f"  ({note})", file=out)
+    label = BLOCK_LABELS.get((mid, size))
+    if label:
+        print(f"  case: {label}", file=out)
+    if mid == 0x2080901D:
+        report_one_d_stride(buf, out)
     print("  head: " + (" ".join(_dwords(buf, header)) or "(all zero)"), file=out)
     named = NAMED.get(mid, {})
     populated = 0
@@ -986,6 +1086,52 @@ def selftest() -> int:
     odd = a5_block(0x1, rows=((1, 0x0B0B),) + RECORDED_ROWS[1:])
     assert "type unknown" in "\n".join(write_set_check(odd, 60, 64))
     assert write_set_model(0x1, rows=((1, 0x0B0B),) + RECORDED_ROWS[1:]) == (None, None)
+    # The stride question the next full dump has to answer, exercised both ways on
+    # the artifact a real one would look like (0xA5 background, so untouched dwords
+    # stay 0xa5a5a5a5 and every written one is visible).  A third occurrence at
+    # +268 must read as the 128 B period and one at +1160 as the 1020 B stride; a
+    # block that shows neither, or shows both, must say so instead of picking one.
+    import io
+
+    def one_d(thirds: tuple[int, ...] = (), background: int = A5_UNTOUCHED) -> bytes:
+        buf = bytearray(32680)
+        if background:
+            for off in range(0, len(buf) - 3, 4):
+                struct.pack_into("<I", buf, off, background)
+        for start in (12, 140, *thirds):
+            for index in range(12):
+                struct.pack_into("<I", buf, start + 4 * index, 0x00850800 + index)
+        return bytes(buf)
+
+    expectations = {
+        268: "+268 alone => the 128 B period holds",
+        1160: "+1160 alone => the 1020 B record stride holds",
+    }
+    for third, verdict in expectations.items():
+        sink = io.StringIO()
+        assert decode(0x2080901D, 32680, one_d((third,)), sink) == 0
+        text = sink.getvalue()
+        assert verdict in text, text
+        assert "(anchor run visible: True)" in text, text
+        assert f"+{268 if third == 1160 else 1160} is untouched/or zero" in text, text
+    for label, block, verdict in (
+        ("neither", one_d(), "both readings are wrong"),
+        ("both", one_d((268, 1160)), "one of them is a coincidence"),
+    ):
+        sink = io.StringIO()
+        decode(0x2080901D, 32680, block, sink)
+        assert verdict in sink.getvalue(), (label, sink.getvalue())
+    zero_bg = io.StringIO()
+    decode(0x2080901D, 32680, bytes(32680), zero_bg)
+    assert "nothing written, so this dump cannot argue either way" in zero_bg.getvalue()
+    # The blind spot of a zero background has to be named, not read as evidence:
+    # drop the anchor run and the third occurrence stops being readable.
+    hidden = bytearray(one_d((268,)))
+    for index in range(12):
+        struct.pack_into("<I", hidden, 140 + 4 * index, 0)
+    sink = io.StringIO()
+    decode(0x2080901D, 32680, bytes(hidden), sink)
+    assert "not fully visible in this dump" in sink.getvalue(), sink.getvalue()
     cross_check_rust_field_map()
     # The committed fixture is the whole point of the check above, so a missing
     # file is a failure here even though check_measured_repetition() treats it as

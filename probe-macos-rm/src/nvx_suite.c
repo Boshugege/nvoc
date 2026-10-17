@@ -2300,7 +2300,21 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
          * "rejected" reading was a size artifact: 524 is the GSP's value, not
          * 10x68 or 32x68).  Zero background, full dump. */
         { "vfpoints-get       0x208090A2 @524",  0x208090a2u, 524u,   ~0u, 0u, 0u },
+        /* 0x2080901d gets two cases, zero background first, because the 0xA5 one
+         * is the artifact that decides its record stride and must not be able to
+         * take the zero dump down with it.  On a zero background the handler's
+         * written zeros are invisible: the 2026-10-17 sweep showed 12 of the 13
+         * dwords per selected record written as zero at stock, so a zero dump can
+         * only show the stamps and the few non-zero fields.  Under 0xA5 untouched
+         * dwords stay 0xa5a5a5a5 and every written dword shows up, including the
+         * zeros -- which is exactly what the third-occurrence test needs
+         * (tools/decode-clk-containers.py report_one_d_stride()).  The licence is
+         * measured, not assumed: this id answered NV_OK under 0xA5 on 2026-10-17
+         * (352/8170 dwords changed), unlike 0x20809026, which latched the
+         * session-wide wedge and is refused by nvx_id_is_known_wedge(). */
         { "gc-1d             0x2080901D @32680", 0x2080901du, 32680u, ~0u, 0u, 0u },
+        { "gc-1d             0x2080901D @32680 bg=A5", 0x2080901du, 32680u,
+          ~0u, 0u, 0xa5a5a5a5u },
     };
 
     if (!c->hSubdevice) {
