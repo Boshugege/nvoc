@@ -12,8 +12,8 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 
 use nvoc_core::{
     BackendSet, DeviceStatus, FieldState, GpuId, GpuSelector, MacosRmSession, QueryMacosRmInfo,
-    QueryMacosRmStatus, QueryThrottleReasons, abi_layout, discover_targets, native_abi_layout,
-    nvapi_init_attempted, run, select_targets,
+    QueryMacosRmSettings, QueryMacosRmStatus, QueryThrottleReasons, abi_layout, discover_targets,
+    native_abi_layout, nvapi_init_attempted, run, select_targets,
 };
 
 fn count_fds() -> usize {
@@ -333,5 +333,64 @@ fn the_offset_channel_reports_domains_records_and_its_own_window() {
         }
         OffsetBlockRead::Refused(status) => refused("control 0x2080901b", *status),
         OffsetBlockRead::Malformed(err) => panic!("control malformed: {err:?}"),
+    }
+
+    // The naming layer, on the same device. This is the only place that can show
+    // which record a public name points at, and the assertion is deliberately
+    // one-sided: a name may be *absent* (that is a measurement: no record
+    // published this snapshot's live clock for that domain, or two did), but a
+    // name that is *present* must be a label on a record the raw read already
+    // published, never a number of its own.
+    drop(session);
+    let inventory = discover_targets(BackendSet::MacosRm).unwrap();
+    let targets = inventory.targets();
+    let target = targets[0];
+    let settings = run(&target, QueryMacosRmSettings)
+        .expect("the settings query folds the same offset channel")
+        .output;
+    match &settings.clock_offsets_named {
+        None => println!(
+            "naming: the offset channel was not read in this snapshot; see the settings notes"
+        ),
+        Some(named) => {
+            for entry in named {
+                println!(
+                    "named: {} -> bit {:#x}, published {} kHz, offset {:+} kHz ({})",
+                    entry.name,
+                    entry.domain_bit,
+                    entry.frequency_khz,
+                    entry.offset_khz,
+                    entry.corroboration
+                );
+                let published = settings
+                    .clock_offsets
+                    .as_ref()
+                    .expect("a named domain implies the channel was read")
+                    .iter()
+                    .any(|record| {
+                        record.domain_bit == entry.domain_bit
+                            && record.frequency_khz == entry.frequency_khz
+                            && record.offset_khz == entry.offset_khz
+                    });
+                assert!(
+                    published,
+                    "a name labels a record of this read: {entry:?} is not one of {:?}",
+                    settings.clock_offsets
+                );
+            }
+        }
+    }
+    // An unnamed domain must explain itself rather than answer with a zero.
+    for name in ["graphics", "memory", "video", "processor"] {
+        match settings.named_clock_offset(name) {
+            Ok(entry) => println!("{name}: bit {:#x}", entry.domain_bit),
+            Err(reason) => {
+                println!("{name}: not named -- {reason}");
+                assert!(
+                    reason.contains("not named") || reason.contains("was not read"),
+                    "the reason has to say which layer is missing: {reason}"
+                );
+            }
+        }
     }
 }
