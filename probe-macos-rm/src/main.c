@@ -106,6 +106,9 @@ static void usage(void)
         "                   mapping, boost-sync info; SET twins are not sent)\n"
         "  --thermal-read   read-only THERMAL_SYSTEM_EXECUTE_V2 GET batch\n"
         "                   (sensor count/readings/ranges; public opcodes)\n"
+        "  --perf-read      read-only perf/pmgr read-surface census: remaining\n"
+        "                   public GETs (module info, video-engine perfmon) plus\n"
+        "                   explicit skips for the ones that cannot be sent\n"
         "  --rated-tdp-set C:A   gated WRITE: set RATED_TDP client C to action A\n"
         "                   (needs --write; pre-record + readback + restore)\n"
         "                   C=RM|WAR|GLOBAL|OS|PROFILE or 0-4, A=DEFAULT|EXCEED|\n"
@@ -125,7 +128,7 @@ int main(int argc, char **argv)
     const char *jsonl_path = NULL;
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
-    int thermal_read = 0, pm_read = 0;
+    int thermal_read = 0, pm_read = 0, perf_read = 0;
     NvU32 rtdp_client = 0, rtdp_action = 0;
     NvU32 gpuId = 0;
 
@@ -152,6 +155,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--rated-tdp-read")) rated_tdp_read = 1;
         else if (!strcmp(argv[i], "--thermal-read")) thermal_read = 1;
         else if (!strcmp(argv[i], "--pm-read")) pm_read = 1;
+        else if (!strcmp(argv[i], "--perf-read")) perf_read = 1;
         else if (!strcmp(argv[i], "--rated-tdp-set") && i + 1 < argc) {
             if (parse_rated_tdp_set(argv[++i], &rtdp_client, &rtdp_action) != 0) {
                 fprintf(stderr, "invalid --rated-tdp-set spec (want CLIENT:ACTION)\n");
@@ -255,6 +259,11 @@ int main(int argc, char **argv)
     if (pm_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_pm_read(&g_ctx) != 0) rc = 1;
+    }
+
+    if (perf_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_perf_read(&g_ctx) != 0) rc = 1;
     }
 
     if (rated_tdp_set) {

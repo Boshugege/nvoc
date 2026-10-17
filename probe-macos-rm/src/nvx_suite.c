@@ -29,6 +29,7 @@
 #include "ctrl/ctrl2080/ctrl2080fb.h"
 #include "ctrl/ctrl2080/ctrl2080clk.h"
 #include "ctrl/ctrl2080/ctrl2080perf.h"
+#include "ctrl/ctrl2080/ctrl2080pmgr.h"
 #include "ctrl/ctrl2080/ctrl2080thermal.h"
 #include "ctrl/ctrl2080/ctrl2080gpumon.h"
 #include "ctrl/ctrl2080/ctrl2080internal.h"
@@ -929,6 +930,64 @@ int nvx_stage2_pm_read(nvx_ctx *c)
         return -1;
     }
     item_pm_reads(c);
+    return 0;
+}
+
+/* Public power/clock read-surface census (--perf-read).
+ *
+ * The default battery already exercises the PERF/CLK/THERMAL reads the
+ * telemetry path needs. This item closes the census for the *control* read
+ * question: "is there any public SDK read channel for offsets, voltages, fan
+ * limits or clock caps?". Every GET/INFO/STATUS/READ command in the public
+ * perf/pmgr/clk/thermal families is either probed here or recorded as an
+ * explicit SKIP with the reason it cannot be sent — so the answer is a
+ * complete list, not "we tried a few". */
+static void item_perf_reads(nvx_ctx *c)
+{
+    /* Subdevice module info: pure-output struct (static module id + whether
+     * NVSwitch is supported). */
+    NV2080_CTRL_PMGR_MODULE_INFO_PARAMS mi;
+    memset(&mi, 0, sizeof mi);
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PMGR_GET_MODULE_INFO, &mi);
+    nvx_emit(c, "V2.perf", "pmgr-get-module-info", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             st == 0 ? "moduleId 0x%08x nvswitchSupport %u" : "-",
+             st == 0 ? mi.moduleId : 0, st == 0 ? mi.nvswitchSupport : 0);
+
+    /* Video-engine perfmon sample: engineType in, busy% + sampling period out.
+     * Reaches the NVENC/NVDEC/NVJPG/NVOFA engines only. */
+    for (NvU32 eng = (NvU32)NV2080_CTRL_CMD_PERF_VID_ENG_NVENC;
+         eng <= (NvU32)NV2080_CTRL_CMD_PERF_VID_ENG_NVOFA; ++eng) {
+        NV2080_CTRL_PERF_GET_VID_ENG_PERFMON_SAMPLE_PARAMS vs;
+        memset(&vs, 0, sizeof vs);
+        vs.engineType = (NV2080_CTRL_CMD_PERF_VID_ENG)eng;
+        NvU32 st2 = SUBCTL(c, NV2080_CTRL_CMD_PERF_GET_VID_ENG_PERFMON_SAMPLE, &vs);
+        nvx_emit(c, "V2.perf", "perf-vid-eng-perfmon-sample", st2,
+                 st2 == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "engine %u -> busy %u%% period %u us",
+                 eng, st2 == 0 ? vs.clkPercentBusy : 0,
+                 st2 == 0 ? vs.samplingPeriodUs : 0);
+    }
+
+    /* Deliberately not sent; the reason is part of the census. */
+    nvx_emit(c, "V2.perf", "perf-level-info-v1", 0, NVX_V_SKIP,
+             "not sent: NV2080_CTRL_PERF_GET_LEVEL_INFO carries an NvP64 kernel "
+             "list, so it cannot be driven through this transport; the inline V2 "
+             "twin is probed as V2.15");
+    nvx_emit(c, "V2.perf", "perf-gpu-is-idle", 0, NVX_V_SKIP,
+             "not sent: despite the name the SDK documents it as a P-state "
+             "aggression notification (state-changing), so it is a write");
+    nvx_emit(c, "V2.perf", "perf-tegra-perfmon-sample", 0, NVX_V_SKIP,
+             "not sent: Tegra-only command, not applicable to this discrete GPU");
+}
+
+int nvx_stage2_perf_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.perf", "perf-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_perf_reads(c);
     return 0;
 }
 

@@ -68,6 +68,7 @@ OGKM=/path/to/ogkm python3 tests/test_idle_cli.py
 ./probe-macos-rm-idle --stages 0 --rated-tdp-read   # PERF_RATED_TDP_GET_CONTROL 全 client 扫描 + 越界反证
 ./probe-macos-rm-idle --stages 0 --thermal-read     # THERMAL_SYSTEM_EXECUTE_V2 只读批（传感器读数/范围）
 ./probe-macos-rm-idle --stages 0 --pm-read          # 内部 PM/PFM GET（PM1 状态/V-P-state 映射/boost-sync）；SET 孪生全不发
+./probe-macos-rm-idle --stages 0 --perf-read        # perf/pmgr 公开读面普查（模块信息、视频引擎 perfmon）+ 不可发送项的显式跳过
 ```
 
 **写入（门控）**：RATED_TDP 仲裁 SET 已实现为 V3.4，但**不随任何 stage 组运行**，必须显式同时给出

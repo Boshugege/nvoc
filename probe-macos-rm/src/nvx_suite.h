@@ -74,6 +74,10 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action);
 int nvx_stage2_thermal_read(nvx_ctx *c);
 /* Explicit, read-only internal PM/PFM GET probes (PM1, V/P-state, boost). */
 int nvx_stage2_pm_read(nvx_ctx *c);
+/* Explicit, read-only perf/pmgr read-surface census: the remaining public
+ * GETs plus explicit SKIPs for the ones this transport cannot or must not
+ * send (kernel-pointer v1 level info, the state-changing GPU_IS_IDLE). */
+int nvx_stage2_perf_read(nvx_ctx *c);
 int nvx_stage3(nvx_ctx *c);                    /* gated writes             */
 void nvx_stage4(nvx_ctx *c, int seconds);      /* sampling loop            */
 int nvx_stage5(nvx_ctx *c);                    /* channel smoke (GPU exec) */
