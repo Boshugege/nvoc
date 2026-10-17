@@ -187,10 +187,12 @@ uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *session, nvoc_rm_sample *
  * its command declares. The payload is valid only on a zero return: while the
  * GSP is in its reset-required state all three answer 0x62 instead of data, and
  * that refusal must never be rendered as a zero offset. */
-#define NVOC_RM_OFFSET_KINDS 3
+#define NVOC_RM_OFFSET_KINDS 4
 #define NVOC_RM_OFFSET_DIRECTORY 0 /* 12336 bytes: domain bit -> record type */
 #define NVOC_RM_OFFSET_RANGE 1     /* 7188 bytes: per-domain offset range, kHz */
 #define NVOC_RM_OFFSET_CONTROL 2   /* 2108 bytes: domain control, current values */
+#define NVOC_RM_OFFSET_CLOCK_DOCUMENT \
+    3 /* 776 bytes: per-domain frequency and current offset, kHz */
 uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, void *out,
                                       size_t size, char *error, size_t cap);
 

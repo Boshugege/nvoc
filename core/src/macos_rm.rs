@@ -362,7 +362,7 @@ fn block_outcome<T>(block: &str, read: &macos_offset::OffsetBlockRead<T>) -> Str
 ///   are not attributed to named domains, so the window is reported only while
 ///   every readable record agrees, and it carries how many records it came from.
 ///
-/// The outcome of all three blocks is recorded in one note, the way the rest of
+/// The outcome of all four blocks is recorded in one note, the way the rest of
 /// this projection reports evidence, so a caller reading `None` can see whether
 /// the block was never requested, refused, or did not look like a range block.
 fn apply_offset_channel(
@@ -375,6 +375,7 @@ fn apply_offset_channel(
         block_outcome("directory 0x20809019:", &channel.directory),
         block_outcome("range 0x20809025:", &channel.range),
         block_outcome("control 0x2080901B:", &channel.control),
+        block_outcome("clock document 0x20809061:", &channel.clock_document),
     ];
 
     // Which domains the driver is willing to offset at all. Reported as the
@@ -430,6 +431,35 @@ fn apply_offset_channel(
         }
         Refused(_) | Malformed(_) => {
             outcomes.push("no window is reported for this reason".into());
+        }
+    }
+
+    // The one block that publishes an offset rather than a window or a set of
+    // unlabelled dwords. It stays a note while the structured fields above stay
+    // reserved for blocks that name what they describe: the domain bits here are
+    // the driver's own, and only `0x10` can be named from the in-tree NVAPI copy
+    // (as MCLK, which the frequency agrees with), so promoting all eleven to
+    // named fields would be a guess about names rather than about values.
+    match &channel.clock_document {
+        Parsed(document) if document.entries.is_empty() => {
+            outcomes.push("the clock document carried no entry, so no offset is listed".into());
+        }
+        Parsed(document) => {
+            let listed = document
+                .entries
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "bit {:#x} at {} kHz with offset {} kHz",
+                        entry.domain_bit, entry.frequency_khz, entry.offset_khz
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            outcomes.push(format!("current offsets: {listed}"));
+        }
+        Refused(_) | Malformed(_) => {
+            outcomes.push("no offset is listed for this reason".into());
         }
     }
 
@@ -1768,6 +1798,7 @@ enum OffsetBlock {
     Directory,
     Range,
     Control,
+    ClockDocument,
 }
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -1777,6 +1808,7 @@ impl OffsetBlock {
             Self::Directory => 0,
             Self::Range => 1,
             Self::Control => 2,
+            Self::ClockDocument => 3,
         }
     }
 
@@ -1785,6 +1817,7 @@ impl OffsetBlock {
             Self::Directory => macos_offset::OFFSET_DIRECTORY_BYTES,
             Self::Range => macos_offset::OFFSET_RANGE_BYTES,
             Self::Control => macos_offset::OFFSET_CONTROL_BYTES,
+            Self::ClockDocument => macos_offset::CLK_DOCUMENT_BYTES,
         }
     }
 }
@@ -2044,7 +2077,7 @@ impl MacosRmSession {
     ///
     /// Read-only, so it is safe to call while the write gate is closed. Every
     /// block reports its own outcome, and the call needs a healthy GSP: while
-    /// the GSP is in its reset-required state all three come back
+    /// the GSP is in its reset-required state all four come back
     /// [`macos_offset::OffsetBlockRead::Refused`] with `0x62`, which must not
     /// be rendered as a value.
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -2061,6 +2094,11 @@ impl MacosRmSession {
                 self.handle,
                 OffsetBlock::Control,
                 macos_offset::parse_control,
+            ),
+            clock_document: read_offset_block(
+                self.handle,
+                OffsetBlock::ClockDocument,
+                macos_offset::parse_clock_document,
             ),
         })
     }
@@ -2324,6 +2362,7 @@ mod tests {
             directory,
             range: macos_offset::OffsetBlockRead::Refused(0x62),
             control: macos_offset::OffsetBlockRead::Refused(0x62),
+            clock_document: macos_offset::OffsetBlockRead::Refused(0x62),
         }
     }
 
@@ -2339,6 +2378,7 @@ mod tests {
                 macos_offset::parse_control(&[0u8; macos_offset::OFFSET_CONTROL_BYTES])
                     .expect("a zeroed block is a well-formed control block"),
             ),
+            clock_document: macos_offset::OffsetBlockRead::Refused(0x62),
         }
     }
 

@@ -423,6 +423,9 @@ pub struct OffsetChannelSnapshot {
     /// so a `Parsed` block means "no offset is applied" -- a measured zero,
     /// not a missing reading.
     pub control: OffsetBlockRead<OffsetControl>,
+    /// `0x20809061`: the per-domain clock document, the one block that publishes
+    /// an actual offset rather than a window or a set of unlabelled dwords.
+    pub clock_document: OffsetBlockRead<ClkDocument>,
 }
 
 #[cfg(test)]

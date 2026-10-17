@@ -585,10 +585,10 @@ uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *s, nvoc_rm_sample *out, s
 
 /* ---- private clock-offset channel ---- */
 
-/* These three commands are not in the open kernel modules' headers, so the ids
+/* These four commands are not in the open kernel modules' headers, so the ids
  * and the exact param sizes below are the probe's measurement on the device;
  * the driver rejects any other size. Only the GSP answers them, so while the
- * GSP is in its reset-required state all three report 0x62 instead of data. */
+ * GSP is in its reset-required state all four report 0x62 instead of data. */
 static const struct {
     uint32_t cmd;
     uint32_t bytes;
@@ -596,6 +596,7 @@ static const struct {
     {0x20809019u, 12336u}, /* domain directory */
     {0x20809025u, 7188u},  /* per-domain offset range */
     {0x2080901bu, 2108u},  /* domain control: the current values */
+    {0x20809061u, 776u},   /* clock document: frequency + current offset, kHz */
 };
 
 /* Byte offset of the control block's record-selection mask. The handler *reads*
