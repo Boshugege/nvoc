@@ -566,7 +566,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 Command::GetLegacyTempSensor,
                 CommandSpec {
                     formatter: Some(output::format_legacy_temp_sensor),
-                    ..CommandSpec::new("get-legacy-temp-sensor", Group::Thermal, "Read NVAPI legacy 3-sensor thermal view (GPU/Memory/Board, live + physical range); macOS RM reports the live reading of every sensor this backend knows (GPU/Memory/Board/PowerSupply, the driver's own target names), with the per-sensor physical range and controller null and the reason attached (the range is readable via 0x20800513 and is not wired into the snapshot yet)")
+                    ..CommandSpec::new("get-legacy-temp-sensor", Group::Thermal, "Read NVAPI legacy 3-sensor thermal view (GPU/Memory/Board, live + physical range); macOS RM reports the live reading of every sensor this backend knows (GPU/Memory/Board/PowerSupply, the driver's own target names), the per-sensor physical range when the public thermal read 0x20800513 answers for that sensor's target (it also names the driver's provider index for the sensor), and the per-field reason whenever a field stays null -- the range included, so a range that was not read this time and a range that is not wired in are told apart")
                 },
             ),
             (Command::GetPmgrArbiter, CommandSpec::new("get-pmgr-arbiter", Group::Perf, "Read the PMGR voltage-request arbiter values (0x717648FD, escape 0x0700019F)")),
