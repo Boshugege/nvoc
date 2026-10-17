@@ -1531,3 +1531,26 @@ goal 原文与交接 §4.1 都提到"旧工具静默丢了 229 行"；我此前�
 
 ### 46.6 验证范围与提交
 本机只读分析：**无 GPU 请求、未发 SET、未提权** ✔；取回工件放 `/home/lyy/work/nvoc-analysis/machine-recount/`（**不在仓库内** ✔）。仓库改动仅 `probe-macos-rm/tools/dump-gsp-families.py` 的 docstring（把 "lists 889 methods" 改为 1118 并写明丢弃原因，**机器可读输出未改**）。验证：`py_compile`＋工具自跑＋`ruff check`＋`git diff --check`。测试机本轮零 GPU 请求 ✔。
+
+## 47. 偏移记录的**身份**怎么定：同快照"发布频率 = 实时时钟"的比对，及其与"成功判据"的分界（2026-10-18）
+
+### 47.1 问题
+`0x20809019` 目录只标**位**（本设备用到 0..6 与 19..21），公开 OGKM 头文件没有任何 clock-domain 枚举，唯一交叉参考是 Windows/NVAPI 的 `NV_GPU_CLOCK_DOMAIN_ID`（0..6＝GPC/XBAR/SYS/HUB/M/HOST/DISP）⇒ 它只是**假设**。于是 `get-clock-offset --domain graphics` 这类"某一名字对应某一数值"的入口只能拒绝 ✗（§上轮记录）。
+
+### 47.2 可用的测量（本条的依据，非推断）
+时钟文档（`0x20809061`）每条记录同时给出**它持有的频率**与**它应用的偏移**；`get-status` 在同一快照里报出公开域的实时时钟。已录捕获中，至少两条记录的发布频率与同一会话 RUSD 报出的实时图形／显存时钟**逐位相同**（矩阵前文已录；显存那条＝bit `0x10`、`6000984 kHz`、offset `-126 kHz`）。
+
+### 47.3 规则（可实现、可证伪）
+名字只在**精确相等且唯一**时附加：`name` ← 唯一一条"发布频率 == 本快照该名字对应的实时时钟"的记录。无匹配、并列、或缺实时时钟 ⇒ **不命名**（并列时在 notes 写明"命名其中一条是选择而非测量"）。**失败方向恒为未命名，不是起错名** ✔。两个公开名可合法指向同一条记录（空载时图形与 SM 时钟常相同），此时两个名字都报出并附说明，不静默取其一 ✔。
+
+### 47.4 与"实时频率不得代替写成功"的分界（必须写清）
+本规则里实时频率**只用于决定名字指向哪条记录**，不参与"写是否生效"：报告的 `offset_khz` 仍是文档自己的字段，且比对的两个数字来自**同一快照**。也就是说，这是一次**身份用途**，不是成功判据 ✔ —— 成功判据仍只能是**写入后同字段回读**（`+8`／`+12`／`+16` 三选一仍尚未定位 ✗）。
+
+### 47.5 残余不确定性（不隐藏）
+- 4 个公开名字里，`processor` 对应 `get-status` 的 `sm_clock_khz`；`video` 对应 `video_clock_khz`。名字是**前端词汇**，不是设备域名的证明 ⇒ 证据串随名字返回，读者可自行否证 ✔。
+- 图形域在 boost 变化时可能**匹配不上**任何记录 ⇒ 该快照它保持未命名。这不代表"图形域没有记录"，只是"本快照没有可比对的相等值" ✔。
+- 该规则从未在设备上运行过 ⇒ 实现层面已离线验证（§47.6），设备层面归"已实现待实测" ✔。
+
+### 47.6 验证范围与提交
+改动：`core/src/macos_rm.rs`（`NamedClockOffset`、`corroborate_named_offsets`、`DeviceSettings::clock_offsets_named`、`DeviceSettings::named_clock_offset`、`unnamed_offset_reason`）、`core/src/lib.rs`（再导出）、`cli/src/macos_rm.rs`（`get-clock-offset` 入允许清单并按证据回答）、`nvoc-python/src/lib.rs`（投影 `clock_offsets_named`）。验证：`cargo test -p nvoc-core --all-targets` 98 passed／0 failed、`cargo test -p nvoc-cli` 83 passed／0 failed、workspace clippy `-D warnings` 干净、`cargo fmt --all -- --check` 干净；`pynvoc` 测试二进制在本机缺少 libpython 无法链接（`PyObject_Str` 等未定义）⇒ 其运行时验证归测试机。**本机与测试机两侧 sha256 逐文件相同** ✔；测试机本轮**零 GPU 请求**（仅只读门控重试第 11 次读数 `0x00000062`，未重启），**未发任何 SET** ✔。
+
