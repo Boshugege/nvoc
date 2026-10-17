@@ -595,3 +595,39 @@ probe 里派生的 `0x2080206d`（RATED_TDP **status**）：SDK 未导出 CMD �
 `NV2080_CTRL_PERF_RATED_TDP_STATUS_PARAMS_MESSAGE_ID = 0x6D` ✔，整份 SDK 里**没有** `0x2080206d` 字面量 ✔，
 1118 行方法表里也**没有**该行 ✔ ⇒ 该 id 是**由 message id 约定派生**、并在源码注释中如实标注为派生 ✔
 （未改动，仅记录）；因此它能否被主机表放行，由驱动而非表决定 ✔。
+
+## 10. 写入路径核对：门控写入用的 SET 行存在且尺寸与 GET 相同；`|0x4000+1` 约定**不通用**（2026-10-18）
+
+### 10.1 门控写入将要使用的 SET id（这是本轮最要紧的一条）
+对 `0x2080901b`（GET，paramSize **2108**，flags `0x48`）查其 `|0x4000+1` 孪生：
+`0x2080d01c` —— **在方法表里** ✔，paramSize **2108**（与 GET **完全相同**）✔，flags `0x44` ✔。
+⇒ 计划中的"单域最小步长"写入**不会因为 payload 尺寸与 GET 不一致而失败** ✔（两侧同为 2108 ✔），
+且 `0x2080d01c` 的 id 位（`0xd01c & 0xC000 = 0xC000`）确实落在 id 位写半边 ✔，与交接文档的写半边结论一致 ✔。
+（GET 与 SET 的 flags 只差 `0x08`/`0x04` 一位 ✔——这一点含义**尚未定位**，仅记录。）
+
+### 10.2 `|0x4000+1` 孪生约定**只在私有族成立、且不是普遍存在**（纠错）
+四个私有 id 逐一核对孪生是否在表中：
+| GET | paramSize | `|0x4000+1` 孪生 | 在表中？ |
+|---|---|---|---|
+| `0x2080901b` | 2108 | `0x2080d01c` | **在** ✔ paramSize 2108 |
+| `0x208090a2` | 524 | `0x2080d0a3` | **在** ✔ paramSize 524 |
+| `0x20809019`（目录） | 12336 | `0x2080d01a` | **不在** ✗ |
+| `0x20809025`（范围块） | 7188 | `0x2080d026` | **不在** ✗ |
+另外 `0x2080206e`（公开 GET）的 `|0x4000+1` = `0x2080606f` **不在**表中 ✗（它的 SET 是相邻的公开 `0x2080206f` ✔，见 §9.2）。
+⇒ **不要假设任何私有 GET 都有表内 SET 孪生** ✔；要用时先在表里确认 ✔。（与既有实测"该约定仅在 47 处出现"一致 ✔。）
+
+### 10.3 两处易混的 id（记录以免张冠李戴）
+- NVAPI 副本引用的 `SetControl` RM id **`0x2080D024`** 在表中存在，paramSize **66060** ✔——它是
+  **`0x20809024` 的孪生**，**不是**我们控制块的 `0x2080901b`/`0x2080d01c` ✔；尺寸也相去甚远 ⇒ 是**另一条命令** ✔。
+- 若干曾被我记为 rated-TDP 相关的 id **都不在方法表**：`0x2080f031` ✗、`0x20801acf` ✗、`0x2080206d` ✗
+  ⇒ 任何调用它们的路径依赖的是**派生**，不是表 ✔（`0x2080206d` 的派生在源码注释里已如实标注 ✔，见 §9.3）。
+
+### 10.4 电压增强族（最后一个未审计的读族）：客户端侧是"volt rails control"，且不得与另三样混为一谈
+客户端文档：`core_voltage_boost()` / `set_core_voltage_boost(Percentage)` ✔ 走
+`NvAPI_GPU_ClientVoltRailsGetControl` / `...SetControl` ✔，载荷是 `power::undocumented::NV_GPU_CLIENT_VOLT_RAILS_CONTROL { percent, .. }` ✔
+⇒ 所谓 boost 在这个族里是**一个百分比** ✔。**必须与下列三者区分**：`BaseBoostMode{Base=1, Boost=2}`（base/boost **频率表** ✔，见 `gpu.rs:946`）、
+`set_dynamic_boost(bool)`（PPAB / Dynamic-Boost **使能** ✔，见 `gpu.rs:4268`）、以及 `NV2080_CTRL_CMD_PERF_BOOST`
+（**硬件 boost 动作**，probe stage 3 已在发 `CMD_CLEAR`/`CMD_BOOST_1LEVEL`/`CMD_BOOST_TO_MAX` ✔）。
+本族我们**实际发出过**的读是 `NV2080_CTRL_CMD_INTERNAL_PERF_GPU_BOOST_SYNC_GET_INFO (0x20800a80)`（16 B），
+**实测返回 `0x56` = NOT_SUPPORTED** ✔ ⇒ 分类为**驱动明确拒绝** ✔（不是"调查未知"、更不是"命令不存在" ✔）。
+承载 volt-rails 控制的 **RM id 尚未定位** ✔（该副本给的是 NVAPI 侧接口名与 escape 家族，未给 RM id）。
