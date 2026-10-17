@@ -1336,3 +1336,151 @@ Three things this settles or sharpens:
   why a header grep can never find this surface, and why the GSP image is the
   only primary source for it.
 
+
+## 14. The lossless dumps correct the record: `0x2080901b` writes 13 dwords per record, and the mask is an entry selector (2026-10-17, static + already-recorded evidence)
+
+Everything below comes from files already on the test host (`outputs/offsweep-A5.txt`,
+`outputs/clkctl-hex.txt`, `gsp-table-full.tsv`) and from re-reading the GSP image
+locally. **No new GPU request was sent** — the GSP is still wedged (§6), so this
+section re-interprets recorded bytes rather than measuring new ones.
+
+### 14.1 §13.1's "the record only carries a type byte" is withdrawn
+
+`outputs/offsweep-A5.txt` line 32 declares, for `0x2080901b@2108` with the 0xA5
+background and `mask@+4 = 0xFF`:
+
+```
+NV_OK, 106/527 dwords changed (first @0 last @564)
+```
+
+and then prints only **40** of those 106 changed dwords. The two numbers are
+explained by exactly one model, and the 40 that survived agree with it:
+
+* 106 = 2 header dwords + **8 records x 13 dwords**; `mask 0xFF` selects 8
+  entries even though only 7 of bits 0..7 name a domain (see §14.3).
+* `last @564` = 60 + 7*64 + 56 = entry 7's `rec+56`, the last field of the
+  eighth record — with the same 64 B stride the block size already implies
+  (2108 = 60 + 32*64).
+* in the surviving print, per selected entry: `rec+0` becomes `a5a508 08` /
+  `a5a509 09` (the two type bytes, `rec+2/+3` untouched) and `rec+8 … rec+44`,
+  `rec+52`, `rec+56` all become **`00000000`**; `rec+4`, `rec+48` and `rec+60`
+  stay `a5a5a5a5`.
+
+So the handler writes twelve *value* dwords per record and they are zero at
+stock. The earlier reading — "V1 silently drops those records, the type dword
+is still written on GET, the value dwords never are" — is an artifact of the
+truncated delta printer, and it is withdrawn. `0x2080901b` is a live control
+record, not a stub.
+
+Consequence for the write gate: **G1 is still not obtained**, and the reason is
+now precise — the missing piece is the *field identity* (which of the twelve
+zero-valued dwords is `offset_kHz`), not the container and not the command. A
+zero-valued write set cannot name the field, so no SET has been sent and none
+will be until either
+
+1. the 0xA5 dump in the battery shows a non-zero value dword (then that dword
+   is a live field), or
+2. a single-domain minimal-step SET is followed by a same-field read-back and a
+   restore, which requires G0 (root, §11.4) and G5 (non-wedged GSP, §6).
+
+The instrument was fixed accordingly (commit `81ae055`): `--clkctl-hex`'s
+**first** case now runs `0x2080901b` with `mask@+4 = 0xFF` on an **0xA5
+background** — the one combination already measured `NV_OK` before the wedge —
+and prints the full 2108 B *plus* the number of dwords that differ from its own
+seed. The zero-background cases follow in the same order, so one run yields
+both the write set (0xA5) and the stock bytes (zero). The predictions for both
+are written into `nvx_suite.c` so the run confirms or falsifies them instead of
+illustrating them.
+
+### 14.2 Method-table completeness and the version mapping, corrected
+
+`pFunc` in the export table is **per command**: all 889 rows carry distinct
+`pFunc` values, each a ~30-instruction thunk of the same shape. So the table is
+complete per id — there is no row without code behind it — but the *body* is
+not at `pFunc`. The thunk resolves the class object and then dispatches through
+that object's vtable:
+
+| | `0x2080901b` (GET) | `0x2080d01c` (SET) |
+| --- | --- | --- |
+| object | `*(X + 0x10148)` | `*(X + 0x10150)` |
+| extra gates | none | 5 (`*(s1+0x2050)`, `*(a4+0x4f4)`, the object, `*(a0+0x20)`, `*(x+0x179)`) |
+| slot | `vtbl[0x38]` | `vtbl[0x28]` |
+
+`X = *(device + 0x1ff88)`. The consequence for "version mapping" is that the
+version/size a caller must present is a property of **the object the id resolves
+to**, not of the id — and therefore no size scan and no stamp scan can ever pin
+the record layout down: those experiments vary the caller's bytes while the
+object stays whatever it is. Only a read (what the handler writes) and a write
+(what the handler accepts) can.
+
+The RM block sizes are nevertheless authoritative in *both* directions, from
+the same table: GET `0x2080901b@2108` and SET `0x2080d01c@2108`. The larger
+"V2" form (24996 B, stamp `0x261A4`) exists in the Windows driver only; this
+firmware accepts 2108 and nothing else, so the V1/V2 question is settled as
+"this GSP has one form, and it is the small one".
+
+### 14.3 `0x20809019`'s records, decoded from the lossless 12336 B dump
+
+`outputs/clkctl-hex.txt` holds the complete zero-background dump of
+`0x20809019@12336`. Decoding it offline (`nvoc-analysis/dec9019*.py`) gives a
+geometry that matches the table exactly and a per-record map that is
+self-consistent across all ten populated entries:
+
+* 48 B header + **32 x 384 B records, packed in directory order** (not
+  bit-sparse): record *i* is at `48 + 384*i`, and only its first 0x50 bytes are
+  used — the remaining 0x130 B are zero for every entry.
+* header: `+0 = 0x000000FF`, `+4 = 0x000003FF`, `+8 = 0x335`,
+  `+12 = +20 = 0x0038007F`, `+16 = 0x03FC007F`, `+24 = 0x85`, `+28 = 5`,
+  `+36 = 0x000103E8`, `+40 = 0xFFFF0000`. Note `0x0038007F` is exactly the
+  domain-bit mask actually in use — bits 0–6 and 19–21.
+* record *i*:
+
+| off | value | note |
+| --- | --- | --- |
+| `+0` | `08 08` / `09 09` / `03 03` | type stamp, the low two bytes only |
+| `+2` | 0/1 | per-entry flag |
+| `+4` | domain bit | `1, 2, 0x10, 4, 8, 0x100000, 0x80000, 0x40, 0x200000, 0x20` |
+| `+28` | u16 pair | e.g. `0B 0B`, `17 17`, `0A 06`, `1A 1A` |
+| `+40` | `30000` | GPC (bit 0) entry only |
+| `+44`/`+46` | signed i16 pair | GPC `(-1000, +1000)`, bit 4 `(-1000, +3000)`, others `(0, 0)` |
+| `+48` | 4 bytes | e.g. `03 01 00 01`, last byte always 1 |
+| `+52` | `0xFFFF`/`0` | `0` on the type-`03` entry only |
+
+The domain bits come out in exactly the order §5.3 recorded
+(`0,1,4,2,3,20,19,6,21,5`) with the same type stamps — and **the same order and
+stamps the `0x2080901b` directory uses**. That is the second half of §14.1's
+model: entry *i* of `0x2080901b`'s `+4` mask selects the *i-th directory
+record*, and the domain bit is **data inside the record**, not a bit of the
+mask. It is why `mask 0xFF` fills 8 records while only 7 of bits 0..7 name a
+domain.
+
+Two cautions, both from this dump:
+
+* the `+44`/`+46` i16 pair is a *range-shaped* field (`(-1000, +1000)`,
+  `(-1000, +3000)`) but its unit is **not** yet fixed, and it must not be
+  conflated with `0x20809025`'s `-18750/+18750 kHz`, which is a different
+  container with a different record shape.
+* the R610.74 NVAPI fill loop documented in `nvapi-rs/sys/src/gpu/clock.rs`
+  reads its RM record at `+64` (type), `+68` (domain id), `+80`/`+84`
+  (range max/min) and `+88`/`+89` (VF-point indices). **None of those offsets
+  carries anything in this firmware's `0x20809019` record** — that region is
+  all zero, while the same fields sit at `+0`/`+4` and `+44`/`+46`. The
+  Windows-era field offsets must therefore not be transplanted onto the GSP
+  record family; any decoder has to be validated against a dump like this one.
+  This is the concrete form of the "version mapping" trap the goal warns about.
+
+### 14.4 Status (unchanged gates)
+
+| gate | state |
+| --- | --- |
+| G0 host privilege closure | resolved in source (`os-xnu.cpp:174` → `RS_PRIV_LEVEL_USER_ROOT`), **not yet exercised with root** |
+| G1 current offset | **not obtained**; 901b's twelve value dwords are all zero, field identity unknown |
+| G2 limit/range | `0x20809025`: ±18750 kHz per domain; `0x20809019 +44/+46`: per-domain signed pair, unit unfixed |
+| G3/G4 | not reached (need G1) |
+| G5 non-wedged GSP | **not satisfied**: GSP still answers `0x62` (uptime 21h40m at 2026-10-17T11:58Z) |
+| G6 SET field enumeration | enumerated, values unverified |
+
+No SET has ever been sent. No new id, size or stamp was scanned while producing
+this section; the one tool change adds a background to a case that had already
+answered `NV_OK`, so that the next run records the write set instead of losing
+66 of its 106 changed dwords to the printer.
