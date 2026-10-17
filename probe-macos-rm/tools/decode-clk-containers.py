@@ -117,6 +117,14 @@ NAMED = {
 # Blackwell field map says the frequency delta is VALUES[2].  So the current
 # offset is one of rec+8 / rec+12 / rec+16, and only a same-field readback
 # after a single-step SET can decide.  Printed as CANDIDATES, never as names.
+#
+# That +8..+24 mapping comes from one constant, 0x24, re-derived from the
+# recorded 0x20809025 payload: RM row +0x08/+0x14/+0x18 hold 1638400 / -18750 /
+# +18750, and the caller's named REC_MAX_KHZ/REC_MIN_OFFSET/REC_MAX_OFFSET sit at
+# +0x2C/+0x38/+0x3C -- three pairs, identical values, one delta.  It is a
+# FIELD-level constant only: caller TYPE(+0) vs the RM tag(+0) and caller
+# mask(+8) vs the RM mask(+4) do not follow it, and the struct geometry differs
+# (caller 100/72 against RM 60/64).  Hence candidates, not names.
 CANDIDATES = {
     0x2080901B: {
         8: "offset_khz?",

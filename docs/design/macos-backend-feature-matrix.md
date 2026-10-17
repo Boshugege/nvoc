@@ -752,3 +752,21 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **② 热学族公开面已实测，但族内仍有 31 条可读 id 未试**：`ctrl2080thermal.h` 417 行、2 个命令（`THERMAL_SYSTEM_EXECUTE_V2 = 0x20800513` 与其 `_PHYSICAL` 孪生 `0x20808513`）。已实测：`paramSize 1432` = 头文件结构 `6×u32 + 0x20×INSTRUCTION` 的**逐字节**算术（24 + 32×44 = 1432 ⇒ `INSTRUCTION` 恰 44 B：result@+0 / executed@+4 / opcode@+8 / 32 B operands@+12），故探针读到的 `exec`/`rc` 与头文件字段一一对应，将来任何 opcode 的偏移都不必猜。目标枚举里的 MEMORY(2)/POWER_SUPPLY(4)/BOARD(8) **有定义但未被实例化**（驱动自报 1 target/1 sensor）⇒ 显存/板卡温度缺失是**驱动无该对象**，不是工具没问。另：**更正**——先前用旧提取件（889 行，静默丢了 229 行）说"`_PHYSICAL` 孪生 `0x20808513` 不在表内"，改用**修正后的 1118 行**结果（`outputs/stage-gsp-table-recount-20261017T130832Z/gsp-table.tsv`）后：`0x20800513@1432`、`0x20808513@1432`（flags 0x10248）、`0x2080852e@1432` **三条都在**；因此"孪生由 host 侧回答"的推论**撤回**。该轮 `families.txt` 同时给出权威普查：1118 GSP 行 / 608 host 行 / 592 共享 / 526 仅 GSP，且按 `0x80|c`=非特权读半、`0xC0|c`=写半的编码计，`0x05 THERMAL` 为 **32 GET + 6 SET**——公开面只 1 条（`0x20800513`），其余 **31 条 `0x208085xx`** 均非特权读且 host 表里 1 条都没有，即固件侧、可经同一条旧式转发读到：**热学族的 id 面并未用尽**，这是风扇问题唯一"有依据"的下一步（族名来自分发表、paramSize 调用前已知 ⇒ 族内、带尺寸校验的只读遍查，不是盲扫）。
 
 **③ 风扇：公开控制空间里没有命令，界面的确存在但在上一层**。`ctrl2080fan.h` 是 **33 行的空生成桩**（全部内容＝license + `#pragma once` + `Source file: ctrl/ctrl2080/ctrl2080fan.finn` 注释，**零** define、**零** struct），且 token `NV2080_CTRL_FAN` 在整棵树里**一次都不出现**——这才把"文件被生成成空"与"我的 grep 写错了"区分开。风扇界面在 NVAPI 的 cooler API 里（nvapi-rs `sys/src/gpu/cooler.rs` 有完整记录）：`GetCoolerSettings` V1/V3/V4（152/1288/1368 B）、`SetCoolerLevels`、`RestoreCoolerSettings`、`GetTachReading`，cooler 类型 FAN/WATER/LIQUID_NO2，每 cooler 的 `currentLevel`/`currentMinLevel`/`currentMaxLevel`（百分比）、policy 枚举、`{speedRPM, bSupported, maxSpeedRPM, minSpeedRPM}` 转速表 ⇒ 上表要的"范围/原状态/恢复"字段**在该界面里是齐的**，缺的是"该界面在本驱动的 macOS 路径上映射到哪个可接受控制"。**形状旁证（非证明）**：GSP 表里没有任何一行的 paramSize 是 1288/1368，152 只出现在 4 个无关 id 上 ⇒ 该 cooler 界面在固件转发表里也**认不出来**（表无名字，故只能说形状）。
+
+### 本轮追加二十二（2026-10-17，把 0x24 坐标常数从"继承"改为"我自己重推"）
+
+**动机**：候选字段映射（`CANDIDATES`：offset 落在 rec+8/+12/+16 之一）整个建立在**一个**坐标常数上——"调用者侧字段坐标 − 0x24 = RM 侧坐标"。这条是上一轮会话继承来的，本轮用**已录字节**把它重推一遍，使依据可复核，而不是继续引用。
+
+**重推结果（全部来自 `clkctl-hex.txt` 的 `0x20809025` 原始块）**：该块（7188 B，头 `+0 ff +4 07 +8 0 +12 64 +16 100`，记录 `20 + 224*i`）是少数**带真实非零值**的块。三对字段同值、同差：
+
+| 调用者侧（nvapi-rs `clk_freq_ctrl_info_entry`） | RM 侧实测坐标与值 |
+| --- | --- |
+| `REC_MAX_KHZ = 0x2C` | RM 行 `+0x08 = 1638400`（1638.4 MHz） |
+| `REC_MIN_OFFSET = 0x38` | RM 行 `+0x14 = −18750` |
+| `REC_MAX_OFFSET = 0x3C` | RM 行 `+0x18 = +18750` |
+
+三处 delta **恰为 0x24**，且数值与调用者侧自带的注释（"live 1638400 = 1638.4 MHz"、"−18750 (freq offset floor, ±18.75 MHz pair)"）逐字吻合 ⇒ 三对独立字段、同值、同常数，属**推导**而非巧合。
+
+**但同时确定它的边界（不许过度外推）**：这是**字段级**常数，**不是整条记录的对齐**——同一对结构在其它坐标上并不遵守它：调用者 `TYPE` 在记录 `+0x00`，而 RM 行的 `+0x00` 是标签 `0x01030101`；调用者 mask 在 `+8`，RM mask 在 `+4`。结构级几何也不一致：`0x20809025` 调用者 base `0x4C`/stride `0x60` 对 RM base `20`/stride `224`；控制块调用者 base `100`/stride `72` 对 RM base `60`/stride `64`。故候选表**仍是候选**：该常数只给出"值得测的坐标"，真正命名"哪个字段装偏移"仍只能靠门控单域最小步 SET ＋ 同字段回读。
+
+**推论与一致性检查（记录在案，不算结论）**：套到控制块，常数预测 `OFFSET_KHZ→RM +0x08`、`RANGE_MIN→+0x0C`、`RANGE_MAX→+0x10`、`APPLIED→+0x14`，四个全部落在**实测会被驱动写入的 12 个 value dword**（`+8…+24`,`+28…+44`,`+52`,`+56`）之内——这是候选表需要的自洽性；也正是"offset 有 +8 与 +16 两个活候选"的来源（文章正文说第一槽，Blackwell 字段图说 `VALUES[2]`）。

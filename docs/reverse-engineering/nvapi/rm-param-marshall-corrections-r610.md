@@ -249,6 +249,46 @@ probe runbook's third case) -- index addressing predicts records for exactly one
 entry, i.e. 14 + 13 dwords for a value-carrying entry, while bit addressing for
 that same mask would select the entry stamped bit 0.
 
+### 5.3 The 0x24 coordinate constant, re-derived from the recorded bytes (field-level only)
+
+The candidate value map in this document and in `decode-clk-containers.py`'s
+`CANDIDATES` table rests on one constant: that a caller-side field coordinate
+minus 0x24 gives the RM-side one. That was inherited from the earlier session;
+this section re-derives it from the recorded payloads so the basis is checkable.
+
+`0x20809025` (7188 B, head `+0 ff +4 07 +8 0 +12 64 +16 100`, records at
+`20 + 224*i`) carries real values, unlike every control record at stock:
+
+| Caller-side field (nvapi-rs `clk_freq_ctrl_info_entry`) | RM-side coordinate and value in the recorded reply |
+| --- | --- |
+| `REC_MAX_KHZ = 0x2C` | RM row `+0x08 = 1638400` (1638.4 MHz) |
+| `REC_MIN_OFFSET = 0x38` | RM row `+0x14 = -18750` |
+| `REC_MAX_OFFSET = 0x3C` | RM row `+0x18 = +18750` |
+
+All three deltas are exactly 0x24, and the values match the caller's own recorded
+comments (`live 1638400 = 1638.4 MHz`, `-18750 (freq offset floor, +-18.75 MHz
+pair)`), which is what makes this a derivation rather than a coincidence: three
+independent field pairs, identical values, one constant.
+
+**What it does *not* license.** It is a *field-level* constant, not a
+whole-record alignment. The same structs disagree on other coordinates: the
+caller's `TYPE` is at record `+0x00` while the RM row's `+0x00` is the tag
+`0x01030101`, and the caller's mask is at `+8` while the RM mask is at `+4`. The
+struct-level geometry differs too -- caller base `0x4C` with stride `0x60` for
+`0x20809025` against RM base `20` with stride `224`, and for the control block
+caller base `100` with stride `72` against RM base `60` with stride `64`. So the
+candidate map stays a candidate: the shift gives *coordinates worth testing*, and
+only a same-field readback after one gated minimal-step SET can name the field
+that carries the offset.
+
+Applied to the control block, the constant predicts `OFFSET_KHZ` at RM `+0x08`,
+`RANGE_MIN` at `+0x0C`, `RANGE_MAX` at `+0x10` and `APPLIED` at `+0x14` -- all
+four inside the twelve value dwords the driver is measured to write (`+8 ... +24`,
+`+28 ... +44`, `+52`, `+56`), which is the consistency the candidate table needs
+and also the reason two different fields (+8 and +16) remain live candidates for
+"the offset": the article's prose says the first slot, the Blackwell field map
+says `VALUES[2]`.
+
 ### 5.2 The directory header carries both namespaces, which settles the mask's addressing
 
 Most of the individual facts here are already recorded elsewhere --
