@@ -97,12 +97,13 @@ PROFILE=full sh build.sh
 
 | 门槛 | 现状 |
 | --- | --- |
-| G1 能读到**当前偏移**（不是实时频率） | **未满足**。`0x2080901b@2108` 的 V1 记录只写类型字节（`08`/`09`），值 dword 全 0；`0x20809026@5332` 是已知 wedge id，被代码拒绝 |
+| **G0 该 id 对本客户端可达（特权门槛）** | **未满足，且不是软件问题**。写半区的 id 都带 `0xC000`（读 id `\|0x4000`），`RmGssLegacyRpcCmd` 在转发前要求 `privLevel >= RS_PRIV_LEVEL_USER_ROOT`，否则回 `0x1b`。本会话是非 root 客户端 ⇒ **GET 读面可达、SET 不可达**；提权不在授权边界内（`gsp-method-table-and-legacy-forwarding.md` §2.1/§9） |
+| G1 能读到**当前偏移**（不是实时频率） | **未满足**。`0x2080901b@2108` 的写图已实测（`A5` 值图：head 14 次写、每条记录 1 个 u16 类型戳 + 12 个 dword），但 stock 下**所有值槽都被写成 0**，所以无法区分「当前偏移恰好是 0」与「该 GET 不填值槽」⇒ 字段归属仍未确定；`0x20809026@5332` 是已知 wedge id，被代码拒绝 |
 | G2 能读到**范围** | 已满足：`0x20809025@7188` 的 `±18750 kHz`（单域） |
 | G3 能记录**原状态**并把同一字段写回 | 未满足（依赖 G1 的字段位置） |
 | G4 写步长有依据（最小步长） | **未满足**：`18750` 是范围端点，不是步长；步长可能来自同一容器的 steps 字段或驱动文档，**不允许猜** |
 | G5 GSP 私有路径可用 | **未满足**：当前整条 legacy 转发处 `0x62 NV_ERR_RESET_REQUIRED`（需用户重启；reload 需 root） |
-| G6 SET 侧的前置门（读面没有的那两道） | **未验证**：`0x2080d01c` 的 thunk 在调 handler 前还要求 `*(s1+0x2050)` 非空、其 `+0x4f4` 字节非零、且 `X->[0x1148]` 的 `+0x179` 字节**为零**（`docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md` §4.1）。这两个字节在 GSP 对象里，本工具读不到，所以「GET 成功」**不能**推出「SET 可用」；第一次写入必须把「被这两道门拒绝」列为可能的失败层次，并把返回码与 G1–G5 的失败码区分记录 |
+| G6 SET 侧的前置门 | **已枚举，运行时取值未验证**（`0x2080d01c` 的 pFunc `0x4d5c3c0` 反汇编，`docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md` §4.4）：G1 `*(s1+0x2050)!=NULL`、G2 其 `+0x4f4` 字节非 0、G4 `*(*(s1+0x1f88)+0x1150)!=NULL`、G5 该对象 `+0x20` 访问器非空 —— 四处回 `0x56`；G3 `x+0x179 != 0` 回 **`0x6c NV_ERR_GPU_IN_DEBUG_MODE`**。GET thunk 没有这些门。这些字节在 GSP 对象里、本工具读不到 ⇒「GET 成功」**不能**推出「SET 可用」；第一次写入必须把 `0x56`/`0x6c` 列为预期失败层次，并**逐码**记录（`0x6c` 归因到 G3、`0x56` 归因到 G1/G2/G4/G5，`0x1b` 归因到 G0 特权层） |
 
 ### 7.3 满足门槛后的单域最小验证（设计，未执行）
 
@@ -110,7 +111,7 @@ PROFILE=full sh build.sh
    同时按 G6 列出「SET 可能被 thunk 前置门拒绝」的假设与预期返回码——它不改变别的判据，只是让第一次
    非 `NV_OK` 有归属。
 2. 单域：只对一个域（例如显存域或域 0），并且只改**一个最小步长**；不整组、不 Boost、不搜索。
-3. pre-record → arm restore → SET `0x2080d01c{domain, offset=原值±1 step}` → **同一字段 GET 回读**
+3. （仅在 G0 被满足、即调用者处于特权级时）pre-record → arm restore → SET `0x2080d01c{domain, offset=原值±1 step}` → **同一字段 GET 回读**
    必须是新值（实时频率变化**不算**证据）。
 4. 立即 restore 原值 → 再 GET 回读必须等于原值；记录两步的回读字节。
 5. 中止判据：SET 非 `NV_OK`；回读不等于预期；restore 后回读不等于原值（最高优先级，立即停止并只读记录）；

@@ -62,6 +62,52 @@ Consequences, each of which matches a previously unexplained observation:
 * **`--service nvrm` and `--service nvaccel` answer byte-identically** — both
   user clients reach the same GSP.
 
+### 2.1 Privilege is encoded in the *id*, and every clock/voltage SET carries it
+
+`rmapi_deprecated.h:39-42` defines the legacy mask as a pair, not a single bit:
+
+```c
+#define RM_GSS_LEGACY_MASK                   0x00008000
+#define RM_GSS_LEGACY_MASK_NON_PRIVILEGED    0x00008000
+#define RM_GSS_LEGACY_MASK_PRIVILEGED        0x0000C000
+```
+
+and `RmGssLegacyRpcCmd` (`rmapi_gss_legacy_control.c:44-52`) gates on the
+privileged half **before** it looks at a single byte of the parameters:
+
+```c
+NV_ASSERT_OR_RETURN((pArgs->cmd & RM_GSS_LEGACY_MASK), NV_ERR_INVALID_STATE);
+if (((pArgs->cmd & RM_GSS_LEGACY_MASK_PRIVILEGED) == RM_GSS_LEGACY_MASK_PRIVILEGED) &&
+    (pSecInfo->privLevel < RS_PRIV_LEVEL_USER_ROOT))
+{
+    return NV_ERR_INSUFFICIENT_PERMISSIONS;
+}
+```
+
+So bit 15 alone means "forwarded, non-privileged", and bits 15+14 mean
+"forwarded, but only for a client at `RS_PRIV_LEVEL_USER_ROOT` or above",
+refused with `0x1b` before the GSP is consulted. That single line is the whole
+explanation of the long-standing `0x2080FFFF -> 0x1b` (§2) and of why no
+private **write** has ever been reachable from this un-privileged client: the
+write half of a private pair is, by construction, the read id with the
+privileged bit OR'd in. `0x2080901b` (read) vs `0x2080d01c` (write) is exactly
+`0x90 -> 0xd0`, i.e. `|0x4000`, *and* `+1` in the low byte.
+
+Counted over the GSP's own 889 rows (each of which is only ever reached *after*
+the host has decided to forward):
+
+| GSP table rows carrying | count | of which carry `0xC000` (privileged) |
+| --- | --- | --- |
+| the write flag (`flags & 0x04`) | 159 | 80 |
+| the read flag (`flags & 0x08`) | 513 | 9 |
+| the write flag **and** the legacy bit (15 set) | 82 | **80** |
+
+Of the 82 write ids the host will forward at all, 80 are privileged. The two
+exceptions are `0x2080854a` (2 B) and `0x2080b703` (75008 B); neither is a
+clock-domain or clock-offset control. Every clock/voltage SET identified by
+this effort — `0x2080d01c`, `0x2080d0a3`, `0x2080d024`, `0x2080f214` — is in
+the privileged 80. What that means for the write plan is in §9.
+
 ## 3. The GSP's own export table
 
 `gsp_tu10x.bin` is an ELF64 RISC-V image (`e_machine=243`) with the payload in
@@ -77,7 +123,11 @@ python3 probe-macos-rm/tools/extract-gsp-method-table.py \
 
 Row layout (32 B): `+0 methodId(u32) +4 paramSize(u32) +8 pClassInfo(u64)
 +0x10 pFunc(u64) +0x18 flags(u32) +0x1c accessRight(u32)`; pointers are image
-VAs. Category histogram puts **cat 0x10 (CLK) = 169 rows** and
+VAs. `flags` is the access class, and the low nibble picks the direction: `0x48`
+(read) or `0x44` (write), both carrying `0x40`. 368 rows are `0x48`, 121 are
+`0x44`, and 159 rows carry the write bit somewhere in their flags. That field
+is what decides whether a row is a *writer*, independently of any `+1` naming
+convention (§5.2). Category histogram puts **cat 0x10 (CLK) = 169 rows** and
 **cat 0x32 (VOLT) = 151 rows**, vs **1** and **0** in the host table.
 
 Authoritative `paramSize` for the ids this effort uses (GET unless marked):
@@ -223,6 +273,24 @@ lines by the then-current build; it shows, in address order, the writes
 first record) and then two 13-dword groups at `60+64k+{0,8,12,16,20,24,28,32,
 36,40,44,52,56}` for `k = 0, 1`.
 
+The same log is also the only record of the write *widths*, and they are not
+uniform — the delta lines show exactly which bytes moved under an all-`0xA5`
+pre-seed:
+
+| offset | value written | width |
+| --- | --- | --- |
+| `+0` | `0xff` | **u8** (`a5a5a5a5 -> a5a5a5ff`: only byte 0 moved) |
+| `+8` | `0x01010000` | u32 |
+| `+12` | `0` | **u16** (`a5a5a5a5 -> a5a50000`) |
+| `+16, +20, +24, +28, +32, +36, +40, +44, +48, +52` | `0` | u32 each |
+| `+56` | `0` | **u8** (`a5a5a5a5 -> a5a5a500`) |
+| `+60`, `+124` (record stamps) | `0x0808`, `0x0909` | **u16** each |
+
+so the head's "14 writes" are 1 byte + 1 dword + 1 u16 + 10 dwords + 1 byte,
+and a record's 13 slots are 1 u16 stamp + 12 dwords. That mix is evidence in
+itself: `+12` and `+56` are dwords *inside a record* but u16/u8 at the same
+block offsets in the head, so the head is a different struct, not "record 0".
+
 **(b) small-counter background (`dword[i] = i+1`), `mask@+4 = 0x2`**
 (`clkctl-read-mask-sweep-lite.txt`, case `counter`): `U=500 W=3 Z=24`, with
 `W +0:s00000001>w000000ff`, `W +8:s000000ff>w01010000`,
@@ -318,6 +386,97 @@ a ranked candidate list: the per-bit counter map (§4.2) and a gated
 same-field read-back after a single-step SET are the two tests that can promote
 or kill each row. Nothing here is evidence that a SET is safe.
 
+### 4.4 The SET twin's own gates, read out of the GSP image
+
+§4.1 says the two thunks do not share a body; disassembling them shows why, and
+turns the SET into a list of named preconditions rather than a black box.
+`pFunc` for the GET is `0x4d3b464`, for the SET `0x4d5c3c0` (§3 extraction;
+both are reached through the vtable slots, so no literal for either is
+findable by scanning for the id). In both, the context is the same:
+
+```
+a5 = *(pCtl + 0x158) ; s1 = *(a5 + 0xe0)      ; the GSP client/device context
+x  = *(*(s1 + 0x1f88) + 0x1148)               ; the clock-domain controller
+```
+
+The **GET** goes straight there:
+
+```
+v = (*(*(x + 0x20)))(0)          ; the controller's helper object
+return (*(v + 0x38))(s1, v, pParams)          ; vtbl slot 0x38 = the body
+```
+
+The **SET** inserts five checks, each returning a *named* status, and only then
+calls a *different* object's slot 0x28:
+
+```
+a4 = *(s1 + 0x2050)                 ; G1
+  if (!a4)                            -> 0x56 NV_ERR_NOT_SUPPORTED
+  if (!*(u8 *)(a4 + 0x4f4))           -> 0x56 NV_ERR_NOT_SUPPORTED   ; G2
+  if (*(u8 *)(x + 0x179))             -> 0x6c NV_ERR_GPU_IN_DEBUG_MODE ; G3
+a0 = *(*(s1 + 0x1f88) + 0x1150)     ; G4  the SET controller object
+  if (!a0)                            -> 0x56 NV_ERR_NOT_SUPPORTED
+  if (!*(a0 + 0x20))                  -> 0x56 NV_ERR_NOT_SUPPORTED   ; G5
+v  = (*(*(a0 + 0x20)))(0)
+  if (!v)                             -> 0x56 NV_ERR_NOT_SUPPORTED
+return (*(v + 0x28))(s1, v, pParams)          ; vtbl slot 0x28 = the body
+```
+
+Read off the actual instruction stream (`beqz`/`bnez` targets), the two enable
+gates G1/G2 and the missing-object paths resolve to `addi s1, zero, 0x56` +
+`ret`, and G3 to `addi s1, zero, 0x6c` + `ret`. The three facts that matter:
+
+* **the SET body exists and is a sibling of the GET's**, one vtable slot over
+  (0x28 vs 0x38) on a *second* controller object at `x+0x1150` — so "the GSP
+  cannot do this" is not supported by any evidence here;
+* **G3 is invisible from the read side.** `x+0x179` is a byte in the GET's own
+  controller object, and `NV_ERR_GPU_IN_DEBUG_MODE` on the first write attempt
+  would be a *legitimate* answer, not a crash, not a refusal-by-absence. Any
+  first-write harness must treat `0x6c` as an expected, aborting outcome;
+* **G1/G2 live on a different object** (`*(s1+0x2050)`, flag at `+0x4f4`) —
+  the natural home of a "clock control enabled" switch, and the reason the
+  GET's success cannot be read as the SET's permission (§4.1).
+
+None of G1-G5 is observable by reading; only an attempt answers them. That is
+exactly why the plan keeps the write behind `WRITE-VERIFICATION-PLAN.md` §7's
+G1-G6 gates and why "the GET works" was never accepted as a write licence.
+
+### 4.5 The writer is still not identified statically -- and the obvious trap
+
+Two store-set searches over `.text` (`0x4bfa000 .. 0x5bef000`, RISC-V, all
+`sw`/`sd`/`sh`/`sb` with a target-listed immediate, grouped by base register,
+window <= 0x300) give a *lead* and a *trap*:
+
+* **the trap.** The head's written dword set is
+  `{0, 8, 0xc, 0x10, 0x14, 0x18, 0x1c, 0x20, 0x24, 0x28, 0x2c, 0x30, 0x34, 0x38}`
+  (§4.2a) and a record's is the same set **minus `0x30`**. The record set is
+  therefore a *subset* of the head set, so a window matching the record's
+  thirteen offsets proves nothing about which of the two structs it writes --
+  every 13-slot hit is also a 14-slot hit. Any earlier "record writer
+  candidate" list built from the thirteen offsets alone is non-discriminating.
+* **the lead.** Requiring all fourteen *including* `0x30`, plus the mask echo
+  at `+4`, leaves four windows, all of which also carry the `u16` stamp of the
+  first record:
+
+  | window start | base | stores |
+  | --- | --- | --- |
+  | `0x4e0e8c0`, `0x4e0eaf8` | `s1` | the 14 head slots + `+4` |
+  | `0x4e99d5c` | `s2` | the 14 head slots + `+4` |
+  | `0x4e99e54` | `s1` | the 14 head slots + `+4` + `+0x3c` |
+  | `0x4e99d48` | `s2` | the 14 head slots + `+4` + `+0x3c` |
+
+  `+0x3c` is exactly where record 0's `u16` stamp goes, so these four are
+  *candidate* head writers and not disproof of the model. None can be promoted
+  to proof: the handler is entered through a vtable slot (§4.1/§4.4), so there
+  is no call edge from a literal id to these addresses, and a store-offset
+  match does not identify a struct field. The `0x01010000` constant the head
+  writes at `+8` is not a usable anchor either -- `lui x, 0x01010` occurs 18+
+  times inside `0x4c00000..0x4ce0000` alone.
+
+So the field identity in §4.3 stays where it was: *live blocks* plus the
+NVAPI-record correspondence, with the per-bit counter map (§4.2) as the
+measurement that can promote or kill a row -- not disassembly.
+
 ## 5. Neighbouring containers that *do* carry values
 
 All GET, all at the GSP's own size, all with a zeroed input block:
@@ -398,27 +557,41 @@ or current values is **not** established here and must not be assumed.
 
 ### 5.2 GET -> SET pairing inside the legacy CLK block (a table fact)
 
-The GSP export table lists both directions. Across the block the pairs are
-separated by **`+1` in the low byte**, with the category byte moving
-`0x90` (GET) -> `0xd0` (SET); every pair is then corroborated by an
-**identical `paramSize`**, and since the GSP validates the size exactly (§3)
-that equality is strong corroboration rather than a naming guess:
+The GSP export table lists both directions. Inside the clock/voltage block the
+pairs are separated by **`+1` in the low byte** with the category byte moving
+`0x90` (GET) -> `0xd0` (SET) — which, per §2.1, is the privileged bit — and each
+pair carries an **identical `paramSize`**. Since the GSP validates the size
+exactly (§3), that equality is strong corroboration rather than a naming guess.
+The `flags` column is the GSP's own access class (§3) and it, not the `+1`,
+decides whether the twin writes:
 
-| GET | size | SET | size |
-| --- | --- | --- | --- |
-| `0x2080901b` | 2108 | `0x2080d01c` | 2108 |
-| `0x2080901f` | 19416 | `0x2080d020` | 19416 |
-| `0x20809023` | 66060 | `0x2080d024` | 66060 |
-| `0x20809027` | 6288 | `0x2080d028` | 6288 |
-| `0x2080902c` | 4116 | `0x2080d02d` | 4116 |
-| `0x20809030` | 1544 | `0x2080d031` | 1544 |
-| `0x20809046` | 8264 | `0x2080d047` | 8264 |
-| `0x208090a2` | 524 | `0x2080d0a3` | 524 |
-| `0x208090b2` | 812 | `0x2080d0b3` | 812 |
-| `0x2080b207` | 392 | `0x2080f208` | 392 |
-| `0x2080b211` | 520 | `0x2080f212` | 520 |
-| `0x2080b213` | 1036 | `0x2080f214` | 1036 |
-| `0x2080b218` | 9220 | `0x2080f219` | 9220 |
+| GET | size | flags | SET | size | flags |
+| --- | --- | --- | --- | --- | --- |
+| `0x2080901b` | 2108 | 0x48 read | `0x2080d01c` | 2108 | **0x44 write** |
+| `0x2080901f` | 19416 | 0x48 read | `0x2080d020` | 19416 | **0x44 write** |
+| `0x20809023` | 66060 | 0x48 read | `0x2080d024` | 66060 | **0x44 write** |
+| `0x20809027` | 6288 | 0x448 (0x48\|0x400) | `0x2080d028` | 6288 | **0x44 write** |
+| `0x2080902c` | 4116 | 0x48 read | `0x2080d02d` | 4116 | **0x44 write** |
+| `0x20809030` | 1544 | 0x48 read | `0x2080d031` | 1544 | **0x44 write** |
+| `0x20809046` | 8264 | 0x48 read | `0x2080d047` | 8264 | **0x44 write** |
+| `0x208090a2` | 524 | 0x48 read | `0x2080d0a3` | 524 | **0x44 write** |
+| `0x208090b2` | 812 | 0x48 read | `0x2080d0b3` | 812 | 0x48 *read* |
+| `0x2080b207` | 392 | 0x48 read | `0x2080f208` | 392 | **0x44 write** |
+| `0x2080b211` | 520 | 0x48 read | `0x2080f212` | 520 | **0x44 write** |
+| `0x2080b213` | 1036 | 0x48 read | `0x2080f214` | 1036 | **0x44 write** |
+| `0x2080b218` | 9220 | 0x48 read | `0x2080f219` | 9220 | **0x44 write** |
+
+Two corrections to the first version of this section, both from counting the
+whole table rather than the block:
+
+* `0x208090b2 -> 0x2080d0b3` is a same-size `+1` twin whose **both** rows are
+  `0x48` (read) — so the `+1` convention alone does not imply a write face, and
+  "GET has a twin" must not be read as "the twin can be written".
+* scoped over the whole legacy read set (the 300 rows with bit 15 and not bit
+  14), only **41** have a same-size `+1/+0x40` twin, 15 have one at a
+  *different* size, and 244 have none. So `+1` is a *local* regularity of the
+  clock/voltage block, not a table law; the earlier wording ("a table fact")
+  holds for the rows above, not for the table as a whole.
 
 Two things follow that change the plan:
 
@@ -426,13 +599,15 @@ Two things follow that change the plan:
   and `0x20809026` (5332, freq-controller status) have **no SET twin in this
   table at all** — they are read-only views of the domain set. So the
   ClkFreqController `+/-18.75 MHz` value in §5.1 is a *limit* source only.
-* the only write face in the block that pairs with a clock-domain control GET
-  is **`0x2080d01c @2108`**, the SET twin of the §4 GET. That is therefore the
-  single candidate for a domain-offset *write* on this box, and it stays
-  unsent until §4's GET returns a current value and its range (`WRITE-VERIFICATION-PLAN.md`).
-  The two directions do not share a handler: §4.1 shows the SET thunk carrying
-  preconditions the GET thunk does not have, so the SET's own gate state has to
-  be verified before it is used.
+* the write-flagged rows in the block are **`0x2080d01c @2108`** (the SET twin
+  of the §4 GET), `0x2080d0a3 @524` (VF points) and `0x2080f214 @1036` (rails).
+  The first is the single candidate for a domain-offset *write* on this box,
+  and it stays unsent until §4's GET returns a current value and its range
+  (`WRITE-VERIFICATION-PLAN.md`). The two directions do not share a handler:
+  §4.1 and §4.4 show the SET thunk carrying five preconditions the GET thunk
+  does not have, so the SET's own gate state has to be verified before it is
+  used — and per §2.1 all three of these ids are privileged, i.e. not even
+  *reachable* from this un-privileged client.
 
 ## 6. Safety: a bad private GET can wedge the GSP for the session
 
@@ -569,6 +744,19 @@ printout alone is not a reproducible record of a block.
   until the GET half yields current/limit/state. The step granularity is still
   unknown (the `+/-18750 kHz` pair is the *range*, not a step), so the
   "minimum step" for a first write is not yet defined.
+* **which layer is missing, now answered for this client.** §2.1: the id-space
+  itself puts every clock/voltage SET in the privileged half (`0xC000`), and
+  `RmGssLegacyRpcCmd` returns `0x1b` for a client below
+  `RS_PRIV_LEVEL_USER_ROOT` before the GSP sees anything. So for the
+  un-privileged client this session has, the missing thing is **privilege, not
+  protocol and not driver support** — the GSP body exists (§4.4) and the host
+  gate is five lines of source. Two consequences that must not be blurred:
+  (a) `0x1b` from a SET id is *not* evidence that the id is unsupported, and a
+  `0x56`/`0x6c` would have to come from the GSP, i.e. from a privileged caller;
+  (b) whether a *root* caller actually lands at `RS_PRIV_LEVEL_USER_ROOT` in
+  NullMoth's port is **not verified** (the only measured fact is that this user
+  is below it), and verifying it needs a root client, which the standing
+  permission boundary does not include.
 * the VFP/"get-control" family at its **own** GSP sizes, which has never been
   read: `0x2080901f @19416`, `0x20809021 @33288`, `0x20809022 @623112`,
   `0x20809023 @66060` (SET twin `0x2080d024 @66060`), `0x20809027 @6288`,
@@ -587,7 +775,10 @@ printout alone is not a reproducible record of a block.
   marshalling of the GET and the SET is not reachable by scanning `.fwimage`
   for the id or for a size; it needs the runtime object (or a data-section
   cross-reference from the slot number), which is why the field map here is
-  derived from live blocks rather than from disassembly;
+  derived from live blocks rather than from disassembly. §4.5 records what a
+  bounded static attempt did produce (four candidate head writers at
+  `0x4e0e8c0`/`0x4e0eaf8`/`0x4e99d5c`/`0x4e99e54`/`0x4e99d48`) and why the
+  obvious thirteen-offset search cannot promote any of them;
 * confirmation of §4's `+4` mask field with a zeroed background (blocked: the
   GSP is wedged — see §6).
 
