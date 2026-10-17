@@ -19,17 +19,29 @@ include = [
 ]
 
 [features]
-# The stressor generation selectors mirror cli-stressor-cuda-rs: the bundled
-# stressor must pick exactly one CUDA generation (cuda11 for R470-era drivers,
-# cuda12 otherwise), enforced by compile_error! in the stressor crate.
+# The stressor generation selectors mirror cli-stressor-cuda-rs: a bundled CUDA
+# stressor must pick exactly one generation (cuda11 for R470-era drivers, cuda12
+# otherwise), enforced by compile_error! in the stressor crate.
+#
+# `stressor-bundled` is only the "bundle the stressor crate in-process" switch
+# that the source gates on; the features below choose its backend. Keeping the
+# two apart is what lets a platform with no CUDA runtime (macOS has no
+# NVAPI/NVML and no CUDA driver) build the bundled Vulkan-only stressor, while
+# `stressor-bundled-cuda12` -- the default -- still turns on exactly the
+# features it always did, cuda and vulkan, so no existing build changes.
 default = ["stressor-bundled-cuda12"]
-stressor-bundled = [
-  "dep:cli-stressor-cuda-rs",
+stressor-bundled = ["dep:cli-stressor-cuda-rs"]
+stressor-bundled-cuda = [
+  "stressor-bundled",
   "cli-stressor-cuda-rs/cuda",
   "cli-stressor-cuda-rs/vulkan",
 ]
-stressor-bundled-cuda11 = ["stressor-bundled", "cli-stressor-cuda-rs/cuda11"]
-stressor-bundled-cuda12 = ["stressor-bundled", "cli-stressor-cuda-rs/cuda12"]
+stressor-bundled-cuda11 = ["stressor-bundled-cuda", "cli-stressor-cuda-rs/cuda11"]
+stressor-bundled-cuda12 = ["stressor-bundled-cuda", "cli-stressor-cuda-rs/cuda12"]
+# CUDA-free bundled stressor: the Vulkan path the macOS host already has a
+# loader and an ICD for. Build it with
+#   --no-default-features --features stressor-bundled-vulkan
+stressor-bundled-vulkan = ["stressor-bundled", "cli-stressor-cuda-rs/vulkan"]
 stressor-external = []
 
 [dependencies]

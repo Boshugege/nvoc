@@ -365,17 +365,33 @@ mod tests {
         // exactly the commands that mutate settings are refused. It is vacuous on
         // other targets by design, and meaningful on the machine that runs it.
         let write_supported = nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED;
-        for command in [
+        // The gate can only refuse on macOS, and only while the backend reports no
+        // write support.  Off that combination `refused` is false for every
+        // command, so asserting `refused == mutates` there would demand that a
+        // mutating command be refused by a gate that is not active -- which is how
+        // this test came to fail on every non-macOS host while claiming to be
+        // vacuous on them.  Guard the pairing, and keep the mutation set itself
+        // non-empty so a stale command list cannot make the test pass by naming
+        // nothing that mutates.
+        let mutating = [
             "reset-vfp",
             "import-vfp",
             "autoscan-vfp",
             "autoscan-vfp-legacy",
-        ] {
-            let mutates = requirements(command).elevation;
-            let refused = cfg!(target_os = "macos") && mutates && !write_supported;
-            assert_eq!(
-                refused, mutates,
-                "{command} should be refused by the macOS write gate while settings_write = {write_supported}"
+        ];
+        assert!(
+            mutating.iter().any(|c| requirements(c).elevation),
+            "none of the pinned commands mutates settings, so this test proves nothing"
+        );
+        if !cfg!(target_os = "macos") || write_supported {
+            return;
+        }
+        for command in mutating {
+            let refused = requirements(command).elevation;
+            assert!(
+                refused,
+                "{command} mutates settings but the macOS write gate lets it through \
+                 while settings_write = {write_supported}"
             );
         }
     }
