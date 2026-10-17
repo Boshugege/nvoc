@@ -16,6 +16,15 @@ cargo build -p nvoc-cli --locked
 ./target/debug/nvoc-cli get-gpu-list
 ./target/debug/nvoc-cli get-info --gpu 0 -O json
 ./target/debug/nvoc-cli get-status --macos-rm -O json
+./target/debug/nvoc-cli get-settings --macos-rm -O json
+```
+
+The read-only probe carries an explicit opt-in for the campaign-sourced Tier-B
+GETs (voltage rails + V/F points) — they stay out of the default battery so an
+ordinary run never sends IDs that have no SDK header:
+
+```sh
+(cd probe-macos-rm && sh build.sh && ./probe-macos-rm-idle --stages 01 --tierb-read)
 ```
 
 macOS selects RM automatically. `--macos-rm` selects it explicitly and conflicts
@@ -241,6 +250,42 @@ that forget it.
 P-State, clocks, temperature, power and utilization are not one atomic
 snapshot: sections update on the driver's own ~500 ms schedule and
 `rusd_timestamps` carries each field's own stamp.
+
+## Settings surface (read-only)
+
+`get-settings` on macOS reports the configuration the RM session can actually
+see: P-state, the enforced and requested power limit, the PCIe generation, and
+the board/SKU/memory identity, all taken from the same snapshot as `get-status`
+so the readback and the telemetry cannot disagree. Alongside them the payload
+carries `capabilities` (`settings_read: true`, `settings_write: false`,
+`settings_restore: false`), an `unavailable` map naming every configuration
+family the backend cannot read (`core_clock_offset`, `memory_clock_offset`,
+`voltage_boost`, `thermal_limit`, `fan_control`, `pstate_lock`, `vf_curve`,
+`power_limit_write`, `settings_restore`) and `notes` with the evidence.
+
+Nothing is fabricated: a family that cannot be read is absent from the payload
+and named in `unavailable`, never emitted as a default-looking zero. Writes are
+refused before the driver is opened, and `settings_restore` stays false until a
+write path exists to restore from — the snapshot/readback/restore sequence has
+no meaning without one.
+
+Why the configuration families are unreadable on 610.57.04 through this
+transport (probed read-only, `probe-macos-rm --tierb-read`):
+
+| Control | Result |
+| --- | --- |
+| `NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2` 0x2080200b (exact SDK struct) | `NV_ERR_INVALID_ARGUMENT` 0x1f |
+| `rails-get-info` 0x2080B201 (campaign ID, 76 B records) | `NV_ERR_INVALID_ARGUMENT` 0x1f |
+| `rails-get-status` 0x2080B202 (campaign ID, 100 B records) | `NV_ERR_INVALID_ARGUMENT` 0x1f |
+| `vfpoints-get` 0x208090A2 (campaign ID, 68 B records) | `NV_ERR_INVALID_ARGUMENT` 0x1f |
+| `edpp-limit-info`, `pmumon-clk-samples` | `NV_ERR_NOT_SUPPORTED` 0x56 |
+
+`0x1f` is the driver's argument/shape rejection, not "unknown command" (that
+path answers `NV_ERR_NOT_SUPPORTED`, as EDPp and pmumon do), so the GETs likely
+exist with a different parameter size or layout than the campaign records
+assume. Until that is resolved — or another read channel is confirmed — clock
+offsets, locks, the V/F curve, fan policy and thermal policy stay "cannot
+read", and therefore cannot be ranged, snapshotted or restored.
 
 ## Consumers (pynvoc)
 
