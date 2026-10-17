@@ -4660,7 +4660,8 @@ pub(super) fn macos_rm_sample_json(
     let object = value.as_object_mut().ok_or_else(|| {
         crate::CliError::new("macOS RM sample did not serialize to a JSON object")
     })?;
-    object.insert("schema".into(), json!("nvoc/macos-rm-sample/1"));
+    // v2 adds the per-field `freshness` classification and `epoch_reset`.
+    object.insert("schema".into(), json!("nvoc/macos-rm-sample/2"));
     object.insert("sequence".into(), json!(sequence));
     object.insert("host_time".into(), json!(rfc3339(host_time)));
     object.insert("host_time_unix_ns".into(), json!(unix_ns(host_time)));
@@ -4675,8 +4676,10 @@ pub(super) fn macos_rm_sample_json(
 }
 
 /// Human block for one continuous sample: a header with the sample metadata,
-/// the same engineering-unit body as one-shot `get-status`, and the list of
-/// fields that did not refresh since the previous sample.
+/// the same engineering-unit body as one-shot `get-status` (fields that were
+/// withheld appear under `Unavailable:` with their reason), the list of fields
+/// that did not refresh since the previous sample, and any field whose stamp
+/// went backwards.
 pub(super) fn format_macos_rm_sample_human(
     sequence: u64,
     host_time: SystemTime,
@@ -4703,6 +4706,12 @@ pub(super) fn format_macos_rm_sample_human(
         lines.push(format!(
             "  Not refreshed since previous sample: {}",
             not_updated.join(", ")
+        ));
+    }
+    if !sample.epoch_reset.is_empty() {
+        lines.push(format!(
+            "  Driver clock/sequence reset on: {} (values are new; the stamp timeline restarted)",
+            sample.epoch_reset.join(", ")
         ));
     }
     lines

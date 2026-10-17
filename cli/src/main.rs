@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::process::exit;
 
 fn main() {
@@ -39,7 +40,22 @@ fn cli_main() {
         Ok(run) => {
             // Continuous monitoring already wrote each sample line by line.
             if !run.streamed {
-                println!("{}", run.rendered);
+                // Write instead of println!: a closed stdout (`| head`) must end
+                // the process cleanly, not panic (release builds abort on panic).
+                let mut stdout = io::stdout().lock();
+                if let Err(error) = writeln!(stdout, "{}", run.rendered) {
+                    if error.kind() == io::ErrorKind::BrokenPipe {
+                        exit(run.exit_code);
+                    }
+                    eprintln!("nvoc-cli: cannot write output: {error}");
+                    exit(1);
+                }
+                if let Err(error) = stdout.flush()
+                    && error.kind() != io::ErrorKind::BrokenPipe
+                {
+                    eprintln!("nvoc-cli: cannot flush output: {error}");
+                    exit(1);
+                }
             }
             exit(run.exit_code);
         }
