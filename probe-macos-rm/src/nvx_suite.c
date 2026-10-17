@@ -1446,7 +1446,11 @@ static void item_perf_reads(nvx_ctx *c)
         NvU32 st2 = SUBCTL(c, NV2080_CTRL_CMD_PERF_GET_VID_ENG_PERFMON_SAMPLE, &vs);
         nvx_emit(c, "V2.perf", "perf-vid-eng-perfmon-sample", st2,
                  st2 == 0 ? NVX_V_OK : NVX_V_REJECTED,
-                 "engine %u -> busy %u%% period %u us",
+                 /* The id is in the row on purpose: a census that reads the captures
+                  * can only attribute a status to an id the row actually spells, and
+                  * this row answered NV_OK four times (stage-perf-read-20261017T071100Z)
+                  * while naming only the engine. */
+                 "cmd 0x20802087 size 12 engine %u -> busy %u%% period %u us",
                  eng, st2 == 0 ? vs.clkPercentBusy : 0,
                  st2 == 0 ? vs.samplingPeriodUs : 0);
     }
