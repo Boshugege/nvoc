@@ -3398,6 +3398,13 @@ fn format_contextual_scalar(context_key: &str, value_key: &str, value: &Value) -
         return format_scalar(value_key, value);
     };
     let context = context_key.to_ascii_lowercase();
+    // A bit index inside a frequency context is still an index. The clock-offset
+    // list carries `domain_bit` next to `frequency_khz`, and scaling it with its
+    // neighbours rendered bit 1 as "0.001 MHz". A bit is never a frequency, so it
+    // is rendered as the plain number it is.
+    if value_key.ends_with("_bit") {
+        return format_scalar(value_key, value);
+    }
     if context.contains("frequency")
         || context.contains("clock")
         || (context.contains("vfp") && context.contains("range"))
@@ -3571,6 +3578,37 @@ mod tests {
     use super::*;
     use crate::{Command, TargetResult, all_commands};
     use serde_json::json;
+
+    #[test]
+    fn macos_get_settings_renders_the_per_domain_offsets() {
+        // The macOS backend reports the offsets the clock document carries. The
+        // formatter is key-generic, so this test is what says the new field
+        // reaches the human output as a value rather than as an unread blob --
+        // the question the field was added with, which no device could answer
+        // while the GSP was wedged.
+        let output = json!({
+            "pstate": 8,
+            "clock_offsets": [
+                {"domain_bit": 1, "frequency_khz": 1530000, "offset_khz": -1},
+                {"domain_bit": 16, "frequency_khz": 6000984, "offset_khz": -126},
+            ],
+            "notes": ["offset channel: clock document 0x20809061: parsed"],
+        });
+        let rendered = format_get_settings_output(&output).join("\n");
+        assert!(
+            rendered.contains("Clock Offsets"),
+            "the field is named: {rendered}"
+        );
+        // Frequencies in a clock context render as MHz, the neighbouring field
+        // with it -- but the bit index is a bit, not 0.001 MHz.
+        assert!(rendered.contains("1530 MHz"), "frequency: {rendered}");
+        assert!(rendered.contains("6000.984 MHz"), "frequency: {rendered}");
+        assert!(rendered.contains("Domain Bit: 1"), "bit index: {rendered}");
+        assert!(
+            !rendered.contains("Domain Bit: 0.001 MHz"),
+            "the bit is not scaled: {rendered}"
+        );
+    }
 
     #[test]
     fn macos_status_formats_missing_values_without_units_on_error_text() {
