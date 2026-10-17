@@ -1365,16 +1365,19 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
  *   0x20809026 freq-ctrl status      5332    0x2080b201 rails get-info      2444
  *   0x2080b202 rails get-status      3232    0x2080b213 rails get-control   1036
  * nvapi-rs clock.rs:1424 records the NVAPI *caller* struct as 0x964 = 2404
- * (mask@+8, records @+100 stride 72).  The RM block for the same control is
- * 2108, which is exactly 60 + 32*64, i.e. the same field offsets projected on
- * a 64-byte record (type @+0, offset_kHz @+44, range_min @+48, range_max @+52,
- * applied @+56, mask @+8 kept).  This pass TESTS that projection instead of
- * asserting it: it prints the driver-written dword map, then the decode.
+ * (mask@+8, records @+100 stride 72) -- that is layer L1, not this block.
+ * The RM block the GSP validates is 2108 = 60 + 32*64, and the input mask is
+ * at +4, measured (see docs/.../gsp-method-table-and-legacy-forwarding.md
+ * sections 4/4.2): the 0xA5 sweep shows the handler writes 13 dwords per 64 B
+ * record (rec+0 type, rec+8..rec+44, rec+52, rec+56) and leaves rec+4, rec+48
+ * and rec+60 alone.  This pass TESTS that model: it prints the driver-written
+ * dword map, then the decode.
  *
  * Read-only: every case is a documented GET; the SET twins
  * (0x2080d01c / 0x2080d024 / 0x2080f214) are in nvx_known_set_ids and are
- * refused before anything is sent.  0x208090a2 (524 B, GET or SET unknown) is
- * deliberately NOT sent here.
+ * refused before anything is sent.  0x208090a2 (524 B) is a GET: it is the
+ * low-byte-1/0x90->0xd0 twin of 0x2080d0a3 at the same 524 B size, and the
+ * campaign record already names it "vfpoints-get".
  */
 typedef struct {
     const char *name;
@@ -1690,6 +1693,11 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
           4u, 0x00000000u },
         { "freq-ctrl-info   0x20809025 @7188",  0x20809025u, 7188u,  ~0u, 0u },
         { "domains-get-info 0x20809019 @12336", 0x20809019u, 12336u, ~0u, 0u },
+        /* 524 = 12 + 8*64: the same 64 B record family with an 8-record table.
+         * It answered NV_OK at exactly this size before the wedge (the earlier
+         * "rejected" reading was a size artifact: 524 is the GSP's value, not
+         * 10x68 or 32x68).  Zero background, full dump. */
+        { "vfpoints-get       0x208090A2 @524",  0x208090a2u, 524u,   ~0u, 0u },
         { "gc-1d             0x2080901D @32680", 0x2080901du, 32680u, ~0u, 0u },
     };
 
@@ -1773,13 +1781,13 @@ typedef struct {
     NvU32 seed;
 } offsweep_case;
 
-static void offsweep_send(nvx_ctx *c, const offsweep_case *k)
+static NvU32 offsweep_send(nvx_ctx *c, const offsweep_case *k)
 {
     unsigned char *buf = malloc(k->size), *seed = malloc(k->size);
     if (!buf || !seed) {
         nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_HARD, "buffer alloc failed");
         free(buf); free(seed);
-        return;
+        return 0;
     }
     for (unsigned d = 0; d < k->size / 4; ++d) {
         NvU32 v = (k->seed_off == ~0u) ? 0u : 0xA5A5A5A5u;
@@ -1796,7 +1804,7 @@ static void offsweep_send(nvx_ctx *c, const offsweep_case *k)
                  k->seed_off == ~0u ? -1 : (int)k->seed_off, st,
                  nvx_status_name(st));
         free(buf); free(seed);
-        return;
+        return st;
     }
 
     unsigned nd = k->size / 4, nch = 0, first = 0, last = 0, listed = 0;
@@ -1811,7 +1819,7 @@ static void offsweep_send(nvx_ctx *c, const offsweep_case *k)
              " (first @%u last @%u)", k->cmd, k->size,
              k->seed_off == ~0u ? -1 : (int)k->seed_off, k->seed, nch, nd,
              first, last);
-    if (!nch) { free(buf); free(seed); return; }
+    if (!nch) { free(buf); free(seed); return 0; }
 
     /* Changed dwords themselves, four per line: +off: seed>new. */
     {
@@ -1838,6 +1846,18 @@ static void offsweep_send(nvx_ctx *c, const offsweep_case *k)
         }
     }
     free(buf); free(seed);
+    return 0;
+}
+
+/* A 0x65/0x62 answer means the GSP took the legacy path down for the session;
+ * every later request in this sweep would return 0x62 without telling us
+ * anything, so the sweep stops on the first one. */
+static int offsweep_stop(nvx_ctx *c, NvU32 st)
+{
+    if (!nvx_status_is_wedge_stop(st)) return 0;
+    nvx_emit(c, "V2.clkctl", "clkctl-offsweep", st, NVX_V_HARD,
+             "STOP: 0x%08x ends the sweep (GSP legacy path down)", st);
+    return 1;
 }
 
 int nvx_stage2_clkctl_offsweep(nvx_ctx *c)
@@ -1846,6 +1866,8 @@ int nvx_stage2_clkctl_offsweep(nvx_ctx *c)
         nvx_emit(c, "V2.clkctl", "clkctl-offsweep", 0, NVX_V_SKIP, "RM chain not open");
         return -1;
     }
+
+    NvU32 st;
 
     /* (a) locate the 0x2080901b input-mask field: one run per header dword. */
     for (unsigned off = 0; off <= 56; off += 4) {
@@ -1857,13 +1879,15 @@ int nvx_stage2_clkctl_offsweep(nvx_ctx *c)
                      "REFUSED: 0x%08x is a documented SET id", k.cmd);
             continue;
         }
-        offsweep_send(c, &k);
+        st = offsweep_send(c, &k);
+        if (offsweep_stop(c, st)) return 0;
     }
     /* all-ones mask at +0 as a separate datapoint (documented as rejected by
      * the NVAPI layer; the GSP may still accept it). */
     {
         offsweep_case k = { "gc 2108 A5 seed+0=all", 0x2080901bu, 2108u, 0u, 0xffffffffu };
-        offsweep_send(c, &k);
+        st = offsweep_send(c, &k);
+        if (offsweep_stop(c, st)) return 0;
     }
 
     /* (b) SAFETY: no further A5-filled ids.  The 2026-10-17 run of this sweep
@@ -1896,7 +1920,8 @@ int nvx_stage2_clkctl_offsweep(nvx_ctx *c)
                          "REFUSED: 0x%08x is a known GSP-wedge id", more[i].cmd);
                 continue;
             }
-            offsweep_send(c, &more[i]);
+            st = offsweep_send(c, &more[i]);
+            if (offsweep_stop(c, st)) return 0;
         }
     }
     return 0;
