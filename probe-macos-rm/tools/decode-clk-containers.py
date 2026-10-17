@@ -20,7 +20,14 @@ unverified" so nobody mistakes a decomposition for a layout.
   stamps the `0x2080901b` directory uses, which is why 901b's +4 mask is an
   *entry selector* and not a domain-bit mask (see the doc §14.1/§14.3)
 * `0x2080901b` -> 60 / 64: an `0xA5` background shows the driver writing record
-  type bytes at +60 and +124
+  type bytes at +60 and +124, and `write_set_check()` turns that observation into
+  a per-row verdict: it reads the written slots off the bytes and compares them
+  with the per-type rule (13 slots for a type 08/09 record, its stamp alone for
+  type 03), states the head count the bytes imply, and prints where the last
+  changed dword actually is.  On an `0xA5` block the generic record printer is
+  misleading on its own -- it lists non-zero dwords, so the dwords the handler
+  wrote as zero are the ones it hides -- which is why the write-set line, and not
+  the record line, is what to read there.
 * `0x20809025` -> 20 / 224: records at +20, +244, +468, and the named fields
   match the independently recorded Windows/NVAPI record of the same tree (§5.1)
 * `0x20809061` -> 8 / 24, `0x2080b201` -> 12 / 76, `0x2080b213` -> 12 / 32:
@@ -236,6 +243,161 @@ def mask_consistency(buf: bytes, header: int, stride: int) -> list[str]:
     return out
 
 
+# --- the write-set model, as executable arithmetic ---------------------------
+#
+# 0x2080901b is the one block whose *write set* is observable end to end: on an
+# 0xA5 background a dword the handler never touched stays a5a5a5a5 while one it
+# wrote shows what it wrote -- and at stock the value dwords it writes are zero.
+# The model that explains the one measured run ("106 of 527 dwords changed, last
+# @564") is:
+#
+#   changed(mask) = HEAD + sum over *selected* directory rows of per-type(rec)
+#   per-type(0x08) = per-type(0x09) = 13 slots (rec+0 stamp, rec+8..+44, rec+52,
+#   rec+56), per-type(0x03) = 1 (its stamp alone); rec+4, rec+48 and rec+60 are
+#   never written.
+#
+# Two properties keep this a model rather than a fit: the same HEAD and the same
+# per-type rule must reproduce all three masks the probe sends (0x1, 0xFF,
+# 0x3FF), and the last changed offset must land on the last selected
+# value-writing row's rec+56.  RECORDED_WRITE_SET holds the three numbers as they
+# were recorded/predicted, so editing the rule or the row types breaks
+# `--selftest` instead of silently rewriting history.
+#
+# The row list is the recorded ten in directory order with their own type words,
+# because the per-type term is exactly what makes the 0xFF case differ from a
+# uniform "8 records x 13": row 6 carries type 0x03 and writes its stamp only.
+# The two type bytes of a stamp are the only part of rec+0 that is written, which
+# is why a written stamp still leaves the upper half of that dword at a5a5.
+RECORDED_ROWS = (
+    (1, 0x0808), (2, 0x0909), (16, 0x0808), (4, 0x0909), (8, 0x0909),
+    (1_048_576, 0x0909), (524_288, 0x0303), (64, 0x0808),
+    (2_097_152, 0x0909), (32, 0x0909),
+)
+WRITE_SET_HEAD = 14
+WRITE_SET_PER_TYPE = {0x08: 13, 0x09: 13, 0x03: 1}
+# mask -> (changed dwords, last changed offset).  0xFF is measured (2026-10-17
+# offsetsweep); 0x1 and 0x3FF are the probe's pre-registered predictions for the
+# same rule, which is why they are pinned here rather than recomputed freely.
+RECORDED_WRITE_SET = {0x1: (27, 116), 0xFF: (106, 564), 0x3FF: (132, 692)}
+
+
+def write_set_model(mask, rows=RECORDED_ROWS, header=60, stride=64):
+    """The dwords the handler writes for `mask`, and the last one of them.
+
+    Returns (None, None) when a selected row carries a type the model has no
+    per-type rule for: an unknown type is never silently counted as zero.
+    """
+    selected = [(i, stamp) for i, (_bit, stamp) in enumerate(rows)
+                if (mask >> i) & 1]
+    count = WRITE_SET_HEAD
+    last = None
+    for index, stamp in selected:
+        rule = WRITE_SET_PER_TYPE.get(stamp & 0xFF)
+        if rule is None:
+            return None, None
+        count += rule
+        if rule > 1:
+            last = header + index * stride + 56
+    if last is None and selected:
+        last = header + selected[-1][0] * stride
+    return count, last
+
+
+def a5_block(mask, header=60, stride=64, size=2108, rows=RECORDED_ROWS):
+    """The model written as bytes: a synthetic 0xA5 block after one masked call.
+
+    Used by `--selftest` so the byte-level checker below is tested without a
+    device.  The head's 14 dwords are placed at +0..+52; the *count* is what the
+    model claims, the identity of the head slots is a separate, still open
+    question, and this builder deliberately does not pretend otherwise.
+    """
+    buf = bytearray(b"\xa5" * size)
+    for off in range(0, 4 * WRITE_SET_HEAD, 4):
+        struct.pack_into("<I", buf, off, 0)
+    for index, (_bit, stamp) in enumerate(rows):
+        if not (mask >> index) & 1:
+            continue
+        base = header + index * stride
+        struct.pack_into("<H", buf, base, stamp)  # the two type bytes only
+        if WRITE_SET_PER_TYPE.get(stamp & 0xFF, 0) > 1:
+            for off in (8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 52, 56):
+                struct.pack_into("<I", buf, base + off, 0)
+    return bytes(buf)
+
+
+def write_set_check(buf: bytes, header: int, stride: int) -> list[str]:
+    """Check the A5 reply's actual write set against the model, per row.
+
+    This is the check that settles what the handler writes without a second
+    device call: it reads the written slots off the bytes and compares them with
+    the per-type rule, reports the head count the bytes imply, and states where
+    the last changed dword is instead of where it was predicted to be.
+
+    It is only meaningful on the 0xA5 case, and it says so rather than guessing:
+    on a zeroed block the dwords the handler writes are zero too, so the model
+    would report a short write set that is really just "zero background".  The
+    detector is that some dword still holds a5a5a5a5, which the A5 case cannot
+    exhaust -- the model's own largest mask writes 132 of 527 dwords.
+    """
+    seed = 0xA5A5A5A5
+    if not any(struct.unpack_from("<I", buf, off)[0] == seed
+               for off in range(0, len(buf) - 3, 4)):
+        return ["  write-set: no dword still holds 0xa5a5a5a5, so this is not "
+                "the 0xA5 case and the write set is not observable here -- on a "
+                "zeroed block a written zero looks exactly like an untouched "
+                "dword; read the record line above instead"]
+    changed = [off for off in range(0, len(buf) - 3, 4)
+               if struct.unpack_from("<I", buf, off)[0] != seed]
+    if not changed:
+        return ["  write-set: the A5 background is intact, so the handler wrote "
+                "nothing for this mask"]
+    out = [f"  write-set: {len(changed)} of {len(buf) // 4} dwords differ from "
+           f"the 0xA5 seed, first @{changed[0]} last @{changed[-1]}"]
+    head_written = [off for off in changed if off < header]
+    out.append(f"    head: {len(head_written)} written dwords"
+               + (" at " + " ".join(f"+{off}" for off in head_written)
+                  if head_written else "")
+               + f" -- model HEAD={WRITE_SET_HEAD}: "
+               + ("MATCH" if len(head_written) == WRITE_SET_HEAD
+                  else "MISMATCH"))
+    rows = []
+    for index in range(32):
+        base = header + index * stride
+        record = buf[base:base + stride]
+        if len(record) < stride or struct.unpack_from("<I", record, 0)[0] == seed:
+            continue
+        stamp = struct.unpack_from("<H", record, 0)[0]
+        written = [off for off in range(0, stride - 3, 4)
+                   if struct.unpack_from("<I", record, off)[0] != seed]
+        rows.append((index, stamp, base, written))
+        rule = WRITE_SET_PER_TYPE.get(stamp & 0xFF)
+        verdict = ("no per-type rule: type unknown"
+                   if rule is None
+                   else f"rule {rule} slot(s): "
+                        + ("MATCH" if rule == len(written) else "MISMATCH"))
+        out.append(f"    row {index} (type 0x{stamp:04x}) @+{base}: written rel "
+                   + " ".join(f"+{off}" for off in written) + f" -- {verdict}")
+    if not rows:
+        out.append("    no record carries a stamp, so the mask selected nothing")
+        return out
+    by_rule = [WRITE_SET_PER_TYPE.get(stamp & 0xFF) for _i, stamp, _b, _w in rows]
+    if any(rule is None for rule in by_rule):
+        out.append("    the arithmetic is NOT applied while a selected type is "
+                   "unknown -- an unruled type is not assumed to equal any case")
+        return out
+    total = WRITE_SET_HEAD + sum(by_rule)
+    out.append(f"    model: {len(rows)} rows ({sum(by_rule)} row dwords) + "
+               f"HEAD={WRITE_SET_HEAD} = {total} vs observed {len(changed)}: "
+               + ("MATCH" if total == len(changed) else "MISMATCH"))
+    value_rows = [base + 56 for _i, stamp, base, _w in rows
+                  if WRITE_SET_PER_TYPE.get(stamp & 0xFF, 0) > 1]
+    if value_rows:
+        out.append(f"    model: the last changed dword should be a value row's "
+                   f"rec+56 = {max(value_rows)} vs observed {changed[-1]}: "
+                   + ("MATCH" if max(value_rows) == changed[-1] else "MISMATCH"))
+    return out
+
+
 def _dwords(buf: bytes, limit: int) -> list[str]:
     out = []
     for off in range(0, limit - 3, 4):
@@ -355,6 +517,14 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
                 cells.append(f"+{off}={struct.unpack_from('<i', record, off)[0]}")
             print(f"    bit {bit:<2} rec @+{base} type=0x{stamp:04x}: "
                   + " ".join(cells), file=out)
+    if mid == 0x2080901B or INHERITS.get(mid) == 0x2080901B:
+        # Only a non-zero background can show a write set: on zeros the dwords
+        # the handler writes are zero as well, so "wrote zero" and "never
+        # touched" are indistinguishable there.  This is also the check that
+        # answers "which record-relative slots does the handler write" from the
+        # recorded bytes instead of from the caller-layer field names.
+        for line in write_set_check(buf, header, stride):
+            print(line, file=out)
     return 0
 
 
@@ -450,7 +620,36 @@ def selftest() -> int:
     assert "bit 0 " not in report1b, report1b
     assert decode(0x20809025, 2108, bytes(buf), sink) == 2, "size guard"
     assert decode(0x20801234, 4, b"\0" * 4, sink) == 2, "unknown id guard"
-    print("selftest ok: geometry + round-trip + field decode")
+    # The write-set model, checked twice: as arithmetic against the three
+    # recorded/predicted numbers, and as bytes against a block the model itself
+    # builds.  Changing the per-type rule, HEAD, or a recorded row type has to
+    # break here -- that is what keeps 106/27/132 a model instead of a memory.
+    for mask, want in RECORDED_WRITE_SET.items():
+        assert write_set_model(mask) == want, (mask, write_set_model(mask), want)
+    for mask in sorted(RECORDED_WRITE_SET):
+        want_count, want_last = RECORDED_WRITE_SET[mask]
+        sink = io.StringIO()
+        assert decode(0x2080901B, 2108, a5_block(mask), sink) == 0
+        report = sink.getvalue()
+        assert f"{want_count} of 527 dwords differ" in report, report
+        assert f"last @{want_last}" in report, report
+        assert f"= {want_count} vs observed {want_count}: MATCH" in report, report
+        assert f"vs observed {want_last}: MATCH" in report, report
+        assert "MISMATCH" not in report, report
+    # A zero-background block must be declined, not misread: its stamps are
+    # non-zero and its written zeros are not, so the model would see a 2-dword
+    # write set where 14 head dwords were written.
+    zeroed = bytearray(GEOMETRY[0x2080901B][0])
+    struct.pack_into("<H", zeroed, GEOMETRY[0x2080901B][1], 0x0808)
+    assert write_set_check(bytes(zeroed), 60, 64)[0].startswith(
+        "  write-set: no dword still holds 0xa5a5a5a5"), write_set_check(
+            bytes(zeroed), 60, 64)
+    # A type the rule does not know is never counted as zero: the arithmetic has
+    # to be withheld, not guessed.
+    odd = a5_block(0x1, rows=((1, 0x0B0B),) + RECORDED_ROWS[1:])
+    assert "type unknown" in "\n".join(write_set_check(odd, 60, 64))
+    assert write_set_model(0x1, rows=((1, 0x0B0B),) + RECORDED_ROWS[1:]) == (None, None)
+    print("selftest ok: geometry + round-trip + field decode + write-set model")
     return 0
 
 
