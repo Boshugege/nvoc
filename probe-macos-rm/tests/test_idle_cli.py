@@ -81,6 +81,11 @@ int nvx_stage2_clk_level_read(nvx_ctx *c) {
     puts("FAKE clklevel");
     return 0;
 }
+int nvx_stage2_clkdom_read(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE clkdom");
+    return 0;
+}
 int nvx_stage2_clk_read(nvx_ctx *c) {
     if (!chain || !c->hSubdevice) abort();
     puts("FAKE clkvf");
@@ -258,6 +263,14 @@ class IdleCli(unittest.TestCase):
         asked = self.run_cli("--stages", "0", "--reg-read")
         self.assertEqual(asked.returncode, 0, asked.stderr)
         self.assertEqual(asked.stdout.count("FAKE regread"), 1)
+
+    def test_clkdom_reads_are_explicit_opt_in(self):
+        plain = self.run_cli("--stages", "012")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertNotIn("FAKE clkdom", plain.stdout)
+        asked = self.run_cli("--stages", "0", "--clkdom-read")
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        self.assertEqual(asked.stdout.count("FAKE clkdom"), 1)
 
     def test_clklevel_reads_are_explicit_opt_in(self):
         plain = self.run_cli("--stages", "012")

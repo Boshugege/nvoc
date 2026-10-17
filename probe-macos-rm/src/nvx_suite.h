@@ -88,6 +88,11 @@ int nvx_stage2_reg_read(nvx_ctx *c);
  * published levels and the TYPE_OVERCLOCK flag, decoded as per-domain
  * {current, default, min, max} kHz so the clock range has a named source. */
 int nvx_stage2_clk_level_read(nvx_ctx *c);
+/* Read-only retry of the two clock-domain controls with the NVAPI-layer
+ * (version|size) magic removed from the RM parameter block -- see the
+ * marshalling-corrections note.  A short, explicitly-derived size list, not a
+ * scan; every case is a GET and SET ids are refused. */
+int nvx_stage2_clkdom_read(nvx_ctx *c);
 /* Explicit, read-only private ClockClient / VfPoints / PerfVfe GET census:
  * the read half of the same wires the Windows backend uses for clock-domain
  * and V/F reads. Scans candidate paramSize values (the driver answers

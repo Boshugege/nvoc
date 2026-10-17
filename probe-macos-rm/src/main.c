@@ -112,6 +112,9 @@ static void usage(void)
         "  --reg-read       read-only pass over the ids the loaded NVRM really\n"
         "                   registers, each at its live NVOC paramSize (exact\n"
         "                   metadata, not a size scan; SET ids refused)\n"
+        "  --clkdom-read   read-only retry of the clock-domain controls with\n"
+        "                   the NVAPI (version|size) magic removed from the RM\n"
+        "                   param block; short derived size list, GET only\n"
         "  --clklevel-read  read-only PERF_GET_LEVEL_INFO_V2 (0x2080200b\n"
         "                   @780) across levels/overclock flag; decodes\n"
         "                   per-domain current/default/min/max kHz\n"
@@ -147,7 +150,7 @@ int main(int argc, char **argv)
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
     int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
-    int clklevel_read = 0, clkvf_read = 0;
+    int clklevel_read = 0, clkdom_read = 0, clkvf_read = 0;
     int clkdoc_read = 0;
     int clkobj_read = 0;
     int clk_track_sec = 0;
@@ -179,6 +182,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pm-read")) pm_read = 1;
         else if (!strcmp(argv[i], "--perf-read")) perf_read = 1;
         else if (!strcmp(argv[i], "--clklevel-read")) clklevel_read = 1;
+        else if (!strcmp(argv[i], "--clkdom-read")) clkdom_read = 1;
         else if (!strcmp(argv[i], "--reg-read")) reg_read = 1;
         else if (!strcmp(argv[i], "--clkvf-read")) clkvf_read = 1;
         else if (!strcmp(argv[i], "--clkdoc-read")) clkdoc_read = 1;
@@ -313,6 +317,11 @@ int main(int argc, char **argv)
     if (clklevel_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_clk_level_read(&g_ctx) != 0) rc = 1;
+    }
+
+    if (clkdom_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_clkdom_read(&g_ctx) != 0) rc = 1;
     }
 
     if (clkvf_read) {

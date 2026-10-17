@@ -1207,6 +1207,117 @@ int nvx_stage2_clk_level_read(nvx_ctx *c)
 }
 
 /* ------------------------------------------------------------------ */
+/* Clock-domain control retry, RM-layer only (--clkdom-read)           */
+/* ------------------------------------------------------------------ */
+/* Why this exists
+ * ---------------
+ * The earlier --clkdoc-read pass seeded the *documented* (version|size)
+ * magic into dword 0 of every clock-domain parameter block.  Measuring
+ * 0x2080B201 showed that those magics live in the NVAPI layer: the RM
+ * parameter block itself carries no magic, and its dword 0 is an *output*
+ * mask (docs/reverse-engineering/nvapi/rm-param-marshall-corrections-r610.md).
+ * So the previous run poisoned dword 0 with a value the RM never expects.
+ *
+ * This pass is the retry with the magic removed, over a short, derived list
+ * of sizes for the two clock-domain controls -- not a size scan:
+ *
+ *   0x20809019 ClockClkDomainsGetInfo     documented caller size 2520
+ *                                        container-base candidate 2520-0x38
+ *   0x2080901b ClockClkDomainsGetControl  documented caller size 2404 (control:
+ *                                          isolates the magic, everything else
+ *                                          identical to 2348)
+ *                                        container-base candidate 2404-0x38
+ *                                        RM head 12 + 32 * documented 72 B rec
+ *                                        RM head 12 + 32 * 76 B (the stride
+ *                                          measured for 0x2080B201)
+ *
+ * Only the documented controllable-domain mask is seeded, at the recorded +8.
+ * All of these are GET; 0x2080d01c (the SET twin) is in nvx_known_set_ids and
+ * is refused below.  Accepted cases are hex-dumped so a head/record layout can
+ * be located without guessing offsets.
+ */
+typedef struct {
+    const char *name;
+    NvU32 cmd;
+    unsigned size;
+    NvU32 mask_off8;
+} clkdom_case;
+
+static const clkdom_case nvx_clkdom[] = {
+    { "info 2520 documented",            0x20809019u, 2520, 0 },
+    { "info 2464 = 2520-0x38",           0x20809019u, 2464, 0 },
+    { "ctrl 2404 documented (control)",  0x2080901bu, 2404, 0xff },
+    { "ctrl 2348 = 2404-0x38",           0x2080901bu, 2348, 0xff },
+    { "ctrl 2316 = 12+32*72",            0x2080901bu, 2316, 0xff },
+    { "ctrl 2316 mask=all",              0x2080901bu, 2316, 0xffffffffu },
+    { "ctrl 2444 = 12+32*76",            0x2080901bu, 2444, 0xff },
+};
+
+int nvx_stage2_clkdom_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.clkdom", "clkdom-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+
+    unsigned buflen = 0;
+    for (unsigned i = 0; i < sizeof nvx_clkdom / sizeof nvx_clkdom[0]; ++i)
+        if (nvx_clkdom[i].size > buflen) buflen = nvx_clkdom[i].size;
+    unsigned char *buf = malloc(buflen);
+    if (!buf) {
+        nvx_emit(c, "V2.clkdom", "clkdom-read", 0, NVX_V_HARD, "buffer alloc failed");
+        return -1;
+    }
+
+    for (unsigned i = 0; i < sizeof nvx_clkdom / sizeof nvx_clkdom[0]; ++i) {
+        const clkdom_case *k = &nvx_clkdom[i];
+        if (nvx_id_is_known_set(k->cmd)) {
+            nvx_emit(c, "V2.clkdom", k->name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a documented SET id", k->cmd);
+            continue;
+        }
+        memset(buf, 0, k->size);
+        /* dword 0 stays ZERO on purpose: the (version|size) magics are
+         * NVAPI-layer and must not be written into the RM parameter block. */
+        memcpy(buf + 8, &k->mask_off8, 4);
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  k->cmd, buf, k->size);
+
+        unsigned nz = 0, first = 0, last = 0;
+        for (unsigned o = 0; o < k->size; ++o)
+            if (buf[o]) { ++nz; if (!first) first = o; last = o; }
+        nvx_emit(c, "V2.clkdom", k->name, st,
+                 st == 0 ? (nz ? NVX_V_OK : NVX_V_REJECTED) : NVX_V_REJECTED,
+                 "cmd 0x%08x size %u dword0=0 mask@+8=0x%08x -> %u non-zero B, "
+                 "first @%u last @%u", k->cmd, k->size, k->mask_off8, nz, first, last);
+        if (st != 0) continue;
+
+        unsigned nd = k->size / 4, shown = nd < 24 ? nd : 24;
+        char hex[24 * 9 + 1];
+        char *hp = hex;
+        for (unsigned d = 0; d < shown; ++d) {
+            NvU32 w; memcpy(&w, buf + 4 * d, 4);
+            hp += snprintf(hp, 10, " %08x", w);
+        }
+        nvx_emit(c, "V2.clkdom", k->name, st, NVX_V_OK, "  dwords[0..%u):%s", shown, hex);
+        /* non-zero dword positions, so a head/record base can be located */
+        char off[24 * 12 + 1];
+        char *op = off;
+        unsigned listed = 0;
+        for (unsigned d = 0; d < nd && listed < 24; ++d) {
+            NvU32 w; memcpy(&w, buf + 4 * d, 4);
+            if (!w) continue;
+            op += snprintf(op, 13, " +%u=0x%08x", 4 * d, w);
+            ++listed;
+        }
+        nvx_emit(c, "V2.clkdom", k->name, st, NVX_V_OK,
+                 "  non-zero dwords (%u listed):%s", listed, off);
+    }
+    free(buf);
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Private clock-domain / V-F read-surface census (--clkvf-read)       */
 /* ------------------------------------------------------------------ */
 /* The Windows NVOC backend reads the editable core/memory clock offsets and
