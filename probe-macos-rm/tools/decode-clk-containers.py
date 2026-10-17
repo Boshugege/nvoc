@@ -7,13 +7,22 @@ against an exact `paramSize` taken from its own export table (see
 Each container is a fixed header plus a bit-sparse table of 32 per-domain
 records, so the layout is fully described by `(header, stride)`.
 
-The geometries below are *derived*, not guessed: for a given id the pair is the
-unique split with `header + 32*stride == paramSize` whose stride is a multiple
-of 4.  For `0x2080901b` (record base +60, stride 64) and `0x20809025` (base
-+20, stride 224) they are additionally confirmed by what the driver writes into
-a 0xA5A5A5A5 background, and for `0x20809025` the named fields agree, field for
-field, with the independently recorded Windows/NVAPI record of the same
-controller tree (see §5.1).  `check_geometry()` enforces the arithmetic.
+The arithmetic is only a *filter*, not a proof: `header + 32*stride ==
+paramSize` has four solutions per id (they differ by 128 bytes of header and 4
+bytes of stride), so a split is only trusted once the payload or an `0xA5`
+background shows where the records actually start.  VERIFIED below lists the
+ids whose split has that evidence; everything else is reported as "derived,
+unverified" so nobody mistakes a decomposition for a layout.
+
+* `0x20809019` -> 48 / 384: the record field pattern repeats at +48, +432, +816
+* `0x2080901b` -> 60 / 64: an `0xA5` background shows the driver writing record
+  type bytes at +60 and +124
+* `0x20809025` -> 20 / 224: records at +20, +244, +468, and the named fields
+  match the independently recorded Windows/NVAPI record of the same tree (§5.1)
+* `0x20809061` -> 8 / 24, `0x2080b201` -> 12 / 76, `0x2080b213` -> 12 / 32:
+  the previously recorded payloads put the header at exactly those lengths
+
+`check_geometry()` enforces the arithmetic for every entry.
 
 Usage:
     probe-macos-rm-idle --clkctl-hex > clkctl-hex.txt
@@ -41,6 +50,19 @@ GEOMETRY = {
     0x2080B213: (1036, 12, 32),
     0x2080D01C: (2108, 60, 64),
 }
+
+# Ids whose (header, stride) split has payload/background evidence.
+VERIFIED = {
+    0x20809019: "record field pattern repeats at +48/+432/+816",
+    0x2080901B: "0xA5 background: driver writes record types at +60 and +124",
+    0x20809025: "records at +20/+244/+468 and the named fields match nvapi-rs",
+    0x20809061: "recorded payload: 8 B head + 32x24 B",
+    0x2080B201: "recorded payload: 12 B head + one 76 B record",
+    0x2080B213: "recorded payload: 12 B head + 32x32 B",
+}
+
+# Same RM struct as another id (the GET/SET twin shares paramSize, §5.2).
+INHERITS = {0x2080D01C: 0x2080901B}
 
 # Field names that are established by evidence (see the doc §5.1 / §5.3).
 NAMED = {
@@ -113,8 +135,16 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
         print(f"0x{mid:08x} @{size}: not the GSP paramSize ({want_size})", file=out)
         return 2
 
+    if mid in VERIFIED:
+        note = f"verified: {VERIFIED[mid]}"
+    elif mid in INHERITS:
+        note = f"inherits the geometry of 0x{INHERITS[mid]:08x}"
+    else:
+        note = ("derived, UNVERIFIED: the arithmetic admits header+128/stride-4 "
+                "as well -- do not treat the field offsets as a layout")
     print(f"0x{mid:08x} @{size}: header {header} B, 32 x {stride} B records @+{header}",
           file=out)
+    print(f"  ({note})", file=out)
     print("  head: " + (" ".join(_dwords(buf, header)) or "(all zero)"), file=out)
     named = NAMED.get(mid, {})
     populated = 0
