@@ -8,12 +8,12 @@ pub(super) fn selected(backend: BackendChoice) -> bool {
 pub(super) fn validate(command: Command) -> CliResult<()> {
     if matches!(
         command,
-        Command::GetGpuList | Command::GetInfo | Command::GetStatus
+        Command::GetGpuList | Command::GetInfo | Command::GetStatus | Command::GetSettings
     ) {
         Ok(())
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status. Performance writes are not implemented.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings. Performance writes are not implemented.",
             command.name()
         )))
     }
@@ -40,13 +40,20 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 }),
                 Command::GetInfo => serde_json::to_value(run(&target, nvoc_core::QueryMacosRmInfo)?.output)?,
                 Command::GetStatus => serde_json::to_value(run(&target, nvoc_core::QueryMacosRmStatus)?.output)?,
+                Command::GetSettings => {
+                    serde_json::to_value(run(&target, nvoc_core::QueryMacosRmSettings)?.output)?
+                }
                 _ => unreachable!("validated above"),
             };
             if let Some(object) = value.as_object_mut() {
-                object.insert("capabilities".into(), json!({
-                    "device_info": true, "pstate_query": true,
-                    "telemetry": true, "performance_writes": false,
-                }));
+                // The settings query carries its own capability block; the
+                // status/info payloads keep the read-only summary.
+                if command != Command::GetSettings {
+                    object.insert("capabilities".into(), json!({
+                        "device_info": true, "pstate_query": true,
+                        "telemetry": true, "performance_writes": false,
+                    }));
+                }
             }
             Ok(value)
         });
@@ -107,6 +114,20 @@ mod tests {
         let error = run_invocation(&invocation).unwrap_err().to_string();
         assert!(error.contains("unavailable on macOS RM"));
         assert!(!error.contains("driver loaded"));
+    }
+
+    #[test]
+    fn settings_is_readable_but_writes_stay_refused() {
+        assert!(validate(Command::GetSettings).is_ok());
+        for command in [
+            Command::SetPowerLimit,
+            Command::SetPstateGlobalFreqOffset,
+            Command::SetTempLimit,
+            Command::SetFanSpeed,
+        ] {
+            let error = validate(command).unwrap_err().to_string();
+            assert!(error.contains("unavailable on macOS RM"), "{error}");
+        }
     }
 
     #[test]

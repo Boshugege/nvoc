@@ -1355,7 +1355,109 @@ fn normalize_status(target: &GpuTarget<'_>) -> PyResultValue {
     Ok(Value::Object(map))
 }
 
+/// Normalize the native macOS RM settings projection into the same dict shape
+/// `normalize_settings` produces for NVAPI/NVML: the writable families the
+/// backend cannot read are *absent* and named in `unavailable`, and the
+/// capability flags say up front that writes/restore are not available, so a
+/// UI disables its controls for the real reason instead of guessing.
+fn settings_macos_rm_to_map(
+    gpu_id: u32,
+    index: usize,
+    settings: &nvoc_core::DeviceSettings,
+) -> Value {
+    let mut map = Map::new();
+    map.insert("backend".into(), text("macos-rm"));
+    map.insert("gpu_id".into(), u64_value(gpu_id as u64));
+    map.insert("gpu_id_hex".into(), text(format!("0x{gpu_id:04X}")));
+    map.insert("index".into(), u64_value(index as u64));
+    if let Some(pstate) = settings.pstate {
+        map.insert("pstate".into(), text(format!("P{pstate}")));
+        map.insert("pstate_id".into(), u64_value(pstate as u64));
+    }
+    // Milliwatts are exact; keep whole watts integral like the NVAPI path and
+    // fall back to a fractional value when the driver reports a sub-watt limit.
+    let watts = |mw: u32| {
+        if mw % 1000 == 0 {
+            u64_value((mw / 1000) as u64)
+        } else {
+            f64_value(mw as f64 / 1000.0)
+        }
+    };
+    if let Some(mw) = settings.power_limit_mw {
+        map.insert("power_limit_current".into(), watts(mw));
+        map.insert("power_limit_w".into(), f64_value(mw as f64 / 1000.0));
+    }
+    if let Some(mw) = settings.power_limit_requested_mw {
+        map.insert(
+            "power_limit_requested_w".into(),
+            f64_value(mw as f64 / 1000.0),
+        );
+    }
+    if let Some(link_gen) = settings.pcie_link_gen {
+        map.insert("pcie_link_gen".into(), u64_value(link_gen as u64));
+    }
+    if let Some(bytes) = settings.memory_total_bytes {
+        map.insert("memory_total_bytes".into(), u64_value(bytes));
+        map.insert("memory_total_mib".into(), u64_value(bytes / (1024 * 1024)));
+    }
+    if let Some(bytes) = settings.memory_used_bytes {
+        map.insert("memory_used_bytes".into(), u64_value(bytes));
+        map.insert(
+            "memory_used_mib".into(),
+            f64_value(bytes as f64 / (1024.0 * 1024.0)),
+        );
+    }
+    if let Some(value) = settings.board_id {
+        map.insert("board_id".into(), u64_value(value as u64));
+    }
+    if let Some(value) = &settings.chip_sku {
+        map.insert("chip_sku".into(), text(value));
+    }
+    if let Some(value) = &settings.project {
+        map.insert("project".into(), text(value));
+    }
+    let caps = settings.capabilities;
+    map.insert(
+        "capabilities".into(),
+        value_object([
+            ("settings_read", bool_value(caps.settings_read)),
+            ("settings_write", bool_value(caps.settings_write)),
+            ("settings_restore", bool_value(caps.settings_restore)),
+            ("performance_writes", bool_value(caps.settings_write)),
+        ]),
+    );
+    if !settings.unavailable.is_empty() {
+        map.insert(
+            "unavailable".into(),
+            value_object(
+                settings
+                    .unavailable
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), text(v))),
+            ),
+        );
+    }
+    if !settings.notes.is_empty() {
+        map.insert(
+            "notes".into(),
+            Value::Array(settings.notes.iter().map(text).collect()),
+        );
+    }
+    Value::Object(map)
+}
+
 fn normalize_settings(target: &GpuTarget<'_>) -> PyResultValue {
+    // macOS RM: same dispatch rule as info/status. The RM settings query is
+    // read-only and never touches NVAPI/NVML.
+    if target.has_macos_rm() {
+        let device = target.macos_rm().map_err(to_py_err)?;
+        let settings = device.settings().map_err(to_py_err)?;
+        return Ok(settings_macos_rm_to_map(
+            target.id.0,
+            target.index,
+            &settings,
+        ));
+    }
     let settings = run(target, QueryGpuSettings).map_err(to_py_err)?.output;
     let mut map = Map::new();
     map.insert("gpu_id".into(), u64_value(target.id.0 as u64));
@@ -5648,6 +5750,46 @@ mod tests {
         // No codename is exposed by RM: do not fabricate an architecture.
         assert!(!map.contains_key("codename"));
         assert!(!map.contains_key("arch"));
+    }
+
+    /// The macOS settings projection must report what it reads, and must name
+    /// the families it cannot read instead of emitting default-looking zeros.
+    #[test]
+    fn macos_rm_settings_report_capabilities_and_gaps() {
+        let settings = nvoc_core::DeviceSettings {
+            pstate: Some(8),
+            power_limit_mw: Some(100_000),
+            power_limit_requested_mw: Some(100_000),
+            pcie_link_gen: Some(3),
+            memory_total_bytes: Some(4_294_967_296),
+            memory_used_bytes: Some(209_649_664),
+            board_id: Some(376),
+            chip_sku: Some("250".to_string()),
+            project: Some("G166".to_string()),
+            unavailable: std::collections::BTreeMap::from([(
+                "core_clock_offset".to_string(),
+                "no readable RM control on this driver (see notes)".to_string(),
+            )]),
+            capabilities: nvoc_core::SettingsCapabilities {
+                settings_read: true,
+                settings_write: false,
+                settings_restore: false,
+            },
+            notes: vec!["read: ...".to_string()],
+        };
+        let value = settings_macos_rm_to_map(0x100, 0, &settings);
+        let map = value.as_object().expect("settings map is an object");
+        assert_eq!(map["pstate"].as_str(), Some("P8"));
+        assert_eq!(map["power_limit_current"], u64_value(100));
+        assert_eq!(map["memory_total_mib"], u64_value(4096));
+        assert_eq!(map["capabilities"]["settings_write"], bool_value(false));
+        assert_eq!(map["capabilities"]["settings_read"], bool_value(true));
+        // No fabricated offset/boost values.
+        assert!(!map.contains_key("core_clock_current"));
+        assert!(!map.contains_key("mem_clock_current"));
+        assert!(!map.contains_key("voltage_boost_current"));
+        assert!(map["unavailable"].get("core_clock_offset").is_some());
+        assert_eq!(map["notes"].as_array().map(Vec::len), Some(1));
     }
 
     fn approx(map: &Map<String, Value>, key: &str, expected: f64) {

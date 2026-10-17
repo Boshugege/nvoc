@@ -4,9 +4,12 @@
 
 On x86_64 macOS with NullMoth, the native `macos-rm` backend is selected by
 default (or explicitly with `--macos-rm`). It currently supports `get-gpu-list`,
-`get-info` and `get-status` (P-state plus RUSD telemetry: clock domains,
+`get-info`, `get-status` (P-state plus RUSD telemetry: clock domains,
 temperatures, power/TGP, throttle reasons, per-fan RPM, utilization per engine,
-PCIe link generation and video-memory usage), and
+PCIe link generation and video-memory usage) and `get-settings` (read-only
+projection of the driver-visible configuration plus a `capabilities` block that
+reports settings writes and restore as unavailable, with the probed controls and
+RM status codes listed in `notes`), and
 `get-status --interval SECONDS [--count N]` for continuous monitoring. That mode
 reuses one read-only RM/RUSD session and streams one JSON object per line
 (`schema nvoc/macos-rm-sample/3`) with `sequence`, `host_time`,
