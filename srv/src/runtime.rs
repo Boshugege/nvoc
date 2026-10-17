@@ -83,13 +83,14 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 /// everywhere else. Both are returned as the same trait object so the whole
 /// loop, watchdog and HTTP plane stay backend-agnostic.
 fn discover_backend() -> Result<Box<dyn ControlBackend>, String> {
-    #[cfg(target_os = "macos")]
-    {
+    // `cfg!` rather than `#[cfg]` so both branches stay type-checked in every
+    // build: a macOS run then also proves the NVAPI branch still compiles
+    // (and vice versa), which is the point of the shared trait object. The
+    // condition folds to a constant, so only one branch is ever executed.
+    if cfg!(target_os = "macos") {
         let backend: Box<dyn ControlBackend> = Box::new(crate::macos::MacosRmBackend::discover()?);
         Ok(backend)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
+    } else {
         let backend: Box<dyn ControlBackend> = Box::new(NvapiBackend::discover()?);
         Ok(backend)
     }
