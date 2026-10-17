@@ -125,7 +125,7 @@ pub const VF_CURVE_UNREADABLE_REASON: &str = "the VF read half exists and is non
 /// The thermal family *is* read -- the sensor path answered with a temperature
 /// before the wedge -- so what is absent for a limit is a different field, and
 /// that distinction is exactly what the retired blanket sentence lost.
-pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "the thermal family itself is readable (0x20800513 answered a sensor reading before the wedge); the *configured* limit is a different field that has not been located yet (see notes)";
+pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "the thermal family itself is readable (0x20800513 answered a sensor reading before the wedge), and the *configured* limit is a different field that has not been located yet -- but it is located enough to say where it is not: the SDK's thermal control family is exactly two ids (0x20800513 and its non-privileged twin 0x20808513) and its opcodes cover targets, sensors, readings, reading ranges and a sensor target index, so no limit or policy opcode exists in the family we already call successfully; on the client side the configured limit is a *policy* -- a per-policy id, a Celsius value and a remove-TDP-limit flag, with PFF alongside it -- so the shape of the value is known and only the RM control that carries the policy query is still unlocated, and the in-tree NVAPI copy quotes no RM id for it at all (thermal.rs has zero, the whole gpu.rs has ten) (see notes)";
 
 /// The boost path is a SET, so it sits behind the same gate as the write
 /// families; nothing about it has been read, and nothing is claimed.

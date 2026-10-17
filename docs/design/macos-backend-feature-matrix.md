@@ -936,3 +936,15 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **四、顺带查证**：`stage-clkdom-20261017T091500Z`（尺寸扫描期）无行数据，`outputs/` 也再无该块转储 ⇒ **目前唯一行字节记录就是该 fixture**；已给 probe `--clkdom-read` 加**逐行非零 dword 普查**（仅 `size==12336`），使下次会话自动记录行尾字段 ✔。
 
 **验证范围**：probe 重建 `built probe-macos-rm-idle (profile idle)` ✔（普查分支只在读成功时打印，wedge 下**未被执行**，仅编译验证——如实标注）；**无写入、未提权**；本轮设备访问 1 次（anchor 轮询）；core 未改动，故未重跑 Rust 门（上一轮 fmt/clippy/tests 结论仍适用 ✔）。
+
+### 本轮追加三十六（2026-10-18，温度"配置上限"族：把"未定位"收窄成一条**有证据的调查结论** + 一个此前未见的遥测来源）
+
+**一、先在 SDK 里把这个族数清**（`ctrl/ctrl2080/ctrl2080thermal.h`）：热控制族**恰好两个 id**（`0x20800513` 与其非特权孪生 `0x20808513`）✔，其 opcode 全集为 targets(0x100)/target-type(0x101)/provider-type(0x301)/sensors(0x500)/sensor-provider(0x510)/**sensor-target(0x520)**/reading(0x1500)/**reading-range(0x540)** ✔ —— **没有任何 limit / policy opcode** ✔。逐条读结构：`SENSOR_TARGET` 操作数是 `{sensorIndex, targetIndex}`（是个**索引**，不是上限 ✔）；`READING_RANGE` 返回 `minimum/maximum`（是**传感器量程** ✔，probe 已经在读 ✔）。⇒ **"配置上限"不在我们已能成功调用的这个族里**，这是**数出来的结论**，不是"没搜到" ✔。
+
+**二、客户端文档给出该值的形状**：`nvapi-rs/src/thermal.rs` 的 `ThermalLimit { policy: ThermalPolicyId, value: CelsiusShifted, remove_tdp_limit: bool, pff: Option<PffStatus> }` ✔ 与原始结构 `NV_GPU_CLIENT_THERMAL_POLICY_STATUS_V3 { policy_id, temp_limit_C, remove_tdp_limit, … }`、成对变体 `NV_GPU_CLIENT_THERMAL_POLICIES_STATUS_{V2,V3}`/`..._ENTRY_V2` ✔ ⇒ **配置上限是"按策略"的**：策略 id + 摄氏上限 + 一个"移除 TDP 上限"标志，并带 PFF 子状态 ✔（因此它同时是一个**写入**面 ⇒ 保持写入门控 ✔）。
+
+**三、仍未定位的**：**哪条 RM 控制承载"策略查询"** ✔。证据：该副本 `thermal.rs` 引用的 RM id 数 = **0**，整个 `gpu.rs` 只有 **10** 个 ✔；escapes 有名（如 `0x07000038→0x20800532` 风扇一例 ✔）而热策略这条**尚无映射** ⇒ 记为"**尚未定位**"，并写明下一步就是把该 escape 查出来 ✔。
+
+**四、顺带纠到一条此前没有的风扇来源**（校核上轮措辞）：`src/common/sdk/nvidia/inc/class/cl00de.h` 声明 `RUSD_FAN_COOLER_INFO { NvU32 rpmCurr[16]; }` 与 `RUSD_FAN_COOLER_STATUS` ✔ ⇒ **RUSD 快照里本来就有风扇转速** ✔，且是我们**早已采样**的路径 ✔。上轮措辞"SDK 没有任何**风扇控制**"依然准确 ✔，此处补上的是**风扇遥测**：风扇族现在有**两个独立候选来源**（策略控制 + RUSD 遥测），后者受同一个 RUSD 页门禁阻塞 ✔。
+
+**验证范围**：core 改的是该族**用户可见成因串**（`get-settings --macos-rm` 的 `unavailable["thermal_limit"]` ✔）；fmt clean、clippy（core/cli/auto-optimizer，`-D warnings`）无 error、core tests 89+5+15 全绿 ✔。本轮**设备访问 1 次**（anchor 轮询）、**无写入、未提权**、客户端未构建 ✔。
