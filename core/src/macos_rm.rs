@@ -349,6 +349,37 @@ pub struct DeviceSettings {
     pub notes: Vec<String>,
 }
 
+/// What an entry can publish about one domain's offset: the value now, the span
+/// the driver declares, and the value a restore would have to write back.
+///
+/// All three are *reads*; nothing here writes. The span is `None` when the range
+/// block was not read, which is not a span of zero -- the same rule the settings
+/// field follows -- and `window_reason` then quotes the read's own outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ClockOffsetView {
+    /// The public name the same-snapshot comparison corroborated.
+    pub domain: String,
+    /// The device's bit for that record, as the document carries it.
+    pub domain_bit: u32,
+    /// The offset the clock document publishes for this domain, in kHz.
+    pub offset_khz: i32,
+    /// The frequency that record published, in kHz: the value that named the
+    /// domain, kept so a reader can redo the comparison that did it.
+    pub frequency_khz: u32,
+    pub corroboration: String,
+    /// The span the range block reported, in kHz. A *declared* span, not a
+    /// per-domain bound: `window_records` says how many records agreed on it.
+    pub window_min_khz: Option<i32>,
+    pub window_max_khz: Option<i32>,
+    pub window_records: Option<usize>,
+    /// Why there is no span, when there is none: the offset channel's own
+    /// outcome, not a summary of it.
+    pub window_reason: Option<String>,
+    /// The value a restore must write back after a write, which is the offset
+    /// read here. Reported now so the write gate has its target before it opens.
+    pub restore_khz: i32,
+}
+
 fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
     // Every family that would need a read we do not have. The keys are the
     // public vocabulary (`get-settings` / pynvoc), not RM command names.
@@ -932,6 +963,83 @@ pub fn parse_offset_delta(token: &str) -> Result<i32, String> {
 }
 
 impl DeviceSettings {
+    /// The entry's view of one domain: current offset, declared span, restore
+    /// target, each either measured or absent-with-a-reason.
+    ///
+    /// The name is resolved by [`Self::named_clock_offset`], so an uncorroborated
+    /// domain is refused here for the same reason it is refused there, and no
+    /// fallback number is invented on the way out.
+    pub fn clock_offset_view(&self, name: &str) -> Result<ClockOffsetView, String> {
+        let named = self.named_clock_offset(name)?;
+        Ok(ClockOffsetView {
+            domain: named.name.clone(),
+            domain_bit: named.domain_bit,
+            offset_khz: named.offset_khz,
+            frequency_khz: named.frequency_khz,
+            corroboration: named.corroboration.clone(),
+            window_min_khz: self.clock_offset_limits_khz.as_ref().map(|w| w.min_khz),
+            window_max_khz: self.clock_offset_limits_khz.as_ref().map(|w| w.max_khz),
+            window_records: self.clock_offset_limits_khz.as_ref().map(|w| w.records),
+            window_reason: self.window_absence_reason(),
+            restore_khz: named.offset_khz,
+        })
+    }
+
+    /// Why no offset span was read, or `None` when one was.
+    ///
+    /// Domain-independent on purpose: a caller reporting the whole projection
+    /// (the Python settings object, the optimizer) has no domain name to ask
+    /// with, and it must still be able to say *why* the window is missing.
+    pub fn window_absence_reason(&self) -> Option<String> {
+        match self.clock_offset_limits_khz {
+            Some(_) => None,
+            None => Some(self.range_outcome()),
+        }
+    }
+
+    /// The range block's own outcome, taken from the offset channel note.
+    ///
+    /// The note joins one outcome per block with `", "`, and an outcome can hold
+    /// its own comma, so the split re-joins a fragment whose parentheses are
+    /// still open. Every fragment that names the range or the window is kept, in
+    /// the order the note has them, and nothing is paraphrased: the caller gets
+    /// the layer's own words.
+    fn range_outcome(&self) -> String {
+        const POINTER: &str =
+            "no span was read: the range block's outcome is in the offset channel note";
+        let Some(body) = self
+            .notes
+            .iter()
+            .find_map(|note| note.strip_prefix("offset channel: "))
+        else {
+            return POINTER.to_string();
+        };
+        let mut depth = 0i32;
+        let mut fragment = String::new();
+        let mut kept: Vec<String> = Vec::new();
+        for part in body.split(", ") {
+            if !fragment.is_empty() {
+                fragment.push_str(", ");
+            }
+            fragment.push_str(part);
+            depth += part.matches('(').count() as i32 - part.matches(')').count() as i32;
+            if depth <= 0 {
+                if fragment.contains("range") || fragment.contains("window") {
+                    kept.push(fragment.clone());
+                }
+                fragment.clear();
+            }
+        }
+        if !fragment.is_empty() && (fragment.contains("range") || fragment.contains("window")) {
+            kept.push(fragment);
+        }
+        if kept.is_empty() {
+            POINTER.to_string()
+        } else {
+            kept.join(", ")
+        }
+    }
+
     /// The corroborated offset for one public domain name, or the reason this
     /// backend has none to report for it.
     pub fn named_clock_offset(&self, name: &str) -> Result<&NamedClockOffset, String> {
@@ -3878,6 +3986,106 @@ mod tests {
             "{note}"
         );
         assert!(note.contains("no window is reported"), "{note}");
+    }
+
+    /// The entry's numbers are one read: current value, the span the driver
+    /// declares, and the value a restore would have to write back.
+    ///
+    /// The span here comes through the production path (`apply_offset_channel`
+    /// parsing a three-record range block), not from a hand-set field, so a
+    /// regression in that parsing shows up as an entry that lost its window. The
+    /// name still comes from the same-snapshot comparison, because no name is
+    /// invented for a bit the comparison did not corroborate.
+    #[test]
+    fn the_entry_view_carries_the_window_and_the_restore_target() {
+        let range = macos_offset::OffsetRange {
+            head: Vec::new(),
+            records: (0..3)
+                .map(|index| macos_offset::OffsetRangeRecord {
+                    index,
+                    tag: 0x0100_0101 + index as u32,
+                    max_vf_khz: 1_638_400,
+                    min_khz: -18_750,
+                    max_khz: 18_750,
+                })
+                .collect(),
+        };
+        let mut settings = bare_settings();
+        apply_offset_channel(
+            &mut settings,
+            &offset_snapshot(macos_offset::OffsetBlockRead::Parsed(range)),
+        );
+        settings.clock_offsets = offsets(&[(1, 1_575_000, -1)]);
+        corroborate_named_offsets(
+            &mut settings,
+            &DeviceStatus {
+                graphics_clock_khz: Some(1_575_000),
+                ..Default::default()
+            },
+        );
+
+        let view = settings.clock_offset_view("graphics").expect("named");
+        assert_eq!(view.domain_bit, 1);
+        assert_eq!((view.frequency_khz, view.offset_khz), (1_575_000, -1));
+        assert_eq!(
+            (view.window_min_khz, view.window_max_khz),
+            (Some(-18_750), Some(18_750))
+        );
+        // The accessor a caller without a domain name uses agrees with the view.
+        assert_eq!(settings.window_absence_reason(), None);
+        assert_eq!(view.window_records, Some(3));
+        assert_eq!(view.window_reason, None);
+        // The restore target is the value read before any write, so it is the
+        // current offset and not a caller-supplied number.
+        assert_eq!(view.restore_khz, view.offset_khz);
+        assert!(
+            view.corroboration.contains("1575000 kHz"),
+            "{}",
+            view.corroboration
+        );
+    }
+
+    /// No span read is not a span of zero, and an unnamed domain is refused at
+    /// the entry for the same reason the backend refuses it.
+    #[test]
+    fn an_unread_window_is_absent_with_the_blocks_own_reason() {
+        let mut settings = bare_settings();
+        apply_offset_channel(
+            &mut settings,
+            &offset_snapshot(macos_offset::OffsetBlockRead::Refused(0x62)),
+        );
+        settings.clock_offsets = offsets(&[(1, 1_575_000, -1)]);
+        corroborate_named_offsets(
+            &mut settings,
+            &DeviceStatus {
+                graphics_clock_khz: Some(1_575_000),
+                ..Default::default()
+            },
+        );
+
+        let view = settings.clock_offset_view("graphics").expect("named");
+        assert_eq!((view.window_min_khz, view.window_max_khz), (None, None));
+        assert_eq!(view.window_records, None);
+        // A caller reporting the whole projection has no domain to ask with, so
+        // the reason must also be reachable without one -- and it is the same
+        // text, not a paraphrase.
+        assert_eq!(
+            settings.window_absence_reason().as_deref(),
+            view.window_reason.as_deref(),
+            "the projection-wide reason and the view's must be the same words"
+        );
+        let reason = view.window_reason.expect("an absent span states its cause");
+        assert!(reason.contains("no window is reported"), "{reason}");
+        assert!(reason.contains("refused"), "{reason}");
+
+        // The domain itself is still reported: losing the window must not lose
+        // the offset, or the two reads would collapse into one failure.
+        assert_eq!(view.offset_khz, -1);
+
+        // A domain the comparison did not corroborate is an error here, with the
+        // reason that says which comparison failed -- never a zero.
+        let error = settings.clock_offset_view("video").unwrap_err();
+        assert!(error.contains("video"), "{error}");
     }
 
     #[test]

@@ -81,7 +81,6 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                     let domain = option_domain(invocation, ClockDomain::Graphics)?;
                     let name = domain_label(domain);
                     let settings = run(&target, nvoc_core::QueryMacosRmSettings)?.output;
-                    let named = settings.named_clock_offset(name).map_err(CliError::new)?;
                     // The optional dry-run step. It is computed from this same
                     // snapshot with the core planner the optimizer and the
                     // Python bindings call, so all three accept the same request
@@ -99,20 +98,7 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                             serde_json::to_value(&step)?
                         }
                     };
-                    json!({
-                        "domain": name,
-                        // The backend's own P-state reading; this command's
-                        // --pstate option is not part of the offset records (they
-                        // are per domain, not per P-state), so it is reported
-                        // rather than matched.
-                        "pstate": settings.pstate,
-                        "domain_bit": format!("0x{:x}", named.domain_bit),
-                        "offset_mhz": f64::from(named.offset_khz) / 1000.0,
-                        "offset_khz": named.offset_khz,
-                        "frequency_khz": named.frequency_khz,
-                        "corroboration": named.corroboration,
-                        "plan": plan,
-                    })
+                    offset_entry_json(&settings, name, plan)?
                 }
                 // The fan-info contract: a cooler count plus, on NVML, three
                 // percentages. This backend publishes a tachometer reading per
@@ -206,9 +192,121 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     })
 }
 
+/// The `get-pstate-global-freq-offset` body, built from one read.
+///
+/// Kept as a function of the projection so the shape of this entry can be tested
+/// without a device: the numbers come from [`nvoc_core::DeviceSettings`] (one
+/// shared view, so this entry cannot drift from the Python bindings), and the
+/// only thing added here is the public vocabulary.
+fn offset_entry_json(
+    settings: &nvoc_core::DeviceSettings,
+    name: &str,
+    plan: serde_json::Value,
+) -> Result<serde_json::Value, CliError> {
+    let view = settings.clock_offset_view(name).map_err(CliError::new)?;
+    Ok(json!({
+        "domain": view.domain,
+        // The backend's own P-state reading; this command's --pstate option is
+        // not part of the offset records (they are per domain, not per P-state),
+        // so it is reported rather than matched.
+        "pstate": settings.pstate,
+        "domain_bit": format!("0x{:x}", view.domain_bit),
+        "offset_mhz": f64::from(view.offset_khz) / 1000.0,
+        "offset_khz": view.offset_khz,
+        "frequency_khz": view.frequency_khz,
+        "corroboration": view.corroboration,
+        // The span the driver's range block declares, in kHz, and the record
+        // count it was read from. Null is "not read", never a span of zero;
+        // window_reason then carries that block's own outcome.
+        "window_min_khz": view.window_min_khz,
+        "window_max_khz": view.window_max_khz,
+        "window_records": view.window_records,
+        "window_reason": view.window_reason,
+        // The value a restore would have to write back: the offset this same read
+        // found. Printed before the write gate opens, so the target is not
+        // invented later.
+        "restore_khz": view.restore_khz,
+        "plan": plan,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The offset entry's shape without a device: what the read found plus the
+    /// two things the write gate needs before it opens.
+    fn named_graphics_offset() -> nvoc_core::NamedClockOffset {
+        nvoc_core::NamedClockOffset {
+            name: "graphics".to_string(),
+            domain_bit: 1,
+            frequency_khz: 1_575_000,
+            offset_khz: -1,
+            corroboration: "matched the live graphics clock of this snapshot".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_offset_entry_publishes_the_driver_span_and_the_restore_target() {
+        let settings = nvoc_core::DeviceSettings {
+            clock_offsets_named: Some(vec![named_graphics_offset()]),
+            clock_offset_limits_khz: Some(nvoc_core::ClockOffsetLimits {
+                min_khz: -18_750,
+                max_khz: 18_750,
+                records: 3,
+            }),
+            pstate: Some(0),
+            ..Default::default()
+        };
+
+        let entry = offset_entry_json(&settings, "graphics", serde_json::Value::Null).unwrap();
+        assert_eq!(entry["domain"], "graphics");
+        assert_eq!(entry["domain_bit"], "0x1");
+        assert_eq!(entry["offset_khz"], -1);
+        assert_eq!(entry["offset_mhz"], -0.001);
+        assert_eq!(entry["window_min_khz"], -18_750);
+        assert_eq!(entry["window_max_khz"], 18_750);
+        assert_eq!(entry["window_records"], 3);
+        assert!(entry["window_reason"].is_null(), "{entry}");
+        assert_eq!(
+            entry["restore_khz"], -1,
+            "the restore target is the read value"
+        );
+        assert!(
+            entry["plan"].is_null(),
+            "no --plan-delta means no plan object"
+        );
+    }
+
+    /// No span read: the keys stay null and the reason says why, so a missing
+    /// window can never be read as a span of zero, and a domain the comparison
+    /// did not corroborate is refused rather than reported as a zero offset.
+    #[test]
+    fn an_unread_window_reaches_the_entry_as_null_with_a_reason() {
+        let settings = nvoc_core::DeviceSettings {
+            clock_offsets_named: Some(vec![named_graphics_offset()]),
+            notes: vec![
+                "offset channel: range refused 0x00000062, no window is reported for this reason"
+                    .to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let entry = offset_entry_json(&settings, "graphics", serde_json::Value::Null).unwrap();
+        assert!(entry["window_min_khz"].is_null(), "{entry}");
+        assert!(entry["window_max_khz"].is_null(), "{entry}");
+        assert!(entry["window_records"].is_null(), "{entry}");
+        assert!(
+            entry["window_reason"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no window is reported"),
+            "{entry}"
+        );
+        assert_eq!(entry["offset_khz"], -1, "the offset is still reported");
+
+        assert!(offset_entry_json(&settings, "video", serde_json::Value::Null).is_err());
+    }
 
     #[test]
     fn backend_flag_is_global_and_conflicts_with_other_backends() {
