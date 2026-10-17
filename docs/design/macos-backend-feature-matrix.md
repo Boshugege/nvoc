@@ -257,9 +257,9 @@
 | 0 基线/功能表 | 起点、边界、待办、证据索引 | 完成：本文件 + SSH/硬件/分支核对 + 101 条命令表 | 随每阶段更新并复核 |
 | 1 正确性与资源生命周期 | 修 ABI/释放顺序/旧数据/重连/输出/停止 | **完成**：`78d299d`、`a687453`、`8fb1aeb`；实机 5 项硬件测试、ABI 指纹、broken-pipe、SIGINT 全通过 | 保持回归 |
 | 2 基础信息与遥测 | 设备/信息/状态/连续监控 + 公共字段 | **完成**：样本 ABI v3（14 节/41 槽）落地——限频原因、逐风扇、有效/目标/视频/SM 频率、显存用量、逐引擎利用率、PCIe 代际、多温度、功耗族全部实测；`clkThrottleInfo`/`temps`/`avgPowerUsage`/`tgpmW`/`fanCoolerStatus.rpmCurr[16]`/`procUtil`/`pciBusData` 读取生效，`POLL_MEMORY` 经实测确认 610.57.04 恒返回 `RUSD_TIMESTAMP_INVALID`（`memEcc`/`memRowRemap` 不携带）、SM 域 Turing 为 0/0 → `unavailable`；`get-status` 人类/JSON/JSONL（schema `nvoc/macos-rm-sample/3`）一致；**1 Hz × 10 分钟长跑**（`stage2-longrun-…`）+ **全量验收**（`stage2-telemetry-20261017T034627Z`，15 项 rc=0）+ Metal 负载响应（gfx 1950 MHz / 54.9 C / 12.7 W / util 91% / gr 91.5% / fan 4243 rpm）；pynvoc `backends="macos-rm"` 的 discover/info/status 已分发并归一化 | 电压读取（`get-status` 无 voltage 字段）留给阶段 3/7 的当前设置读取 |
-| 3 当前设置/范围/恢复基础 | `get-settings`、范围/默认值/粒度、快照/回读/恢复 | **只读部分完成**：`get-settings --macos-rm` 输出驱动可见配置 + 能力位 + 缺口原因（core/CLI/pynvoc 三处一致）；写入族全部保持拒绝。**此前"驱动拒绝"是误判——根因是我们传错参数尺寸**（修正见 `a87876a`）：`0x1f` = `NV_ERR_INVALID_ARGUMENT`（尺寸/参数不符），对照缺方法 `0x1b`、`BUS_GET_PCI_INFO` 传错尺寸也返回 `0x1f`。据此复核：`PERF_GET_LEVEL_INFO_V2`(0x2080200b) 容量 0 → `NV_OK` 但 0 条、容量 ≥1 → `0x1f`，**驱动不提供频率域表**；Tier-B GET `rails-get-info`(0x2080B201) **2444 B**、`rails-get-status`(0x2080B202) **3232 B**、`vfpoints-get`(0x208090A2) **524 B** 在正确尺寸下被接受（`NV_OK`），但 payload 只有 16/0/1 个非零字且 `rails-get-status` 复读不一致 → **接受 ≠ 可读，布局未解码**；`edpp-limit-info`/`pmumon-clk-samples` 返回 `0x56` | 公开 SDK（610.57.04 `ctrl2080perf.h` 全量 `PERF_*`）**无任何时钟/电压偏移或 VF 编辑命令**；偏移/VF 需非公开接口或另一条读通道。在此之前不声明范围/恢复 |
+| 3 当前设置/范围/恢复基础 | `get-settings`、范围/默认值/粒度、快照/回读/恢复 | **只读部分完成**：`get-settings --macos-rm` 输出驱动可见配置 + 能力位 + 缺口原因（core/CLI/pynvoc 三处一致）；写入族全部保持拒绝。**此前"驱动拒绝"是误判——根因是我们传错参数尺寸**（修正见 `a87876a`）：`0x1f` = `NV_ERR_INVALID_ARGUMENT`（尺寸/参数不符），对照缺方法 `0x1b`、`BUS_GET_PCI_INFO` 传错尺寸也返回 `0x1f`。据此复核：`PERF_GET_LEVEL_INFO_V2`(0x2080200b) 容量 0 → `NV_OK` 但 0 条、容量 ≥1 → `0x1f`，**驱动不提供频率域表**；Tier-B GET `rails-get-info`(0x2080B201) **2444 B**、`rails-get-status`(0x2080B202) **3232 B**、`vfpoints-get`(0x208090A2) **524 B** 在正确尺寸下被接受（`NV_OK`），但 payload 只有 16/0/1 个非零字且 `rails-get-status` 复读不一致 → **接受 ≠ 可读，布局未解码**；`edpp-limit-info`/`pmumon-clk-samples` 返回 `0x56` | 公开 SDK（610.57.04 `ctrl2080perf.h` 全量 `PERF_*`）**无任何时钟/电压偏移或 VF 编辑命令**；唯一的公开读写对是 RATED_TDP 仲裁（读 0x2080206e 实测可用，写 0x2080206f 见阶段 5）。偏移/VF 需非公开接口或另一条读通道。在此之前不声明范围/恢复 |
 | 4 核心/显存频率控制 | 偏移 GET/SET、锁频、reset | 未开始：公开 RM 控制面**无任何时钟/电压偏移读写命令**（`ctrl2080perf.h` 全量 `PERF_*`；`ctrl2080volt.h`/`ctrl2080clkavfs.h` 不含命令；无 VFP/VF-point 命令）——见 `review-stage4-7-read-channel-20261017.md`。**追加证据（该 review §6）**：三个 campaign ID 在本机全部 NVIDIA 二进制（`NVRM`/`NVRMFB`/`NVAccel`/`NVRMAGDC.kext`、`libvulkan_nouveau.dylib`、`air-opt`）里 **0 命中**，而同一扫描对公开 ID 有 **387/415（93%）**命中——本机没有可反汇编的实现体 | 结构在 GPU 侧 RM（GSP/固件），需供应商资料/非公开 SDK/固件逆向；写入依赖阶段 3 与授权 |
-| 5 功耗/温度/运行策略 | W/%、温度墙、Boost | 遥测可读；无写入 | 同上 |
+| 5 功耗/温度/运行策略 | W/%、温度墙、Boost | 遥测可读；**RATED_TDP 仲裁读面实测可用**：`NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL`(0x2080206e) 对全部 5 个 client 返回 `NV_OK`/`DEFAULT(0)`（GLOBAL/OS/PROFILE 的 vPstate=TURBO_BOOST），越界 client(5/255)→`0x1f` 证明**查找经校验**；姊妹 STATUS 命令 SDK 只给 message id（推导 id `0x2080206d`→`0x56`）。新增只读 flag `--rated-tdp-read`，证据 `stage-ratedtdp-20261017T055450Z`。仍**无写入** | 唯一公开写对 = `PERF_RATED_TDP_SET_CONTROL` 0x2080206f（client GLOBAL→`FORCE_EXCEED`=解除 RATED_TDP 越点限制，**可逆、无偏移无电压**）——本战役目前找到的**最低风险写候选**，属性能写**门控未发**；EDPP/温度墙写面在公开 610.57.04 `ctrl2080perf.h/thermal.h/pmgr.h` 中**不存在** |
 | 6 逐风扇/模式/曲线 | 风扇模式、曲线读写 | 遥测只有最大 RPM | 同上 |
 | 7 V/F、电压点、高级超频 | 曲线点/偏移/导入导出 | 未开始：`vfpoints-get`(0x208090A2) 以 524 B 参数被接受但 payload 仅 1 个非零字，非曲线数据；该 ID 及 `rails-get-*` 在公开 OGKM 610.57.04 中**完全不存在**（非公开固件控制），公开面也无 VF 命令；该 ID 在本机所有 NVIDIA 二进制里 0 命中（review §6），即结构在固件侧 | 需供应商资料/非公开 SDK/固件逆向；写入依赖授权 |
 | 8 其余功能族 | VBIOS、EDID、限频原因、策略 | 部分：`get-vbios -i` 离线解析可用 | 逐项给依据 |
@@ -309,3 +309,32 @@
   `ctrl2080volt.h`/`ctrl2080clkavfs.h` 不含任何命令、也无 VFP/VF-point 命令；NVAPI 私有 VF 入口在
   macOS 无运行时。偏移/VF/电压读取**需非公开固件结构**这一外部条件，在此之前相关实机操作保持门控。收尾追加证据（同 review §6，`outputs/probe-scripts/`）：这三个 ID 在本机全部 NVIDIA 二进制（NVRM/NVRMFB/NVAccel/NVRMAGDC kext、libvulkan_nouveau、air-opt）里 **0 命中**，而同一扫描技术对公开控制 ID 有 **387/415（93%）命中**（灵敏度对照：`PERF_GET_LEVEL_INFO_V2`、`BUS_GET_PCI_INFO`、`BUS_GET_INFO_V2` 均命中）→ 本机**不存在可反汇编的实现体**，params 结构在 GPU 侧 RM（GSP/固件）
 - 未运行：完整 workspace `--ignored`、stage 3 探针组、任何性能 SET。
+
+## 五、本阶段优先级与验证范围（2026-10-17 局部调整）
+
+用户将压力测试阶段的优先级明确为：**先复用原 NVOC 的 Vulkan 压力实现（`--vulkan-only`），
+Metal 校验器作为补充**。功能表据此确认选择依据与已/未实测范围如下。
+
+- **选择依据（只读确认，未改驱动）**：
+  1. 原 `cli-stressor-cuda-rs` 已有 `--vulkan-only` 路径，**不需要 CUDA**，且本身是跨平台离屏实现；
+  2. 黑苹果已在 `/Library/GPUBundles/nvmtl/` 提供 Vulkan loader、`libvulkan_nouveau.dylib`
+     与 `nvk_icd.json`（NullMoth 的 Metal 插件底层同样走 NVK）；
+  3. 因此**不默认必须经过 MoltenVK**，也不预先断定 macOS 无法复用原 Vulkan 压力——先按能力探测推进。
+- **实现方式**：只新增 macOS 的 **loader/ICD 解析与设备选择适配**（commit `4993a42`，文件
+  `cli-stressor-cuda-rs/src/vulkan_loader.rs`），**原负载、参数、停止、进度与结果流程零算法改动**，
+  其他平台行为不动。
+- **已实测范围**：
+  - **压力负载（Vulkan）**：无 env 冷启动 rc=0；5/10/30 s 阶梯与 60 s stock 负载 rc=0；
+    错误路径（`--gpu-index` 越界 / `--pci-bus` 不匹配）rc=1；`--vulkan-window` 在非 Windows 回退
+    离屏 rc=0；同步遥测 util 峰值 100%/均值 83%、gfx 1.53→1.95 GHz、功耗 11.5→13.5 W、
+    温度 54→62 ℃、风扇 1778→1920 rpm（`stage9-vulkan-20261017T041959Z`、`stage9-accept-20261017T045311Z`）。
+  - **正确性校验（Metal/CPU-reference，补充）**：`stress-macos`（`metal_check --verify`）做全量
+    bit-exact 比对 + 启动自检 + 负例 rc=1；60 s 限时 1206 次 dispatch/0 失败、
+    `--stress 300` 收 SIGINT 后 rc=0 优雅停止（`stage9-stress-20261017T041107Z`）。
+- **范围边界（不得据此宣称稳定）**：Vulkan 负载只报告 FPS，**不读回比对**（上游背景 pass 的
+  fragment 循环当前为空，见 §四）；它是**压力负载**而非正确性证据。正确性只由补充校验器给出，
+  且校验器本身与超频偏移无关。**渲染成功或未崩溃 ≠ 超频稳定**。
+- **失败记录要求**（若后续复用失败）：记录具体阶段、NV_STATUS/错误、设备能力与最小修复尝试；
+  只在拿到明确阻塞证据后才评估替代路径。
+- **安全门槛未变**：低强度/短时/可停止优先；进程级配置；不改全局驱动配置、EFI、boot-args；
+  写入仍门控；客户端不部署、不自动重启、不操作 PR。
