@@ -591,3 +591,20 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **已登记的证伪预测（重启后 `--clkctl-hex` 首发，零写入）**：头部 14 个 dword；条目 0/1/2/3/4/5/7 各 13 个；条目 6 **只写 1 个**（其戳应在 byte `60+6*64=444`、值 `03 03`）；任何条目的 `+4/+48/+60` 都不被写；总数 **106**。任何别的切分都证伪「类型条件」模型——这正是跑它的目的，而不是为了凑数。
 
 **验证范围（如实）**：以上全部为**静态 + 已录盘字节**重读，外加本机（开发端）跑 `decode-clk-containers.py --selftest` 与其对 `clkctl-hex.txt` 的解码；**测试机本轮未发出任何 GPU 请求**（GSP 仍 `0x62`，见 §6 与 INDEX.md 最新一条轮询）。**写入面结论不变**：`settings_write=false`，未发任何 SET、未提权、未重启。详见 `docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md` §18（并见 §17 的孪生位规则）。
+
+
+### 本轮追加十（2026-10-17，静态：偏移通道接入公共 core 的清单已勘定 + 公开理由措辞更正）
+
+**为什么做**：第一验收标准是**用户可见行为一致**，而可见面走的是公共 `get-settings`/`set-*` 词汇，不是验证探针。探针有这条通道、公共 core 没有——把「没接上」具体是什么查清楚，接的时候才是机械动作而不是重新设计。本轮的交付物是 [macos-offset-channel-integration-plan.md](macos-offset-channel-integration-plan.md)（含逐条证据）。
+
+**载重结论：不需要新传输层。** `core/build.rs:19-23` 已经把 `core/native/macos_rm.c` 与 `probe-macos-rm/src/nvx_xnu.c`、`nvx_rm.c` 一起编译 ⇒ 公共 macOS 后端用的就是探针那套 `nvx_rm_control()`；`core/native/macos_rm.c:133` 的 `read_live_controls()` 每个采样已经在发两条实时 RM 控制（P-state、FB heap）。所以 `0x20809019`/`0x20809025`/`0x2080901b` 的接入是**既有调用路径的有界扩展**（多一次控制调用 + ABI + Rust 管道），**不动内核、不动驱动**。
+
+**同时记下公共面今天的状态与原因**：`core/src/macos_rm.rs` 里**一次 RM 控制调用都没有**，三个 id 只出现在 `notes` 散文（`:183`）与不可读理由串（`:110`）里。读路径已按「可在 G1 之前就上线」写好规范：三条 GET 各自带状态（缺读数**绝不当 0**）、**条目索引 ≠ 域位**、**范围块与承载偏移的字段不得混同**。
+
+**写入门槛不动**：本计划**只加读**，因此不可能削弱 `settings_write=false`；并写明「可称已实现且实测」的四个条件。
+
+**两个未决项如实写下**：① G1（槽身份）；② `0x20809025` 三条记录的**域归属**——其记录首 dword 读作 `0x01030101`/`0x01040101`/`0x01050101`（中字节 `03/04/05` 呈计数序），而 `0x20809019` 目录枚举的是**域位**（`1,2,16,4,8,…`），`03/04/05` 是否域索引**尚未确立** ⇒ 范围只能**暂按记录**报告、不硬贴域名。
+
+**公开措辞更正（本轮唯一代码改动）**：`CLOCK_OFFSET_UNREADABLE_REASON` 原写「no current offset … come back zero」，读起来像「驱动从不填值」——那正是 §15/§18 已经推翻的读法。实测相反：handler**确实会写**它的 value dword，在「写不会被漏掉」的背景上它们**全为 0** ⇒ 正确表述是「**当前没有施加偏移**」，缺的只是**承载偏移的那个 dword 的身份**。理由串与 `notes` 已按此更正，并把**按类型全有/全无**的写集一并写进 notes。「族仍留在 `unavailable`」是刻意的：公共会话**根本还没携带该块**，两个能力位保持 false，**只有陈述的成因变了**。字符串级改动，无测试断言旧措辞。
+
+**验证范围（如实）**：静态读 `core/build.rs`、`core/native/*`、`core/src/macos_rm.rs`、`nvoc-python/src/lib.rs` 与已录盘探针记录；**开发端不构建**。代码改动在**测试机**（macOS，真实 cfg）验证：源文件 sha256 与开发端一致（`13c2589b…`），`cargo fmt -p nvoc-core -- --check` **rc=0**、`cargo check -p nvoc-core --offline` **rc=0**（22.39 s）。**未发出任何 GPU 请求、未发任何 SET、未提权、未改驱动/EFI/boot-args、未重启、未操作 PR。**
