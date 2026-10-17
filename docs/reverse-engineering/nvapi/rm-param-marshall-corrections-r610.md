@@ -249,6 +249,32 @@ probe runbook's third case) -- index addressing predicts records for exactly one
 entry, i.e. 14 + 13 dwords for a value-carrying entry, while bit addressing for
 that same mask would select the entry stamped bit 0.
 
+#### 5.2.1 Which rows the measured seed actually reached (this round)
+
+The directory's own rows settle what any "the value dwords read zero" statement
+covers, because a row the seed never selected had its dwords left alone. Read as
+row bits, the seed the recorded run used (`0xFF` at `+4`) reaches rows 0-7 and
+stops there; the rows beyond it are row 8, whose `1<<id` names id 21 (MSD), and
+row 9, id 5 (HOST).
+
+That matters for this project's own scope: the domains the backend reports are
+core (id 0) and memory (id 4), which the rows place at row 0 and row 2 -- *inside*
+the measured window. The two unchecked rows are peripheral, so the caveat is
+bounded to them rather than to the reading as a whole. Re-running the decoder on
+the recorded payload also re-confirmed the header identity (`+12` and `+20` both
+`0x38007f`, the union of the ten rows' `1<<id`, against `0x3ff` for rows-as-bits),
+so the placement is derived from the same rows the header check validates.
+
+One further observation is recorded as a *candidate*, because its attribution is
+proven but its quantity is not: exactly the two rows that carry a per-domain
+`i16` pair at `+44` are row 0 (id 0, core) with `{-1000, 1000}` and row 2 (id 4,
+memory) with `{-1000, 3000}`, and row 0 alone carries `+40 = 30000`. Unlike the
+range block, whose three records cannot be attributed to named domains, these
+pairs sit in rows that *are* named. Read as kHz they would be +-1 MHz and
+-1/+3 MHz -- noticeably narrower than the range block's +-18750 kHz pair, so they
+are probably not the same quantity. Left as a candidate and as a second, better
+-attributed possible source for the limits; no unit is asserted.
+
 ### 5.3 The 0x24 coordinate constant, re-derived from the recorded bytes (field-level only)
 
 The candidate value map in this document and in `decode-clk-containers.py`'s

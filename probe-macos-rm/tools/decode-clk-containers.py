@@ -175,6 +175,12 @@ def parse_blocks(text: str) -> dict[tuple[int, int], bytes]:
     return {k: bytes(v) for k, v in blocks.items()}
 
 
+# The selection mask the recorded 0x2080901b run seeded at byte +4 (the field the
+# reply's write set showed to be an input). Row coverage is computed from this,
+# not assumed to be contiguous.
+MEASURED_SEED = 0xFF
+
+
 def mask_consistency(buf: bytes, header: int, stride: int) -> list[str]:
     """Cross-check a directory header against the rows it actually lists.
 
@@ -208,6 +214,25 @@ def mask_consistency(buf: bytes, header: int, stride: int) -> list[str]:
         want = index_mask if off == 4 else domain_mask
         verdict = "MATCH" if value == want else f"mismatch (0x{value:08x})"
         out.append(f"    head +{off} = 0x{value:08x}: {verdict}")
+    out.append("    rows: " + " ".join(f"{i}:id{bit.bit_length() - 1}"
+                                      for i, bit in rows))
+    # Which rows the seed the recorded run used actually reached, read as row
+    # bits -- the reading the 0x2080901b write-set arithmetic requires and the
+    # header cross-check above confirms. This is what bounds any "zero measured"
+    # claim: the dwords of a row the seed did not reach were never written.
+    covered = [i for i, _ in rows if (MEASURED_SEED >> i) & 1]
+    beyond = [(i, bit.bit_length() - 1) for i, bit in rows
+              if not (MEASURED_SEED >> i) & 1]
+    reach = (f"rows {covered[0]}..{covered[-1]}" if covered and
+             covered == list(range(covered[0], covered[-1] + 1))
+             else f"rows {covered}")
+    if beyond:
+        far = "; ".join(f"row {i} id {bit}" for i, bit in beyond)
+        out.append(f"    seed {MEASURED_SEED:#04x} reaches {reach}, "
+                   f"beyond it: {far}")
+    else:
+        out.append(f"    seed {MEASURED_SEED:#04x} reaches {reach} and "
+                   "every listed row")
     return out
 
 
@@ -397,6 +422,11 @@ def selftest() -> int:
     assert "10 rows; rows-as-bits 0x000003ff" in live, live
     assert "union of their domain bits 0x0038007f" in live, live
     assert live.count("MATCH") == 3, live
+    # ... and the placement line has to say which rows the recorded seed reached,
+    # because that is what bounds every "the value dwords read zero" claim.  On
+    # the live ten rows the 0xFF seed stops at row 7, leaving ids 21 and 5.
+    beyond = "seed 0xff reaches rows 0..7, beyond it: row 8 id 21; row 9 id 5"
+    assert beyond in live, live
     bent = bytearray(bufdir)
     struct.pack_into("<I", bent, 12, 0x38003F)  # forget one row's bit
     sink = io.StringIO()
