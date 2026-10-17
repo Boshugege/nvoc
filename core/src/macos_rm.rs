@@ -205,6 +205,31 @@ pub struct ClockOffsetReading {
     pub offset_khz: i32,
 }
 
+/// A domain this backend can *name*, because the record it read published the
+/// same frequency that the live clock of the same snapshot reported.
+///
+/// No public OGKM header names a clock domain (see [`ClockOffsetDomain`]), so no
+/// name here comes from a table: `name` is the frontend's own vocabulary -- the
+/// same word `get-status` uses for the live clock the comparison ran against --
+/// and `corroboration` carries the measurement, so a reader can reject the name
+/// without re-reading the device. The comparison is also why only some domains
+/// can ever appear: a domain the status reports no live clock for cannot be
+/// named, and it is left out rather than guessed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct NamedClockOffset {
+    /// `graphics`, `memory`, `video` or `processor`: the public domain whose
+    /// live clock the record's own published frequency matched.
+    pub name: String,
+    /// The device's domain bit for that record, as the document carries it.
+    pub domain_bit: u32,
+    /// The frequency the record published, in kHz (equal to that live clock).
+    pub frequency_khz: u32,
+    /// The signed offset the record published, in kHz.
+    pub offset_khz: i32,
+    /// The comparison behind the name, spelled out so it can be falsified.
+    pub corroboration: String,
+}
+
 /// The offset window the driver reports for a clock domain, in kHz.
 ///
 /// Only present while the range block was read *and* every readable record of
@@ -295,6 +320,12 @@ pub struct DeviceSettings {
     /// Read-only evidence, not a capability: the write gate is unchanged, and the
     /// queued write is what would prove these numbers move when one is set.
     pub clock_offsets: Option<Vec<ClockOffsetReading>>,
+    /// The subset of `clock_offsets` this backend can put a *name* on, because
+    /// the record's published frequency equalled the live clock of the same
+    /// snapshot and no other record did. `None` means the offset channel was not
+    /// read at all; an empty list means it was read and named nothing, which is
+    /// a measurement and not a missing value.
+    pub clock_offsets_named: Option<Vec<NamedClockOffset>>,
     /// Configuration families this backend cannot read (or write) yet, keyed by
     /// the family name, with the cause.
     pub unavailable: BTreeMap<String, String>,
@@ -354,6 +385,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
         clock_offset_limits_khz: None,
         clock_offset_domains: None,
         clock_offsets: None,
+        clock_offsets_named: None,
         unavailable,
         capabilities: SettingsCapabilities {
             settings_read: true,
@@ -513,6 +545,128 @@ fn apply_offset_channel(
         .push(format!("offset channel: {}", outcomes.join(", ")));
 }
 
+/// The public domains this backend can try to name, each with the live clock of
+/// the same snapshot that the comparison runs against.
+///
+/// These are the frontend's words (the ones `get-status` uses), not RM domain
+/// names: which record they end up pointing at is decided by the measurement
+/// below, not by this table.
+fn namable_domains(status: &DeviceStatus) -> [(&'static str, Option<u32>); 4] {
+    [
+        ("graphics", status.graphics_clock_khz),
+        ("memory", status.memory_clock_khz),
+        ("video", status.video_clock_khz),
+        ("processor", status.sm_clock_khz),
+    ]
+}
+
+/// Attaches a name to the offset records whose own published frequency equals
+/// the live clock of the same snapshot, and to no others.
+///
+/// This is the one comparison that can name a domain without a header that names
+/// clock domains: the document publishes, per domain bit, the frequency it holds
+/// *and* the offset it applies, and `get-status` reports the live clock for the
+/// public domains. Equality is required to be exact and unique -- a tie names
+/// neither record rather than picking one -- so the failure direction is "left
+/// unnamed", never "misnamed". Every outcome is written into `notes`, so a reader
+/// of a `None`/empty list can see which comparison was attempted.
+///
+/// This does *not* read the offset off a frequency move (the rule that a realtime
+/// frequency change must never stand in for a successful offset write): both
+/// numbers come from the same snapshot, and the offset reported is the document's
+/// own field; the frequency only decides *which* record the name refers to.
+fn corroborate_named_offsets(settings: &mut DeviceSettings, status: &DeviceStatus) {
+    let Some(offsets) = settings.clock_offsets.clone() else {
+        // The channel was not read this time; `apply_offset_channel` already put
+        // the per-block outcome in the notes.
+        return;
+    };
+    let mut named: Vec<NamedClockOffset> = Vec::new();
+    for (name, live) in namable_domains(status) {
+        let Some(live) = live.filter(|khz| *khz > 0) else {
+            settings.notes.push(format!(
+                "offset naming: {name} is not named -- this snapshot reports no live {name} clock to compare a record against"
+            ));
+            continue;
+        };
+        let matching: Vec<&ClockOffsetReading> = offsets
+            .iter()
+            .filter(|entry| entry.frequency_khz == live)
+            .collect();
+        match matching.as_slice() {
+            [entry] => {
+                named.push(NamedClockOffset {
+                    name: name.to_string(),
+                    domain_bit: entry.domain_bit,
+                    frequency_khz: entry.frequency_khz,
+                    offset_khz: entry.offset_khz,
+                    corroboration: format!(
+                        "the record published {live} kHz, which is this snapshot's live {name} clock, and it is the only one of the {} records that did",
+                        offsets.len()
+                    ),
+                });
+                settings.notes.push(format!(
+                    "offset naming: bit {:#x} carries the {name} domain -- its published frequency ({live} kHz) is this snapshot's live {name} clock and no other record matched",
+                    entry.domain_bit
+                ));
+            }
+            [] => settings.notes.push(format!(
+                "offset naming: {name} stays unnamed -- no record published this snapshot's live {name} clock ({live} kHz)"
+            )),
+            ties => settings.notes.push(format!(
+                "offset naming: {name} stays unnamed -- {} records published this snapshot's live {name} clock ({live} kHz), so naming one would be a choice rather than a measurement",
+                ties.len()
+            )),
+        }
+    }
+    // Two public names can legitimately match the *same* record: at idle the
+    // graphics and SM clocks are often the same number, and then the evidence
+    // for each name is exactly "that record published my live clock". Report
+    // both and say why, rather than letting one name silently win.
+    let mut claimed: BTreeMap<u32, &str> = BTreeMap::new();
+    for entry in &named {
+        if let Some(first) = claimed.insert(entry.domain_bit, entry.name.as_str()) {
+            settings.notes.push(format!(
+                "offset naming: bit {:#x} answers to both {first} and {} -- this snapshot reported {first} and {} clocks of the same {:#x} kHz, so neither name is more specific than the other",
+                entry.domain_bit, entry.name, entry.name, entry.frequency_khz,
+            ));
+        }
+    }
+    settings.clock_offsets_named = Some(named);
+}
+
+/// Why one public domain has no name attached, in the layer terms the entries
+/// report: the driver answers, the naming is a comparison this backend can only
+/// run where its own status reports a live clock for that domain.
+pub fn unnamed_offset_reason(name: &str) -> String {
+    format!(
+        "{name} is not named in this reading. The driver does answer -- the per-domain \
+         records are in clock_offsets and the window in clock_offset_limits_khz -- but no \
+         public OGKM header names a clock domain, so this backend attaches a name only \
+         where it measured one: a record whose own published frequency is the live {name} \
+         clock of the same snapshot, and the only such record. Either none matched, or \
+         several did (then neither is named), or the device reports no live {name} clock. \
+         A single bounded domain write is still the falsification path that settles a \
+         domain no comparison can."
+    )
+}
+
+impl DeviceSettings {
+    /// The corroborated offset for one public domain name, or the reason this
+    /// backend has none to report for it.
+    pub fn named_clock_offset(&self, name: &str) -> Result<&NamedClockOffset, String> {
+        match &self.clock_offsets_named {
+            None => Err(format!(
+                "the offset channel was not read in this snapshot, so {name} is not named; see notes"
+            )),
+            Some(named) => named
+                .iter()
+                .find(|entry| entry.name == name)
+                .ok_or_else(|| unnamed_offset_reason(name)),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Device {
     id: GpuId,
@@ -555,6 +709,10 @@ impl Device {
                 .notes
                 .push(format!("offset channel: not read ({error})")),
         }
+        // Names, if the snapshot supports any: the comparison is against the
+        // live clocks of *this* snapshot, so it has to run here and not inside
+        // the block fold, which has no status.
+        corroborate_named_offsets(&mut settings, &status);
         Ok(settings)
     }
 
@@ -2500,6 +2658,143 @@ mod tests {
         );
     }
 
+    fn offsets(entries: &[(u32, u32, i32)]) -> Option<Vec<ClockOffsetReading>> {
+        Some(
+            entries
+                .iter()
+                .map(
+                    |(domain_bit, frequency_khz, offset_khz)| ClockOffsetReading {
+                        domain_bit: *domain_bit,
+                        frequency_khz: *frequency_khz,
+                        offset_khz: *offset_khz,
+                    },
+                )
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_domain_is_named_only_by_an_exact_unique_live_clock_match() {
+        let mut settings = bare_settings();
+        settings.clock_offsets = offsets(&[
+            (1, 1_575_000, -1000),
+            (0x10, 7_500_000, 250),
+            (4, 999_000, 0),
+        ]);
+        let status = DeviceStatus {
+            graphics_clock_khz: Some(1_575_000),
+            memory_clock_khz: Some(7_500_000),
+            // A live clock no record published: the domain must stay unnamed, and
+            // the note has to say which comparison failed rather than go quiet.
+            video_clock_khz: Some(1_111_000),
+            ..Default::default()
+        };
+        corroborate_named_offsets(&mut settings, &status);
+
+        let named = settings.clock_offsets_named.as_ref().expect("channel read");
+        assert_eq!(
+            named
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.domain_bit, entry.offset_khz))
+                .collect::<Vec<_>>(),
+            vec![("graphics", 1, -1000), ("memory", 0x10, 250)]
+        );
+        // The offset is the document's own field; the live clock only decided
+        // which record the name refers to, and the evidence says so.
+        let graphics = settings.named_clock_offset("graphics").unwrap();
+        assert_eq!(graphics.frequency_khz, 1_575_000);
+        assert!(
+            graphics.corroboration.contains("1575000 kHz")
+                && graphics.corroboration.contains("only one of the 3 records"),
+            "{}",
+            graphics.corroboration
+        );
+        // A domain no record matched keeps its bit and gets no name.
+        assert!(settings.named_clock_offset("video").is_err());
+        assert!(
+            settings
+                .notes
+                .iter()
+                .any(|note| note.contains("video stays unnamed")),
+            "{:?}",
+            settings.notes
+        );
+    }
+
+    #[test]
+    fn a_tie_leaves_the_domain_unnamed_rather_than_picking_one() {
+        let mut settings = bare_settings();
+        settings.clock_offsets = offsets(&[(1, 1_575_000, -1000), (2, 1_575_000, 500)]);
+        let status = DeviceStatus {
+            graphics_clock_khz: Some(1_575_000),
+            memory_clock_khz: Some(7_500_000),
+            ..Default::default()
+        };
+        corroborate_named_offsets(&mut settings, &status);
+
+        let named = settings.clock_offsets_named.as_ref().expect("channel read");
+        assert!(
+            named.iter().all(|entry| entry.name != "graphics"),
+            "a tie must name neither record: {named:?}"
+        );
+        assert!(
+            settings
+                .notes
+                .iter()
+                .any(|note| note.contains("would be a choice rather than a measurement")),
+            "{:?}",
+            settings.notes
+        );
+        let reason = settings.named_clock_offset("graphics").unwrap_err();
+        assert!(
+            reason.contains("not named") && reason.contains("clock_offsets"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn an_unread_channel_reports_the_missing_read_not_a_zero() {
+        let settings = bare_settings();
+        assert_eq!(settings.clock_offsets_named, None);
+        let reason = settings.named_clock_offset("memory").unwrap_err();
+        assert!(
+            reason.contains("was not read") && reason.contains("memory"),
+            "{reason}"
+        );
+    }
+
+    #[test]
+    fn two_names_may_match_one_record_and_both_are_reported() {
+        // Idle Turing parts commonly report the same number for the graphics and
+        // SM clocks. The rule must not silently pick one of the two names: both
+        // comparisons did hold, so both names are reported with the reason.
+        let mut settings = bare_settings();
+        settings.clock_offsets = offsets(&[(1, 300_000, -500)]);
+        let status = DeviceStatus {
+            graphics_clock_khz: Some(300_000),
+            sm_clock_khz: Some(300_000),
+            ..Default::default()
+        };
+        corroborate_named_offsets(&mut settings, &status);
+
+        let named = settings.clock_offsets_named.as_ref().expect("channel read");
+        assert_eq!(
+            named
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["graphics", "processor"]
+        );
+        assert!(
+            settings
+                .notes
+                .iter()
+                .any(|note| note.contains("answers to both graphics and processor")),
+            "{:?}",
+            settings.notes
+        );
+    }
+
     fn bare_settings() -> DeviceSettings {
         DeviceSettings {
             pstate: None,
@@ -2514,6 +2809,7 @@ mod tests {
             clock_offset_limits_khz: None,
             clock_offset_domains: None,
             clock_offsets: None,
+            clock_offsets_named: None,
             unavailable: BTreeMap::new(),
             capabilities: SettingsCapabilities {
                 settings_read: true,

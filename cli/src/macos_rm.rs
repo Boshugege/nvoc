@@ -13,27 +13,18 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::GetStatus
             | Command::GetSettings
             | Command::GetThrottleReasons
+            // The offset read is allowed, but it can still fail *at run time*
+            // for one domain: core attaches a name only where a record's own
+            // published frequency equals the live clock of the same snapshot,
+            // and reports the reason otherwise (see `unnamed_offset_reason`).
+            // Refusing the command outright would read as "the backend cannot",
+            // which is exactly what it can.
+            | Command::GetPstateGlobalFreqOffset
     ) {
         Ok(())
-    } else if command == Command::GetPstateGlobalFreqOffset {
-        // The one refusal that would be wrong to leave generic: this backend
-        // *does* report offsets, just not as a single named number, so the
-        // error has to say which layer is missing rather than "unsupported".
-        Err(CliError::new(
-            "get-pstate-global-freq-offset is unavailable on macOS RM for a frontend reason, not a driver \
-             one: this backend does report offsets, as the device's own per-domain records -- get-settings \
-             carries them as clock_offsets (the 0x20809061 document, one entry per domain bit with the \
-             frequency it published) and the window as clock_offset_limits_khz (the 0x20809025 range block). \
-             What this command needs and the frontend cannot supply yet is the mapping from its --domain name \
-             to one of those device bits: no public OGKM header names a clock domain, the directory only \
-             stamps bit positions (0..6 and 19..21 on this device), and the single cross-reference, NVAPI's \
-             NV_GPU_CLOCK_DOMAIN_ID on Windows, is a hypothesis whose falsification path is a single-domain \
-             write. So the list is reported instead of one named number, and set-clock-offset is refused for \
-             that same reason plus the 0x1b privilege gate on its write half.",
-        ))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
             command.name()
         )))
     }
@@ -62,6 +53,30 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 Command::GetStatus => serde_json::to_value(run(&target, nvoc_core::QueryMacosRmStatus)?.output)?,
                 Command::GetSettings => {
                     serde_json::to_value(run(&target, nvoc_core::QueryMacosRmSettings)?.output)?
+                }
+                // Named domains only. Core compares each record's own published
+                // frequency with the live clock of the same snapshot and reports
+                // a reason when no single record matched, so this arm has no
+                // fallback of its own: an uncorroborated number is never printed,
+                // and the reason says which comparison failed.
+                Command::GetPstateGlobalFreqOffset => {
+                    let domain = option_domain(invocation, ClockDomain::Graphics)?;
+                    let name = domain_label(domain);
+                    let settings = run(&target, nvoc_core::QueryMacosRmSettings)?.output;
+                    let named = settings.named_clock_offset(name).map_err(CliError::new)?;
+                    json!({
+                        "domain": name,
+                        // The backend's own P-state reading; this command's
+                        // --pstate option is not part of the offset records (they
+                        // are per domain, not per P-state), so it is reported
+                        // rather than matched.
+                        "pstate": settings.pstate,
+                        "domain_bit": format!("0x{:x}", named.domain_bit),
+                        "offset_mhz": f64::from(named.offset_khz) / 1000.0,
+                        "offset_khz": named.offset_khz,
+                        "frequency_khz": named.frequency_khz,
+                        "corroboration": named.corroboration,
+                    })
                 }
                 // Decoded by the shared `QueryThrottleReasons` operation (core
                 // serves it from the RM snapshot on macOS), so this surface and
@@ -172,30 +187,24 @@ mod tests {
     }
 
     #[test]
-    fn the_offset_read_refusal_names_the_missing_layer_and_the_working_route() {
-        // Stage 11 item 5: an entry must not read as "the backend cannot do
-        // this" when the backend does report the data through another surface.
-        // The refusal therefore names the frontend mapping that is missing and
-        // the two fields that already carry the numbers.
-        let error = validate(Command::GetPstateGlobalFreqOffset)
-            .unwrap_err()
-            .to_string();
-        for expected in [
-            "unavailable on macOS RM",
-            "frontend reason, not a driver",
-            "clock_offsets",
-            "clock_offset_limits_khz",
-            "NV_GPU_CLOCK_DOMAIN_ID",
-        ] {
-            assert!(error.contains(expected), "{expected} missing from {error}");
-        }
+    fn the_offset_read_is_allowed_and_reports_a_named_or_uncorroborated_domain() {
+        // Stage 11 item 5, second pass. The read used to be refused with a
+        // message that named the missing layer; core now *supplies* that layer
+        // -- it names a domain only when a record's own published frequency
+        // equals the live clock of the same snapshot, and reports a reason
+        // otherwise -- so the command is allowed and the layer explanation moved
+        // to the run-time path (`nvoc_core::unnamed_offset_reason`), where an
+        // uncorroborated domain is refused instead of an uncorroborated number
+        // being printed.
+        assert!(validate(Command::GetPstateGlobalFreqOffset).is_ok());
         // The write half of the same pair keeps the terse capability refusal:
         // there the driver really does refuse, so no layer needs naming.
         let write = validate(Command::SetPstateGlobalFreqOffset)
             .unwrap_err()
             .to_string();
         assert!(write.contains("unavailable on macOS RM"), "{write}");
-        assert!(!write.contains("frontend reason, not a driver"), "{write}");
+        assert!(write.contains("0x2080D01C"), "{write}");
+        assert!(!write.contains("named"), "{write}");
     }
 
     #[test]

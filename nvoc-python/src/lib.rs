@@ -1490,6 +1490,31 @@ fn settings_macos_rm_to_map(
             ),
         );
     }
+    // The named subset: only the records whose own published frequency equalled
+    // the live clock of the same snapshot, and only where a single record did.
+    // The name is therefore a measurement this backend made, not a table lookup
+    // (the public headers name no clock domain), and the comparison travels with
+    // it so a caller can reject it. Absent when the offset channel was not read;
+    // an empty list means it was read and named nothing.
+    if let Some(named) = &settings.clock_offsets_named {
+        map.insert(
+            "clock_offsets_named".into(),
+            Value::Array(
+                named
+                    .iter()
+                    .map(|entry| {
+                        value_object([
+                            ("name", Value::String(entry.name.clone())),
+                            ("domain_bit", u64_value(entry.domain_bit as u64)),
+                            ("frequency_khz", u64_value(entry.frequency_khz as u64)),
+                            ("offset_khz", i64_value(entry.offset_khz as i64)),
+                            ("corroboration", Value::String(entry.corroboration.clone())),
+                        ])
+                    })
+                    .collect(),
+            ),
+        );
+    }
     // The domains the driver will offset. Each entry is the device's own index,
     // domain bit and type stamp: the bit is a *position* in a domain namespace
     // this frontend cannot name (see `ClockOffsetDomain`), so no name is
@@ -5920,6 +5945,18 @@ mod tests {
                 frequency_khz: 6_000_984,
                 offset_khz: -126,
             }]),
+            // The named half of the same reading: core attached "memory" because
+            // that record's own published frequency is this snapshot's live
+            // memory clock and no other record matched.
+            clock_offsets_named: Some(vec![nvoc_core::NamedClockOffset {
+                name: "memory".to_string(),
+                domain_bit: 0x10,
+                frequency_khz: 6_000_984,
+                offset_khz: -126,
+                corroboration: "the record published 6000984 kHz, which is this snapshot's live \
+                                memory clock, and it is the only one of the 2 records that did"
+                    .to_string(),
+            }]),
             unavailable: std::collections::BTreeMap::from([(
                 "core_clock_offset".to_string(),
                 nvoc_core::macos_rm::CLOCK_OFFSET_UNREADABLE_REASON.to_string(),
@@ -5957,6 +5994,23 @@ mod tests {
         assert_eq!(offsets[0]["domain_bit"], u64_value(0x10));
         assert_eq!(offsets[0]["frequency_khz"], u64_value(6_000_984));
         assert_eq!(offsets[0]["offset_khz"], i64_value(-126));
+        // The named half carries the comparison, not just the conclusion, so a
+        // caller can reject the name without re-reading the device.
+        let named = map["clock_offsets_named"]
+            .as_array()
+            .expect("the named offset list is an array");
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0]["name"].as_str(), Some("memory"));
+        assert_eq!(named[0]["domain_bit"], u64_value(0x10));
+        assert_eq!(named[0]["frequency_khz"], u64_value(6_000_984));
+        assert_eq!(named[0]["offset_khz"], i64_value(-126));
+        assert!(
+            named[0]["corroboration"]
+                .as_str()
+                .is_some_and(|text| text.contains("6000984 kHz")),
+            "{:?}",
+            named[0]["corroboration"]
+        );
         let domains = map["clock_offset_domains"]
             .as_array()
             .expect("the domain list is an array");

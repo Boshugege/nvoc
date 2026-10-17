@@ -12,8 +12,8 @@ pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{
     ABI_LAYOUT_SLOTS, ClockOffsetDomain, ClockOffsetLimits, ClockOffsetReading, DeviceInfo,
     DeviceSample, DeviceSettings, DeviceStatus, FieldState, MONITOR_SECTIONS, MONITOR_STALE_AFTER,
-    MacosRmSession, QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus,
-    SettingsCapabilities, abi_layout, native_abi_layout,
+    MacosRmSession, NamedClockOffset, QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus,
+    SettingsCapabilities, abi_layout, native_abi_layout, unnamed_offset_reason,
 };
 mod nvapi;
 pub mod nvml;
