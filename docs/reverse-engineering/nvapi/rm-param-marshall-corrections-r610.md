@@ -248,3 +248,76 @@ Falsification path: read the control block with a single-index mask (`0x1`, the
 probe runbook's third case) -- index addressing predicts records for exactly one
 entry, i.e. 14 + 13 dwords for a value-carrying entry, while bit addressing for
 that same mask would select the entry stamped bit 0.
+
+### 5.2 The directory header carries both namespaces, which settles the mask's addressing
+
+Most of the individual facts here are already recorded elsewhere --
+`gsp-method-table-and-legacy-forwarding.md` §14.3/§18 has the directory's
+row/type/domain-bit table, and the feature matrix's entry for that round says the
+head's `+12`/`+20` are a domain-bit mask. What this section adds is that the two
+identities below are now stated as arithmetic, verified against the raw dump, and
+enforced by `probe-macos-rm/tools/decode-clk-containers.py` on every future dump
+rather than carried as prose.
+
+Decoded from the recorded reply to `0x20809019` (12336 B = 48 + 32x384): head
+`+0 0xff, +4 0x3ff, +8 0x335, +12 0x38007f, +16 0x3fc007f, +20 0x38007f,
++24 0x85, +28 0x5, +36 0x103e8, +40 0xffff0000`, then ten non-empty rows, each
+with a two-byte type pair at record+0 (0303 for row 6, 0808 for rows 0/2/7, 0909
+for the rest) and a `1<<id` value at record+4.
+
+Two of those head dwords are exact arithmetic identities over the same ten rows:
+
+* `+4 = 0x3ff` is ten consecutive bits, i.e. bit *i* for directory row *i*.
+* `+12` and `+20` = `0x38007f` = **exactly the union of the ten rows'
+  `1<<id` values** (`1|2|16|4|8|0x100000|0x80000|64|0x200000|32`), i.e. bits
+  0-6 and 19-21 -- the two clusters of `NV_GPU_CLOCK_DOMAIN_ID`, ids
+  `0,1,4,2,3,20,19,6,21,5` as rows 0..9.
+
+So the same header states the same ten domains in *both* namespaces, and they are
+different numbers. That matters because the row-selection mask I measured on the
+control block (`+4`, `0xFF` -> the eight rows at indices 0..7, 106 dwords) had
+been read as index addressing on the strength of a dword count alone (106 vs the
+105 a domain-bit reading predicts). The directory's own header is independent
+evidence for the same conclusion: a mask of `0xFF` in domain-bit space would mean
+ids 0-7, and the rows present are ids 0,1,2,3,4,5,6 only... in fact `0xFF` as
+domain bits is ids 0..7, of which the card has 0,1,2,3,4,5,6 -- seven rows, 105
+dwords. The measured 106 therefore requires index space, and now the header shows
+the two spaces side by side.
+
+**The driver declares ten rows, not eight.** So the runbook's `0xFF` seed reached
+eight of the ten the driver itself reports; the two it missed are rows 8 and 9
+(ids 21 MSD and 5 HOST). Seeding `0x3FF` -- the runbook's second case -- predicts
+`14 + 9x13 + 1 = 132` written dwords (nine value-carrying rows plus the stub at
+row 6), which turns that case from an open probe into a number to check.
+
+**The two rows that carry offset-relevant data are the core and the memory.**
+Rows 0 and 2 are the only 0808-type rows with extra fields, and under the domain
+id order above they are id 0 (GPC, the core) and id 4 (M, the memory). They carry
+a signed 16-bit pair at record+44 (`{0xfc18,0x03e8}` = {-1000,1000} for row 0,
+`{0xfc18,0x0bb8}` = {-1000,3000} for row 2) and a word at record+76 (0x22A and
+0x100); row 0 alone has `+40 = 30000`. Both rows are inside the `0xFF` seed that
+has already been run, so their control-block records are already measured -- and
+their value dwords came back zero, which is consistent with a stock offset of
+zero and does not by itself name the field.
+
+Cross-block consistency: row 6, the 0303 row, is the value-less one in the
+directory *and* the stamp-only one in the control block. That is a second
+independent sign that the two blocks' rows are the same rows in the same order.
+
+The tooling consequence: `decode-clk-containers.py` now prints both masks for a
+directory block, with the index-space mask derived from the rows actually
+present, and reports MATCH/mismatch against the header. Its selftest rebuilds the
+live ten rows and checks both directions -- the live case must MATCH, and a
+header edited away from the union must be reported as a mismatch.
+
+**Still open, deliberately:** the field identity inside the 64-byte control
+record (needs a differential -- a write, or a read at a non-zero offset); the
+meaning of head `+8` (0x335), `+16` (0x3fc007f, the union plus bits 18 and
+22-25), `+24` (0x85), `+36` (0x103e8), `+40` (0xffff0000); and the range block's
+tags, which increment in their second byte (0x01030101/0x01040101/0x01050101)
+with otherwise identical payloads -- if that byte is a domain id, the range block
+covers ids 3/4/5, which includes the memory but not the core, so the two blocks
+may not share an id namespace and the directory stays the authority for the map.
+Head `+28 = 5` is index-space bits 0 and 2, i.e. exactly the core and memory rows,
+which is an attractive reading but is recorded only as a candidate: no second
+observation yet distinguishes it from a version or a count.

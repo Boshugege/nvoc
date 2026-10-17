@@ -26,7 +26,10 @@ unverified" so nobody mistakes a decomposition for a layout.
 * `0x20809061` -> 8 / 24, `0x2080b201` -> 12 / 76, `0x2080b213` -> 12 / 32:
   the previously recorded payloads put the header at exactly those lengths
 
-`check_geometry()` enforces the arithmetic for every entry.
+`check_geometry()` enforces the arithmetic for every entry, and a directory
+block additionally gets `mask_consistency()`: the header names the same ten rows
+as both row-bits (0x3ff) and domain bits (0x38007f), so the tool checks its two
+halves against the rows actually present instead of trusting prose.
 
 Usage:
     probe-macos-rm-idle --clkctl-hex > clkctl-hex.txt
@@ -164,6 +167,42 @@ def parse_blocks(text: str) -> dict[tuple[int, int], bytes]:
     return {k: bytes(v) for k, v in blocks.items()}
 
 
+def mask_consistency(buf: bytes, header: int, stride: int) -> list[str]:
+    """Cross-check a directory header against the rows it actually lists.
+
+    The point of this check: the same ten domains can be named two ways -- as
+    directory rows (bit i for row i) and as the `1<<id` values the rows carry --
+    and the header states both. Because the two numbers differ (0x3ff vs
+    0x38007f on this TU116), the block itself is the evidence that the
+    caller-supplied selection mask at `+4` counts *rows*, which is the reading
+    the 0x2080901b write-set arithmetic also requires. Prose can drift; this
+    cannot.
+    """
+    rows = []
+    for index in range(32):
+        base = header + index * stride
+        record = buf[base:base + stride]
+        if len(record) < stride or not any(record):
+            continue
+        rows.append((index, struct.unpack_from("<I", record, 4)[0]))
+    if not rows:
+        return ["  mask check: no populated row, nothing to cross-check"]
+    index_mask = 0
+    domain_mask = 0
+    for index, bit in rows:
+        index_mask |= 1 << index  # row bit must correspond to the row's place
+        domain_mask |= bit
+    head = [struct.unpack_from("<I", buf, off)[0] if len(buf) >= off + 4 else 0
+            for off in (4, 12, 20)]
+    out = [f"  mask check: {len(rows)} rows; rows-as-bits 0x{index_mask:08x}, "
+           f"union of their domain bits 0x{domain_mask:08x}"]
+    for off, value in zip((4, 12, 20), head):
+        want = index_mask if off == 4 else domain_mask
+        verdict = "MATCH" if value == want else f"mismatch (0x{value:08x})"
+        out.append(f"    head +{off} = 0x{value:08x}: {verdict}")
+    return out
+
+
 def _dwords(buf: bytes, limit: int) -> list[str]:
     out = []
     for off in range(0, limit - 3, 4):
@@ -244,6 +283,8 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
         if entries:
             print("  directory (entry:domain_bit:type) = " + " ".join(entries),
                   file=out)
+            for line in mask_consistency(buf, header, stride):
+                print(line, file=out)
     if mid in CANDIDATES:
         # Mask-driven: the echoed mask at +4 IS the set of records the caller
         # asked for, so this prints one candidate row per requested domain even
@@ -328,6 +369,31 @@ def selftest() -> int:
     assert "directory (entry:domain_bit:type) = 0:1:0x0808" in report19, report19
     assert "+0(type_stamp_u16x2)=" in report19, report19
     assert "65600536" in report19, report19
+    # The live ten rows, and the header's own two answers for them: 0x3ff as
+    # rows-as-bits and 0x38007f as the union of the rows' 1<<id values.  The
+    # check has to MATCH the live shape and to catch a header edited away from
+    # it, otherwise it is decoration.
+    live_bits = (0x1, 0x2, 0x10, 0x4, 0x8, 0x100000, 0x80000, 0x40, 0x200000, 0x20)
+    bufdir = bytearray(GEOMETRY[0x20809019][0])
+    head19, stride19 = GEOMETRY[0x20809019][1:]
+    struct.pack_into("<I", bufdir, 4, 0x3FF)
+    struct.pack_into("<I", bufdir, 12, 0x38007F)
+    struct.pack_into("<I", bufdir, 20, 0x38007F)
+    for index, bit in enumerate(live_bits):
+        base = head19 + index * stride19
+        struct.pack_into("<H", bufdir, base, 0x0808)
+        struct.pack_into("<I", bufdir, base + 4, bit)
+    sink = io.StringIO()
+    assert decode(0x20809019, GEOMETRY[0x20809019][0], bytes(bufdir), sink) == 0
+    live = sink.getvalue()
+    assert "10 rows; rows-as-bits 0x000003ff" in live, live
+    assert "union of their domain bits 0x0038007f" in live, live
+    assert live.count("MATCH") == 3, live
+    bent = bytearray(bufdir)
+    struct.pack_into("<I", bent, 12, 0x38003F)  # forget one row's bit
+    sink = io.StringIO()
+    assert decode(0x20809019, GEOMETRY[0x20809019][0], bytes(bent), sink) == 0
+    assert "head +12 = 0x0038003f: mismatch" in sink.getvalue(), sink.getvalue()
     # 0x2080901b candidate table: the stock case is an ALL-ZERO record whose
     # value slots the driver did write, so the mask-driven rows must appear even
     # though the generic record printer sees nothing.  mask@+4 = 0x2 selects
