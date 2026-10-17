@@ -67,14 +67,26 @@ run_one() {
     echo "== $name =="
     "$root/probe-macos-rm-idle" "$@" > "$bundle/$name.txt" 2>&1 && rc=0 || rc=$?
     echo "  rc=$rc -> $bundle/$name.txt"
-    if grep -q "NV_ERR_RESET_REQUIRED" "$bundle/$name.txt"; then
-        echo "  !! NV_ERR_RESET_REQUIRED present: the GSP legacy path is still"
-        echo "     wedged from an earlier session; reboot before trusting any"
-        echo "     further private-clock read (see the doc, section 6)."
+    # Both wedge signals stop the run. 0x65 is the latch that wedges the GSP for
+    # the session and 0x62 is every later reply: once either appears, the wider
+    # battery answers 0x62 for every id and proves nothing about the ids it
+    # reaches, so continuing would cost a session and buy no information.
+    if grep -q "NV_ERR_RESET_REQUIRED" "$bundle/$name.txt" ||
+       grep -q "NV_ERR_TIMEOUT" "$bundle/$name.txt"; then
+        wedge=1
     fi
 }
 
 run_one clkctl-hex   --clkctl-hex
+
+if [ "${wedge:-0}" -ne 0 ]; then
+    echo "  !! NV_ERR_RESET_REQUIRED / NV_ERR_TIMEOUT in the first case: the GSP" >&2
+    echo "     legacy path is wedged (see the doc, section 6). STOPPING here --" >&2
+    echo "     the wider battery would answer 0x62 for every id. Reboot, then" >&2
+    echo "     rerun; nothing was written." >&2
+    exit 5
+fi
+
 run_one clkctl-read  --clkctl-read
 
 if command -v python3 >/dev/null 2>&1; then

@@ -133,7 +133,14 @@ echo "== verdict =="
 grep -E "V3\.5[a-e]|clk-offset" "$bundle/write.txt" || \
     echo "  (no clk-offset lines: the write path did not run -- read the log)"
 
+# The success claim needs all three parts, not just the restore. V3.5d can say
+# the block came back while V3.5e rejects the write for a read-back that did not
+# move, and reporting "all verified" then would be exactly the mistake this
+# exercise exists to avoid. The fragments below are quoted from the probe's own
+# format strings, so they do not depend on how the overall verdict token renders.
 if grep -q "clk-offset-verdict" "$bundle/write.txt" && \
+   grep -q "same-field yes" "$bundle/write.txt" && \
+   grep -q "others-unchanged yes" "$bundle/write.txt" && \
    grep -q "restore verified" "$bundle/write.txt"; then
     echo "== SET + read-back + restore all verified; block restored =="
 else
