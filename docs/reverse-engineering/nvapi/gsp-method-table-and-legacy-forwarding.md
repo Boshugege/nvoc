@@ -840,12 +840,15 @@ decoder still refuses to name any of the five slots (`offset_khz?`,
 * a container that returns the **current** per-domain offset. Candidates, in
   the order they should be tried once the GSP is alive again — steps 1 and 2
   are now the first two cases of one `--clkctl-hex` run:
-  1. `0x2080901b @2108` re-read with the §4 `+4` mask and a **zeroed**
-     background, to check whether the `08`/`09` records are really
-     "types only" or whether a single-sourced mask leaves fields that the
-     `0xA5` sweep could not distinguish from a driver-zeroed word. The run now
-     uses `0x1` / `0xFF` / `0x3FF` so it also tests §4.2's entry-selector model
-     against the predicted type bytes at `+60 … +636`.
+  1. `0x2080901b @2108` with the §4 `+4` mask. §14.1 settled the "types only"
+     question against the recorded bytes -- the handler writes 13 dwords per
+     record and 12 of them are zero at stock -- so this is no longer a question
+     about *whether* fields are written but about *which* one is the offset.
+     The first case therefore runs the `0xA5` background with `+4 = 0xFF` (the
+     one combination already measured `NV_OK`) so the write set and any
+     non-zero value are visible in one lossless dump; the zeroed cases
+     (`0x1` / `0xFF` / `0x3FF` / `0`) follow and test §4.2's entry-selector
+     model against the predicted type bytes at `+60 … +636`.
   2. `0x2080901d @32680` with a zeroed block (it answered `NV_OK` with an
      `0xA5` background; the header is `+0` low byte `0xff`, `+4 = 0x07ffffff`
      and the records carry small fields such as `0x00850085` /
@@ -864,6 +867,11 @@ decoder still refuses to name any of the five slots (`offset_khz?`,
   until the GET half yields current/limit/state. The step granularity is still
   unknown (the `+/-18750 kHz` pair is the *range*, not a step), so the
   "minimum step" for a first write is not yet defined.
+* **the field identity inside the 64 B control record** (new, §14.1): the
+  container, the mask field and the record geometry are all pinned, and the
+  handler demonstrably fills 12 value dwords per record, but at stock every one
+  of them is zero, so nothing in a stock read names the offset field. That is
+  the precise remainder of G1.
 * **which layer is missing, now answered for this client.** §2.1: the id-space
   itself puts every clock/voltage SET in the privileged half (`0xC000`), and
   `RmGssLegacyRpcCmd` returns `0x1b` for a client below
