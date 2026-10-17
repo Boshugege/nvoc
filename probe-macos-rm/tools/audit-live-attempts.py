@@ -56,6 +56,16 @@ STATUS_RE = re.compile(r"(?<![-\w])status[\"'\s:]+0x([0-9a-f]{8})", re.I)
 # upper-case hex tails (`0x208090A2`).
 BANNER_RE = re.compile(r"^=+\s*(.*?)0x(2080[0-9a-f]{4})\b(.*?)=+\s*$", re.I)
 DUMP_RE = re.compile(r"^\s*[0-9a-f]{4}: ")
+# Third shape, and the one that hid the offset work's own evidence: a case header that
+# names the id, followed by rows that print only the octet --
+#     == rails-get-info 0x2080B201 boundary ==
+#     size-1 (2443) -> 0x0000001f, size (2444) -> 0x00000000
+# The id is in the header and nowhere else, so a census that reads ids off rows reports
+# this id as never dispatched.  Attribution is by header scope, which is weaker than a
+# row naming its own id, so the tier is reported on its own; the scope ends at the next
+# line that names an id, so a row cannot drift onto a later case.
+CASE_RE = re.compile(r"^\s*[=-]{2,}[^=]*?0x(2080[0-9a-f]{4})\b", re.I)
+SWEEP_RE = re.compile(r"->\s*0x([0-9a-f]{8})")
 
 # A few rows name the control by label and print no numeric id, so no census can read
 # the id off them: `[OK] V2.4 rated-tdp-get-control status 0x00000000 (NV_OK)`.  The
@@ -160,7 +170,17 @@ def banner_dispatches(paths: list[Path]) -> dict[str, dict[str, object]]:
             banner = BANNER_RE.match(line.strip())
             if not banner:
                 continue
-            window = [ln for ln in lines[index + 1 : index + 8] if ln.strip()]
+            # The dump must be inside this case's own block: stop at the next case
+            # header, otherwise a short case borrows the following case's dump (the
+            # selftest's second banner caught exactly that).
+            window = []
+            for ln in lines[index + 1 :]:
+                if BANNER_RE.match(ln.strip()) or CASE_RE.match(ln):
+                    break
+                if ln.strip():
+                    window.append(ln)
+                if len(window) == 8:
+                    break
             if not any(DUMP_RE.match(ln) for ln in window):
                 continue
             cid = "0x" + banner.group(2).lower()
@@ -195,6 +215,55 @@ def label_rows(paths: list[Path]) -> dict[str, dict[str, object]]:
                 verdict = "OK" if octet.group(1) == "00000000" else "REJECTED"
                 key = octet.group(1) + " " + verdict + " (by label)"
                 labels[key] = labels.get(key, 0) + 1
+                files = entry["files"]
+                assert isinstance(files, set)
+                files.add(path.name)
+    return found
+
+
+def sweep_rows(paths: list[Path]) -> dict[str, dict[str, object]]:
+    """id -> octet counts for rows whose status carries no id, under a case header.
+
+    Kept apart from the status tier because the association is the header's, not the
+    row's, so a count from here is an upper bound; whatever it attributes, it says
+    which header line did the attributing.
+    """
+    found: dict[str, dict[str, object]] = {}
+    for path in paths:
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError:
+            continue
+        current: str | None = None
+        header = ""
+        for lineno, line in enumerate(lines, 1):
+            case = CASE_RE.match(line)
+            if case:
+                current = "0x" + case.group(1).lower()
+                header = f"{path.name}:{lineno}"
+                continue
+            if ID_RE.search(line) and not SWEEP_RE.search(line):
+                # A row naming its own id ends the header's scope.
+                current = None
+                continue
+            if current is None:
+                continue
+            for octet in SWEEP_RE.findall(line):
+                entry = found.setdefault(
+                    current, {"ok": 0, "octets": {}, "headers": [], "files": set()}
+                )
+                if octet == "00000000":
+                    entry["ok"] = int(entry["ok"]) + 1  # type: ignore[arg-type]
+                octets = entry["octets"]
+                assert isinstance(octets, dict)
+                key = octet + (
+                    " OK (by sweep)" if octet == "00000000" else " REJECTED (by sweep)"
+                )
+                octets[key] = octets.get(key, 0) + 1
+                headers = entry["headers"]
+                assert isinstance(headers, list)
+                if header not in headers:
+                    headers.append(header)
                 files = entry["files"]
                 assert isinstance(files, set)
                 files.add(path.name)
@@ -239,6 +308,7 @@ def report(
     seen: dict[str, dict[str, object]],
     indirect: dict[str, dict[str, object]],
     by_label: dict[str, dict[str, object]],
+    by_sweep: dict[str, dict[str, object]],
     table: set[str],
     only: str | None,
     notes: list[str] | None = None,
@@ -281,6 +351,18 @@ def report(
         print(
             f"  {cid}: {entry['ok']}x NV_OK by label; {shown}  [{', '.join(sorted(files))}]"
         )
+    print(
+        f"ids whose statuses were printed without an id, under a case header: "
+        f"{len(by_sweep)} (attributed by the header; the header is printed with it)"
+    )
+    for cid, entry in sorted(by_sweep.items()):
+        octets = entry["octets"]
+        assert isinstance(octets, dict)
+        headers = entry["headers"]
+        assert isinstance(headers, list)
+        shown = ", ".join(f"{n}x {lab}" for lab, n in sorted(octets.items()))
+        print(f"  {cid}: {entry['ok']}x NV_OK by sweep; {shown}")
+        print(f"                headers: {', '.join(headers[:3])}")
     dumped = sorted(set(indirect) - set(seen))
     print(
         f"ids dispatched with a payload dump but no printed status: {len(dumped)}"
@@ -298,7 +380,9 @@ def report(
         for note in notes:
             print(f"label->id check: {note}")
     if table:
-        silent = sorted(table - set(seen) - set(indirect) - set(by_label))
+        silent = sorted(
+            table - set(seen) - set(indirect) - set(by_label) - set(by_sweep)
+        )
         print(f"method-table ids never dispatched: {len(silent)} of {len(table)}")
         for cid in silent:
             print(f"  {cid}: in the table, never in a returned status")
@@ -337,6 +421,12 @@ def selftest() -> int:
         # A row that names the control by label only: the id is not on the row at all.
         "[OK] V2.4 rated-tdp-get-control status 0x00000000 (NV_OK)  raw[0..2]=0x0 0x0 0x0\n"
         "[REJECTED] V2.rtdp rated-tdp-get-control status 0x00000062 (NV_ERR_RESET_REQUIRED)  client GLOBAL(0)\n"
+        # A case header names the id; the row under it prints only the octet.
+        "== rails-get-info 0x2080B201 boundary ==\n"
+        " smallest accepted size = 2444\n"
+        " size-1 (2443) -> 0x0000001f, size (2444) -> 0x00000000\n"
+        "[OK] V2.reg other-read status 0x00000000 (NV_OK)  cmd 0x20801303 size 4 -> NV_OK\n"
+        " size-1 (7) -> 0x0000001f, size (8) -> 0x00000000\n"
         "== vfpoints-get 0x208090A2 @ 524 ==\n"
         "-- vfpoints-get @ 524 --\n"
         "  0000: 03 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  |................|\n"
@@ -366,6 +456,19 @@ def selftest() -> int:
         assert "0x2080ffff" not in seen, "prose in an .md file must not count"
         assert "0x208090a2" not in seen, (
             "a hyphenated word ending in 'status' must not turn a prose line into a row"
+        )
+        by_sweep = sweep_rows(paths)
+        assert set(by_sweep) == {"0x2080b201"}, by_sweep
+        assert by_sweep["0x2080b201"]["ok"] == 1, by_sweep
+        assert by_sweep["0x2080b201"]["octets"] == {
+            "0000001f REJECTED (by sweep)": 1,
+            "00000000 OK (by sweep)": 1,
+        }, by_sweep
+        assert all(h.startswith("b.txt:") for h in by_sweep["0x2080b201"]["headers"]), (
+            by_sweep
+        )
+        assert "0x20801303" not in by_sweep, (
+            "a row naming its own id must end the header scope, not be read as a sweep row"
         )
         by_label = label_rows(paths)
         assert set(by_label) == {"0x2080206e"}, by_label
@@ -401,11 +504,11 @@ def selftest() -> int:
         sink = io.StringIO()
         real_stdout, sys.stdout = sys.stdout, sink
         try:
-            assert report(seen, indirect, by_label, table, None) == 0
-            assert report(seen, indirect, by_label, table, "0x20808513") == 1, (
-                "the gate must fail on an unread id"
-            )
-            assert report(seen, indirect, by_label, table, "0x20800513") == 0
+            assert report(seen, indirect, by_label, by_sweep, table, None) == 0
+            assert (
+                report(seen, indirect, by_label, by_sweep, table, "0x20808513") == 1
+            ), "the gate must fail on an unread id"
+            assert report(seen, indirect, by_label, by_sweep, table, "0x20800513") == 0
         finally:
             sys.stdout = real_stdout
         text = sink.getvalue()
@@ -414,9 +517,11 @@ def selftest() -> int:
         assert "GATE: 0x20808513 never answered NV_OK" in text, text
         assert "0x208090a2: 1 dump banner(s), no status row" in text, text
         assert "0x2080206e: 1x NV_OK by label" in text, text
+        assert "0x2080b201: 1x NV_OK by sweep" in text, text
     print(
         "selftest ok: row detection, id extraction, prose, statusless rows and hyphenated-status words rejected, "
         "dump banners kept as indirect dispatches, label-only rows attributed through a checked map, "
+        "thus-scoped sweep rows attributed through their header, "
         "method-table cross-check, --id gate both ways"
     )
     return 0
@@ -456,6 +561,7 @@ def main(argv: list[str]) -> int:
         census(paths),
         banner_dispatches(paths),
         label_rows(paths),
+        sweep_rows(paths),
         table,
         only,
         verify_labels(src, ogkm),
