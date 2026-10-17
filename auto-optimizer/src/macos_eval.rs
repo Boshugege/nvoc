@@ -4,10 +4,14 @@
 //! Runs the original Vulkan render stressor (`cli-stressor-cuda-rs
 //! --vulkan-only`, reused verbatim from stage 9) for a bounded time while
 //! sampling the native NullMoth RM telemetry, then runs the `stress-macos`
-//! bit-exact Metal verifier. It performs **no writes**: there is no verified
-//! macOS offset/VF write path yet, so no candidate is applied and
-//! `settings_written` is always false. This is the preflight + bounded load +
-//! verify step a future macOS closed loop can call unchanged.
+//! bit-exact Metal verifier. It performs **no writes**: no candidate is
+//! applied and `settings_written` is always false. The write path itself does
+//! exist -- 0x2080d01c carries the same 2108-byte block as the readable
+//! 0x2080901b, and the single-domain step with pre-record, read-back and
+//! restore is implemented and compiles (probe-macos-rm, stage 7.5) -- but a
+//! write still waits on authorisation, a healthy post-reboot session, and the
+//! field identity that only the write itself can settle. This is the preflight
+//! + bounded load + verify step the closed loop can call unchanged.
 
 use clap::ArgMatches;
 use nvoc_core::{
@@ -275,8 +279,12 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             },
         },
         "settings_written": false,
-        "write_gate": "read-only: no verified macOS offset/VF write path on this \
-            driver (see get-settings notes); no candidate was applied",
+        "write_gate": "read-only: no candidate applied. The write path exists \
+            (0x2080d01c, the same 2108-byte block as the readable 0x2080901b) with \
+            pre-record, read-back and restore implemented; a write waits on \
+            authorisation, a healthy post-reboot session, and the field identity \
+            only the write itself can give. The measured window is reported in \
+            settings (see get-settings notes).",
         "pre": pre,
         "under_load": under_load_report,
         "post": post,

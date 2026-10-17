@@ -807,3 +807,17 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 - 新增 `probe-macos-rm/tools/clock-offset-write-run.sh`：**必须显式给出一个候选**（无默认、非扫掠工具），先跑 `--anchor-read` 并在**非 NV_OK / 见 0x62 时拒绝写入**（wedge 下所有应答塌成 0x62，会把"被拒"读成"未知"），再执行那一次写入，输出落到 `outputs/stage-clkoffset-write-<stamp>/` 供事后复核。`sh -n` 通过，两条拒绝路径实测 rc=2。
 
 **仍然缺什么（这就是目标要求的"缺哪一层"的准确答案）**：**不是协议、不是驱动实现**——方法表里有写 id、有尺寸、有写方向位（见本轮追加二十四），封送已实现且现在能编译。缺的是：① **授权**（现行禁令：任何 `0x2080d01c` 写入暂停）；② **一次健康的重启后会话**（wedge 下 0x62 使任何拒绝不可解读）；③ 那个**只有写入本身才能给出的答案**：十二个候选里哪个装偏移。因此本轮只在**没有写入**的前提下把执行器备好并验证到"能编译、会拒绝、判据齐全"。
+
+### 本轮追加二十六（2026-10-17，偏移限值/域的公共链路审计 + macOS 门禁实况：文档化 clippy 门在 macOS 上原本是红的）
+
+**动机**：目标第 5 条要求"接入现有公共 core/CLI/Python 接口与自动优化闭环"，并要求"受阻则明确缺失的是哪一层"。此前只验证了 core 侧字段存在，**没有**验证这条链路是否真的通到用户可见面。
+
+**链路审计（读码，逐跳给出位置）**：
+- core：`core/src/macos_rm.rs` 的 `ClockOffsetLimits` / `clock_offset_domains` / `CLOCK_OFFSET_UNREADABLE_REASON`（含实测零值是"写"而非"缺失读"的推理、十行目录的自带声明、以及"0xFF 只覆盖前八行、未测的两行恰为 MSD(id 21)/HOST(id 5)、故 core/memory 在已测窗口内"）。
+- CLI：`cli/src/macos_rm.rs` 的 macOS 分支只放行 `get-gpu-list/get-info/get-status/get-settings/get-throttle-reasons`；`get-settings` 走 `QueryMacosRmSettings` 后 **`serde_json::to_value` 整个 core 设置结构**，由 `cli/src/output.rs:format_get_settings_output` 按 JSON 键渲染 ⇒ **限值/域/未读原因自动出现在 CLI 输出里**（已通，无需逐字段接线）。
+- Python：`nvoc-python/src/lib.rs:1456-1477` 把 `clock_offset_limits_khz` 展开为 `clock_offset_min_khz`/`clock_offset_max_khz`/`clock_offset_limits_records`，并输出 `clock_offset_domains`；`:5918-5921` 有断言钉住 −18750/+18750。⇒ **core→CLI→pynvoc 已通**。
+- 自动优化闭环：`auto-optimizer/src/macos_eval.rs:172` 读同一接口，并把整个 `settings` 放进 `nvoc/macos-stock-eval/1` 报告 ⇒ 闭环报告里带上实测窗口与未读原因；仍 `settings_written: false`。该命令需 macOS＋stressor，**尚未跑过**（outputs 内 no `macos-stock-eval` 记录），属"已实现待实测"。
+
+**四个用户可见面此前把缺口说得比实际更重，本轮改成准确表述**（只改文字，行为不变）：`auto-optimizer/src/macos_eval.rs` 模块文档与报告 `write_gate` 字段、`auto-optimizer/src/arg_help.rs` 的 `macos-eval --help`、`cli/src/macos_rm.rs` 的不支持命令提示。统一为：**写路径本身存在**（`0x2080d01c` 与可读的 `0x2080901b` 同一 2108 B 块；单域最小步＋预录＋回读＋恢复已实现且能编译），**写入仍在等三件事**：授权、一次健康的重启后会话、只有写入本身才能给出的字段身份。旧句"there is no verified macOS offset/VF write path yet"易被读成"驱动没有这条路"，与事实不符。
+
+**门禁实况（本轮实测，测试机）**：仓库 AGENTS.md 文档化的门 `cargo clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 在 macOS 上**原本不通过**：`auto-optimizer/src/platform.rs:33 panic_windows_only`（cfg `all(not(windows), not(target_os="linux"))` 在 macOS 编出，但**全树无调用者**）触发 `dead_code`；CI 跑 Linux（那里该函数被 cfg 排除）故此前未暴露。补 `#[allow(dead_code)]` ＋ 说明注释（**不删除**）后该门 **rc=0**；`cargo fmt --all -- --check` 干净；`nvoc-cli` 80、`nvoc-auto-optimizer` 64、`nvoc-core` 86 项测试全过。属 macOS 适配本身的门禁修复，非顺手带改。

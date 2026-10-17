@@ -29,7 +29,13 @@ pub const fn default_test_exe_path() -> &'static str {
     }
 }
 
+// No caller in the tree today, so on macOS this is dead code and the project's
+// documented clippy gate (workspace, -D warnings) fails on it. The cfg already
+// keeps it out on Windows and Linux; allowing it here rather than deleting it
+// keeps the path that a Windows-only feature would panic through compilable for
+// the day it gains a caller.
 #[cfg(all(not(windows), not(target_os = "linux")))]
+#[allow(dead_code)]
 pub fn panic_windows_only(feature: &str) -> ! {
     panic!("{feature} is only supported on Windows in this repository")
 }

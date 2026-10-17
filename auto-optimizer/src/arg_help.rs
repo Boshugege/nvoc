@@ -50,8 +50,10 @@ fn macos_eval_command() -> Command {
             "Runs the original cli-stressor-cuda-rs --vulkan-only load for --duration \
              while sampling the NullMoth RM telemetry, then runs the stress-macos \
              Metal verifier (when --metal-check points at it). No candidate is \
-             applied: there is no verified macOS offset/VF write path yet, so this \
-             is the preflight + load + verify step only.",
+             applied: the offset write path exists (0x2080d01c, same block as the \
+             readable 0x2080901b) but a write waits on authorisation, a healthy \
+             session and the field identity only the write itself can give, so \
+             this is the preflight + load + verify step only.",
         )
         .arg(
             Arg::new("duration")
