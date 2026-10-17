@@ -417,8 +417,11 @@ def selftest(args):
     """
     b, em, rows, file_hi = extract(args.firmware)
     fails = []
+    checks = 0
 
     def ck(cond, what):
+        nonlocal checks
+        checks += 1
         if not cond:
             fails.append(what)
         print("  %-4s %s" % ("ok" if cond else "FAIL", what))
@@ -517,8 +520,18 @@ def selftest(args):
     pairs = twin_pairs(rows)
     ck(len(pairs) == 63, "63 GET/SET pairs on both sides (got %d)" % len(pairs))
     ck(pairs.get(0x2080901B) == 0x2080D01C, "the CLK offset pair is in the enumeration")
-    print("# %d check(s) failed" % len(fails))
-    return 1 if fails else 0
+    if fails:
+        print("# %d check(s) failed" % len(fails))
+        return 1
+    # Say that it passed, in the shape every other tool's selftest reports, so a
+    # gate can require a result rather than infer one from a zero exit: a selftest
+    # that silently stopped asserting would otherwise look the same as a good run.
+    print(
+        "selftest ok: %d checks -- 1118-row recount, the ids the flags bug hid, "
+        "per-handler code and class info, trampoline shape, VOLT family sizes, "
+        "twin enumeration on both sides" % checks
+    )
+    return 0
 
 
 def main():
