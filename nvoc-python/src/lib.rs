@@ -1762,6 +1762,25 @@ fn normalize_supported_app_clocks(target: &GpuTarget<'_>) -> PyResultValue {
     Ok(Value::Array(items))
 }
 
+/// The backend set a fan / power-limit read targets when the caller does not
+/// name one: `nvml` on NVAPI platforms (its historical default, unchanged), and
+/// the native RM backend on macOS.
+///
+/// This is not a convenience. Both projections carry a macOS branch that answers
+/// from the RM snapshot instead of failing on the missing NVML handle, and a
+/// hard-coded `nvml` made that branch unreachable: on macOS `with_target` calls
+/// `ensure_backend_available` first, which refuses every set but `macos-rm`, so
+/// the entry failed with "NVAPI/NVML are not available on macOS" before the
+/// projection ever ran -- the backend could answer and the entry still refused.
+/// `macos: false` keeps the other platforms byte-for-byte as they were.
+fn fan_power_backends(macos: bool) -> &'static str {
+    if macos {
+        "macos-rm"
+    } else {
+        "nvml"
+    }
+}
+
 fn normalize_power_limits(target: &GpuTarget<'_>) -> PyResultValue {
     // macOS RM: same dispatch rule as the other families. The enforced wall and
     // the requested limit are already in the snapshot this backend publishes,
@@ -2277,8 +2296,17 @@ fn query_supported_applications_clocks(
 }
 
 #[pyfunction]
-fn query_power_limits(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
-    let value = with_target(gpu, "nvml", normalize_power_limits)?;
+#[pyo3(signature = (gpu, backends = None))]
+fn query_power_limits(
+    py: Python<'_>,
+    gpu: &str,
+    backends: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let value = with_target(
+        gpu,
+        backends.unwrap_or_else(|| fan_power_backends(cfg!(target_os = "macos"))),
+        normalize_power_limits,
+    )?;
     py_value(py, &value)
 }
 
@@ -2289,8 +2317,13 @@ fn query_pstates(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-fn query_fan_info(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
-    let value = with_target(gpu, "nvml", normalize_fan_info)?;
+#[pyo3(signature = (gpu, backends = None))]
+fn query_fan_info(py: Python<'_>, gpu: &str, backends: Option<&str>) -> PyResult<Py<PyAny>> {
+    let value = with_target(
+        gpu,
+        backends.unwrap_or_else(|| fan_power_backends(cfg!(target_os = "macos"))),
+        normalize_fan_info,
+    )?;
     py_value(py, &value)
 }
 
@@ -5878,6 +5911,32 @@ mod tests {
             assert!(ensure_backend_available(BackendSet::Nvml).is_ok());
             assert!(ensure_backend_available(BackendSet::Both).is_ok());
             assert!(ensure_backend_available(BackendSet::MacosRm).is_ok());
+        }
+    }
+
+    /// The fan and power-limit entries must reach a backend that exists on the
+    /// platform they run on. Their projections answer from the RM snapshot on
+    /// macOS, but the wrapper used to hard-code `nvml`, and `with_target`
+    /// refuses any set but `macos-rm` there -- so the projection was dead code
+    /// and the entry failed on the missing NVML handle instead. The default is
+    /// per platform, and the new parameter stays as the explicit opt-in.
+    #[test]
+    fn fan_and_power_entries_default_to_a_backend_this_platform_has() {
+        assert_eq!(
+            parse_backends(fan_power_backends(true)).unwrap(),
+            BackendSet::MacosRm
+        );
+        assert_eq!(
+            parse_backends(fan_power_backends(false)).unwrap(),
+            BackendSet::Nvml
+        );
+        if cfg!(target_os = "macos") {
+            // The default survives the platform gate, and the value it replaced
+            // does not -- which is the whole defect.
+            assert!(
+                ensure_backend_available(parse_backends(fan_power_backends(true)).unwrap()).is_ok()
+            );
+            assert!(ensure_backend_available(BackendSet::Nvml).is_err());
         }
     }
 
