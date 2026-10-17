@@ -40,7 +40,12 @@
   p95 1.011 s / max 1.012 s，采样耗时 p50 267 µs / p95 283 µs / max 1872 µs，fd 恒为 8，
   RSS 5412→6636 KB 后稳定，600/600 全字段 `advancing`、无 `epoch_reset`、无 `unavailable`，
   正常 `--count` 停止 exit 0）、
-  `rusd-*`/`nvoc-access-*`（遥测与属性基线）。
+  `rusd-*`/`nvoc-access-*`（遥测与属性基线）、
+  `stage9-vulkan-20261017T041959Z`（**阶段 9 主负载：原 Vulkan 渲染路径复用**——
+  loader/ICD 自动解析、无 env 冷启动 rc=0、错误路径 rc=1、5/10/30 s 阶梯、60 s stock 负载
+  同步遥测、SIGINT/SIGTERM 停止）、`stage9-stress-20261017T041107Z`
+  （**阶段 9 正确性校验补充**：`stress-macos` 全量 bit-exact 校验、负例 rc=1、60 s 限时负载
+  1206 dispatch/0 失败、SIGINT 0.06 s 停止 + 遥测同步采样）。
 
 ## 一、CLI 命令表（101 条，来源：`cli/src/lib.rs` 的 `CommandSpec`）
 
@@ -206,7 +211,9 @@
 | `tui` | 未实现 | 阶段 11 |
 | `srv`（ControlBackend） | 未实现：无 macOS 工厂/实现 | 阶段 11 |
 | `auto-optimizer` | 未实现：入口按 `has_nvapi` 筛选，且依赖 CUDA/OpenCL 验证器 | 阶段 10；需要非 CUDA 构建与 macOS 负载/验证器 |
-| `cli-stressor-cuda-rs` / `cli-stressor-opencl` | 未接入 macOS | 阶段 9：需先实测本机 Metal/Vulkan/OpenCL 计算能力 |
+| `cli-stressor-cuda-rs`（`--vulkan-only` / `--vulkan`） | **已实现且实测**：原 Vulkan 渲染负载在 macOS 直接复用，只新增 loader/ICD 解析（`vulkan_loader`，`4993a42`）——自动使用 `/Library/GPUBundles/nvmtl/` 的 Khronos loader + NVK ICD，无需手工导出 env；`--vulkan-window` 仍限 Windows（macOS 固定 offscreen） | CUDA GEMM 与 CUDA+Vulkan 混合模式在 macOS 不可用（无 CUDA）；渲染负载不做读回比对，计算域校验见下一行 |
+| `stress-macos`（新增） | **已实现且实测**：Metal 计算负载 + bit-exact CPU 参考校验（`1dcf27a`）；自检、负例、限时负载、SIGINT 停止全部通过 | 补 `--vulkan-only` 缺的**计算正确性**维度；是校验器，不是 CUDA/OpenCL 负载的等价替代 |
+| `cli-stressor-opencl` | 未接入 macOS | 本机无 OpenCL 运行时；计算域正确性校验由 `stress-macos` 承担 |
 | `probe-macos-rm` | 已存在（只读探针 + CPU 回归），阶段 1 追加 ABI 契约测试；阶段 3 追加显式只读 `--tierb-read`（campaign GET：rails-info/status、vfpoints），默认电池仍不发送这些 ID | 不整组运行 stage 3（含写入），不发送任何 SET |
 
 ## 三、阶段路线图现状（0→12）
@@ -222,7 +229,7 @@
 | 6 逐风扇/模式/曲线 | 风扇模式、曲线读写 | 遥测只有最大 RPM | 同上 |
 | 7 V/F、电压点、高级超频 | 曲线点/偏移/导入导出 | 未开始 | 同上 |
 | 8 其余功能族 | VBIOS、EDID、限频原因、策略 | 部分：`get-vbios -i` 离线解析可用 | 逐项给依据 |
-| 9 自动压力执行与验证器 | 限时负载、停止、结构化结果、正确性校验 | 未开始（已有临时 Metal 负载用于遥测响应，仅 exploratory） | 先实测计算能力与验证器 |
+| 9 自动压力执行与验证器 | 限时负载、停止、结构化结果、正确性校验 | **主负载 + 校验器完成**。主负载＝原 `--vulkan-only` 渲染路径（零算法改动，仅补 loader/ICD 解析 `4993a42`）：无 env 冷启动 rc=0，5/10/30 s 阶梯与 60 s stock 负载 rc=0，错误路径（`--gpu-index` 越界 / `--pci-bus` 不匹配）rc=1，`--vulkan-window` 在非 Windows 回退 offscreen rc=0；同步遥测显示 util 峰值 100%/均值 83%、gfx 1.53→1.95 GHz、功耗 11.5→13.5 W、温度 54→62 ℃、风扇 1778→1920 rpm。校验器＝`stress-macos`（`1dcf27a`）：全量 bit-exact 比对、启动自检、负例 rc=1、60 s 限时 1206 次 dispatch/0 失败、SIGINT 0.06 s 优雅停止 | 渲染负载无读回校验、`--vulkan-only` 无进程内取消（靠 SIGINT/SIGTERM 默认处置）；阶段 10 需把负载/校验器结果接进 optimizer 闭环 |
 | 10 自动扫描/优化/结果应用 | 受限闭环、保存/应用/恢复 | 未开始 | 依赖 4-9 |
 | 11 共享入口与界面集成 | pynvoc/GUI/TUI/srv 接入 | 未开始 | 契约先行的增量接入 |
 | 12 全量回归与交付 | 逐项复核、契约对照、CI 与 review 材料 | 进行中：阶段 1 已交付回归与 review 说明 | 每阶段补证据 |
@@ -234,4 +241,10 @@
   未验证其他 macOS 版本、驱动版本、Apple Silicon（不支持，仅 x86_64）或 mobile/OEM 路径。
 - 资源观察只覆盖 `/dev/fd` 与 RSS；未做 Mach port / IOKit 句柄全量审计。
 - RUSD 时效为策略实现（本会话推进 + 主机单调 5 s 窗口），不是驱动契约。
+- Vulkan 渲染负载（`--vulkan-only`）只报告 FPS，不读回比对；上游
+  `cli-stressor-cuda-rs/src/vulkan_render.rs` 的背景 pass fragment 循环当前为空
+  （`TEMP-DEBUG: loop removed entirely`，来自上游 `b0e6dd7`），负载主要来自几何/粒子/ROP。
+  不能由「渲染完成」推断计算正确性——该维度只由 `stress-macos` 提供。
+- `--vulkan-only` 无进程内取消/清理：SIGINT/SIGTERM 走 OS 默认处置立即终止（实测 rc=-2/-15），
+  不执行 `device.destroy_device()`/teardown；只有 `stress-macos` 有进程内优雅停止。
 - 未运行：完整 workspace `--ignored`、stage 3 探针组、任何性能 SET。
