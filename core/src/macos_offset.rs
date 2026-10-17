@@ -1,11 +1,20 @@
 //! Raw parsing of the private clock/offset control blocks.
 //!
-//! The macOS driver exposes the clock-offset channel through three private
-//! `NV2080` control ids that are not in the open kernel modules' headers. The
-//! probe (`probe-macos-rm`) established their geometry on the live device and
-//! the numbers below are that measurement, not a guess: the three container
-//! sizes are byte-exact (`48 + 32*384`, `20 + 32*224`, `60 + 32*64`) and every
-//! record stride and field offset used here was read back from the device.
+//! The macOS driver exposes the clock-offset channel through private `NV2080`
+//! control ids that are not in the open kernel modules' headers. The probe
+//! (`probe-macos-rm`) established their geometry on the live device and the
+//! numbers below are that measurement, not a guess: the container sizes are
+//! byte-exact (`48 + 32*384`, `20 + 32*224`, `60 + 32*64`, `8 + 32*24`) and
+//! every record stride and field offset used here was read back from the device.
+//!
+//! The fourth of them, the clock document, is the one that carries an actual
+//! offset: its records hold a domain bit, a frequency and a small signed value
+//! that is the domain's current offset in kHz. That reading is an inference from
+//! captured bytes, so it is stated with the two things that support it -- two of
+//! its frequencies are bit-for-bit the live graphics and memory clocks RUSD
+//! reports, and its non-zero magnitudes sit inside the +-18.75 MHz span the
+//! range block declares -- and with the falsifier: a controlled write must move
+//! the matching record.
 //!
 //! This module is deliberately platform-independent: it takes `&[u8]` and
 //! returns typed values, so it can be unit-tested without a GPU, an RM session
@@ -22,7 +31,9 @@
 //!   also fixes the unit as kHz for this magnitude;
 //! * which dword of a control record carries the *offset* is **not** decided
 //!   here -- the parser reports all twelve value dwords verbatim and leaves the
-//!   identification to a write/read-back experiment.
+//!   identification to a write/read-back experiment. The clock document is the
+//!   read that does not need that experiment: it publishes an offset per domain,
+//!   which is why it is parsed alongside the three control blocks.
 
 use core::fmt;
 
@@ -79,6 +90,24 @@ pub const OFFSET_CONTROL_MASK_DWORD: usize = 1;
 /// writes. The gaps (`+4`, `+48`, `+60`) are never written and are therefore
 /// not carried: a 0xA5 pre-seed left them untouched.
 const OFFSET_VALUE_BYTES: [usize; 12] = [8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 52, 56];
+
+/// `0x20809061`: the per-domain clock document (a "VFP get-info" in the
+/// driver's export, which is the only one of the four commands whose accepted
+/// size is small enough to have been captured whole).
+pub const CLK_DOCUMENT_CMD: u32 = 0x2080_9061;
+/// Byte size the driver requires for [`CLK_DOCUMENT_CMD`].
+///
+/// This is the one accepted form, measured: the same command refused sizes
+/// 493060, 83996, 369796, 157692 and 249844 with `NV_ERR_INVALID_ARGUMENT`.
+pub const CLK_DOCUMENT_BYTES: usize = 776;
+const CLK_DOCUMENT_HEAD_BYTES: usize = 8;
+const CLK_DOCUMENT_RECORD_BYTES: usize = 24;
+const CLK_DOCUMENT_RECORDS: usize = 32;
+/// Dword every populated record starts with (`0x00000303`). Slots that hold
+/// this and slots that are entirely zero are the only two shapes the captured
+/// payload has, so a slot with data but no marker is reported rather than
+/// guessed at.
+pub const CLK_DOCUMENT_RECORD_MARKER: u32 = 0x0000_0303;
 
 /// A block that did not have the size its command requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -272,6 +301,97 @@ pub fn parse_control(buf: &[u8]) -> Result<OffsetControl, OffsetParseError> {
     })
 }
 
+/// The parsed clock document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClkDocument {
+    /// The header as returned, dword by dword (`0x000000ff`, `0x000007ff` in the
+    /// captured payload). Neither field is named anywhere on this platform, so
+    /// both are kept raw.
+    pub head: Vec<u32>,
+    /// Populated records, in document order.
+    pub entries: Vec<ClkDocumentEntry>,
+    /// Slots that hold something without being entries.
+    ///
+    /// The captured payload has two of these (slots 21 and 31, each holding a
+    /// single `0xff` byte and otherwise zeroes) and twenty-one that are entirely
+    /// zero. They are reported by index rather than ignored, because "slot 21 is
+    /// not an entry" is a fact about the bytes while "the slots after the last
+    /// entry are padding" would be a guess: a second, differently shaped array
+    /// sharing this container cannot be ruled out yet.
+    pub unparsed_slots: Vec<usize>,
+}
+
+/// Parse a `0x20809061` clock document.
+///
+/// Populated records are spaced one stride apart and every one of them starts
+/// with the same marker; slots past the last entry are zero except for the two
+/// strays reported in [`ClkDocument::unparsed_slots`]. Nothing beyond those two
+/// shapes is assumed: a slot with the marker is an entry, a slot with neither
+/// the marker nor any content is padding, and anything else is recorded rather
+/// than read as an entry.
+pub fn parse_clock_document(buf: &[u8]) -> Result<ClkDocument, OffsetParseError> {
+    let head = head_dwords(buf, CLK_DOCUMENT_BYTES, CLK_DOCUMENT_HEAD_BYTES)?;
+    let mut entries = Vec::new();
+    let mut unparsed_slots = Vec::new();
+    for slot in 0..CLK_DOCUMENT_RECORDS {
+        let at = CLK_DOCUMENT_HEAD_BYTES + slot * CLK_DOCUMENT_RECORD_BYTES;
+        let dwords: Vec<u32> = (0..CLK_DOCUMENT_RECORD_BYTES / 4)
+            .map(|i| dword(buf, at + i * 4))
+            .collect();
+        if dwords.iter().all(|&d| d == 0) {
+            continue;
+        }
+        if dwords[0] != CLK_DOCUMENT_RECORD_MARKER {
+            unparsed_slots.push(slot);
+            continue;
+        }
+        entries.push(ClkDocumentEntry {
+            index: slot,
+            domain_bit: dwords[1],
+            frequency_khz: dwords[2],
+            offset_khz: dwords[3] as i32,
+            flags: dwords[4],
+        });
+    }
+    Ok(ClkDocument {
+        head,
+        entries,
+        unparsed_slots,
+    })
+}
+
+/// One domain in the clock document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClkDocumentEntry {
+    /// Record slot, i.e. the index of the domain in the document.
+    pub index: usize,
+    /// The domain bit this record names. Reported verbatim: the public
+    /// graphics/memory names are not in any header on this platform, and the
+    /// only bit that can be named here at all is `0x10`, which the in-tree NVAPI
+    /// copy's own mask names MCLK -- and whose frequency in the captured payload
+    /// is the live memory clock, which agrees.
+    pub domain_bit: u32,
+    /// The frequency the record reports, in kHz.
+    ///
+    /// An inference, not a header declaration: for two of the captured records
+    /// this equals the live RUSD reading exactly (1 530 000 graphics,
+    /// 6 000 984 memory), and no other field in the payload has that property.
+    pub frequency_khz: u32,
+    /// The signed value the record carries, in kHz.
+    ///
+    /// This is the offset reading the goal asks for: the captured values are
+    /// small and signed (-5, -126, -244, -3904 kHz), of the same order as the
+    /// +-18.75 MHz span the range block declares. A controlled write that moves
+    /// this field would confirm it; nothing has written yet.
+    pub offset_khz: i32,
+    /// The dword after the offset, as returned. It is not named: the captured
+    /// values (`0x00020002` on the records whose offset reads -1,
+    /// `0x00010000`/`0x00060000` on the records with a real offset) suggest it
+    /// distinguishes "no offset set" from "offset set", but that is a guess and
+    /// is kept raw.
+    pub flags: u32,
+}
+
 /// The outcome of reading one block of the private clock-offset channel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OffsetBlockRead<T> {
@@ -451,7 +571,7 @@ mod tests {
 
     #[test]
     fn the_record_strides_are_the_sizes_the_driver_requires() {
-        // The three geometries must tile their containers exactly, or a record
+        // The geometries must tile their containers exactly, or a record
         // would straddle the end of the block.
         assert_eq!(
             OFFSET_DIRECTORY_HEAD_BYTES + OFFSET_DIRECTORY_RECORDS * OFFSET_DIRECTORY_RECORD_BYTES,
@@ -464,6 +584,77 @@ mod tests {
         assert_eq!(
             OFFSET_CONTROL_HEAD_BYTES + OFFSET_CONTROL_RECORDS * OFFSET_CONTROL_RECORD_BYTES,
             OFFSET_CONTROL_BYTES
+        );
+        assert_eq!(
+            CLK_DOCUMENT_HEAD_BYTES + CLK_DOCUMENT_RECORDS * CLK_DOCUMENT_RECORD_BYTES,
+            CLK_DOCUMENT_BYTES
+        );
+    }
+
+    #[test]
+    fn the_clock_document_reports_a_domain_frequency_and_offset() {
+        let first = CLK_DOCUMENT_HEAD_BYTES;
+        let third = CLK_DOCUMENT_HEAD_BYTES + 2 * CLK_DOCUMENT_RECORD_BYTES;
+        let writes = vec![
+            (0, 0xff),
+            (4, 0x7ff),
+            (first, CLK_DOCUMENT_RECORD_MARKER),
+            (first + 4, 1),
+            (first + 8, 1_530_000),
+            (first + 12, (-1i32) as u32),
+            (first + 16, 0x0002_0002),
+            (third, CLK_DOCUMENT_RECORD_MARKER),
+            (third + 4, 0x10),
+            (third + 8, 6_000_984),
+            (third + 12, (-126i32) as u32),
+            (third + 16, 0),
+        ];
+        let parsed = parse_clock_document(&block(CLK_DOCUMENT_BYTES, &writes)).unwrap();
+        assert_eq!(parsed.head, vec![0xff, 0x7ff]);
+        assert_eq!(
+            parsed
+                .entries
+                .iter()
+                .map(|e| (
+                    e.index,
+                    e.domain_bit,
+                    e.frequency_khz,
+                    e.offset_khz,
+                    e.flags
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 1, 1_530_000, -1, 0x0002_0002),
+                (2, 0x10, 6_000_984, -126, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_clock_document_slot_is_padding_and_a_stray_value_is_reported() {
+        // A zeroed slot past the last entry is padding: the captured payload has
+        // 21 of them and none of them is an entry.
+        let parsed = parse_clock_document(&block(CLK_DOCUMENT_BYTES, &[])).unwrap();
+        assert!(parsed.entries.is_empty());
+        assert_eq!(parsed.head, vec![0, 0]);
+
+        // Data without the marker is neither padding nor an entry. The captured
+        // payload has two such slots, so it is recorded by index rather than
+        // read as an entry or dropped silently.
+        let stray = block(CLK_DOCUMENT_BYTES, &[(CLK_DOCUMENT_HEAD_BYTES + 8, 0x1234)]);
+        let parsed = parse_clock_document(&stray).unwrap();
+        assert!(parsed.entries.is_empty());
+        assert_eq!(parsed.unparsed_slots, vec![0]);
+    }
+
+    #[test]
+    fn a_short_clock_document_is_rejected_rather_than_parsed() {
+        assert_eq!(
+            parse_clock_document(&[0u8; 24]),
+            Err(OffsetParseError {
+                need: CLK_DOCUMENT_BYTES,
+                got: 24
+            })
         );
     }
 }

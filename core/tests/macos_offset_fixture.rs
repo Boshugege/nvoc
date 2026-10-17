@@ -12,23 +12,35 @@
 //!
 //! What these tests can and cannot say:
 //!
-//! * they pin the two blocks whose *payload* was captured raw -- the domain
-//!   directory and the offset range -- field by field, so a drift in any record
-//!   stride or field offset fails here rather than on the GPU;
+//! * they pin the three blocks whose *payload* was captured raw -- the domain
+//!   directory, the offset range and the clock document -- field by field, so a
+//!   drift in any record stride or field offset fails here rather than on the
+//!   GPU;
 //! * the control block's payload was never dumped raw (only its write set was),
 //!   so its geometry is pinned by the synthetic test in `macos_offset` plus the
 //!   directory's type sequence asserted below, not by a byte fixture;
-//! * none of this says which dword carries the *current offset*. Every value
-//!   dword reads zero at stock, so no byte fixture can settle that.
+//! * none of the *control* block's dwords is settled by a fixture: every value
+//!   dword reads zero at stock, so no byte fixture of that block can say which
+//!   one carries the offset. The clock document is the read that does settle it,
+//!   because its records carry a non-zero signed offset per domain; that fixture
+//!   is the third one below.
 
 use nvoc_core::macos_offset::{
-    OffsetBlockRead, OffsetParseError, parse_control, parse_directory, parse_range,
+    OffsetBlockRead, OffsetParseError, parse_clock_document, parse_control, parse_directory,
+    parse_range,
 };
 
 /// `0x20809019 @12336`, status `NV_OK`, exactly as the driver returned it.
 const DIRECTORY: &[u8] = include_bytes!("data/macos-offset-directory.bin");
 /// `0x20809025 @7188`, status `NV_OK`, exactly as the driver returned it.
 const RANGE: &[u8] = include_bytes!("data/macos-offset-range.bin");
+/// `0x20809061 @776`, status `NV_OK`, exactly as the driver returned it.
+///
+/// The one payload in the channel small enough to capture whole, and the only
+/// one that publishes a per-domain offset: the same run that produced it also
+/// read the live clocks through RUSD, which is what makes two of its
+/// frequencies checkable rather than merely plausible.
+const CLOCK_DOCUMENT: &[u8] = include_bytes!("data/macos-clkdoc-776.bin");
 
 #[test]
 fn the_directory_fixture_decodes_to_the_ten_recorded_entries() {
@@ -104,6 +116,45 @@ fn the_range_fixture_carries_the_recorded_bounds() {
 }
 
 #[test]
+fn the_clock_document_fixture_carries_the_recorded_domains_and_offsets() {
+    let document = parse_clock_document(CLOCK_DOCUMENT).expect("the fixture is the exact size");
+    // Header, then eleven populated slots out of the thirty-two the container
+    // has; the rest are zero. The two frequencies that RUSD also reported are
+    // the reason the field order below is trusted at all: domain 1 reads
+    // 1530000 kHz, which is the live graphics clock, and domain 0x10 -- the bit
+    // the in-tree NVAPI copy's own mask names MCLK -- reads 6000984 kHz, which
+    // is the live memory clock. Both matched the same session's telemetry
+    // exactly.
+    assert_eq!(document.head, vec![0x0000_00ff, 0x0000_07ff]);
+    assert_eq!(
+        document
+            .entries
+            .iter()
+            .map(|e| (e.domain_bit, e.frequency_khz, e.offset_khz, e.flags))
+            .collect::<Vec<_>>(),
+        vec![
+            (0x0000_0001, 1_530_000, -1, 0x0002_0002),
+            (0x0000_0002, 1_455_000, -1, 0x0002_0002),
+            (0x0000_0004, 1_545_000, -1, 0x0002_0002),
+            (0x0000_0008, 405_000, -244, 0x0001_0000),
+            (0x0000_0010, 6_000_984, -126, 0x0000_0000),
+            (0x0000_0020, 1_320_000, -1, 0x0002_0002),
+            (0x0000_0040, 810_000, -3904, 0x0001_0000),
+            (0x0004_0000, 108_000, -5, 0x0006_0000),
+            (0x0008_0000, 540_000, -244, 0x0001_0000),
+            (0x0010_0000, 1_410_000, -1, 0x0002_0002),
+            (0x0020_0000, 255, 0, 0x0000_0000),
+        ]
+    );
+    // Eleven entries, and the two slots that hold a stray byte without the
+    // marker are reported rather than read as entries or dropped: the eleven
+    // populated slots and the twenty-one empty ones are not the whole story of
+    // this container, and which of the strays is meaningful is not settled yet.
+    assert_eq!(document.entries.len(), 11);
+    assert_eq!(document.unparsed_slots, vec![21, 31]);
+}
+
+#[test]
 fn the_fixtures_are_the_sizes_their_commands_declare() {
     // A fixture is only evidence while it is the exact block the driver was
     // asked for: truncating one would make the size check in the parser pass
@@ -113,6 +164,10 @@ fn the_fixtures_are_the_sizes_their_commands_declare() {
         nvoc_core::macos_offset::OFFSET_DIRECTORY_BYTES
     );
     assert_eq!(RANGE.len(), nvoc_core::macos_offset::OFFSET_RANGE_BYTES);
+    assert_eq!(
+        CLOCK_DOCUMENT.len(),
+        nvoc_core::macos_offset::CLK_DOCUMENT_BYTES
+    );
 }
 
 #[test]
