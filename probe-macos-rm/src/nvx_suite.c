@@ -1368,10 +1368,24 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
  * (mask@+8, records @+100 stride 72) -- that is layer L1, not this block.
  * The RM block the GSP validates is 2108 = 60 + 32*64, and the input mask is
  * at +4, measured (see docs/.../gsp-method-table-and-legacy-forwarding.md
- * sections 4/4.2): the 0xA5 sweep shows the handler writes 13 dwords per 64 B
- * record (rec+0 type, rec+8..rec+44, rec+52, rec+56) and leaves rec+4, rec+48
- * and rec+60 alone.  This pass TESTS that model: it prints the driver-written
- * dword map, then the decode.
+ * sections 4/4.2).  Two independent measurements fix the *write map*:
+ *
+ *   0xA5 background, mask 0xFF at +4 -> 106/527 dwords changed, last @564
+ *     head (60 B) 14 writes: +0 (u8 0xFF), +8 = 0x01010000, +12..+56 = 0
+ *     64 B record k at +60+64k writes 13 slots:
+ *       rec+0 u16 type stamp, rec+8,12,16,20,24,28,32,36,40,44,52,56
+ *     (rec+4, rec+48 and rec+60 are never written by GET)
+ *   small-counter pre-seed, mask 0x2 at +4 -> 1 record, W +0 +8 +124,
+ *     Z 24: the same 14 head writes and the same 13 slot record, at k = 1
+ *     (type stamp 0x00000909) -- so a mask bit selects record index == bit.
+ *
+ * The arithmetic closes only if the record field set is per-type: 106 = 14 +
+ * 92 record writes, and the two records the sweep reached (types 08, 09)
+ * carry 13 each, leaving 6 x 11 for the types behind mask bits 2..7.  The
+ * counter pre-seed is what makes that visible: every dword the handler writes
+ * (including a write of 0) shows up as W or Z against a counter background,
+ * and masking ONE bit at a time puts each record's field set on its own line.
+ * This pass TESTS that model; it never assumes it.
  *
  * Read-only: every case is a documented GET; the SET twins
  * (0x2080d01c / 0x2080d024 / 0x2080f214) are in nvx_known_set_ids and are
@@ -1390,6 +1404,21 @@ typedef struct {
 } clkctl_case;
 
 static const clkctl_case nvx_clkctl[] = {
+    /* --- Decisive layout cases first: counter pre-seed + the measured +4 ---
+     * mask.  These are the cases that turn the write map into a per-record
+     * field list, and they must run before anything that could wedge. */
+    { "domains-get-control 2108 in@4=cnt 0xFF",  0x2080901bu, 2108, 0x000000ffu, 4, 1, 0 },
+    { "domains-get-control 2108 in@4=cnt 0x01",  0x2080901bu, 2108, 0x00000001u, 4, 1, 0 },
+    { "domains-get-control 2108 in@4=cnt 0x02",  0x2080901bu, 2108, 0x00000002u, 4, 1, 0 },
+    { "domains-get-control 2108 in@4=cnt 0x04",  0x2080901bu, 2108, 0x00000004u, 4, 1, 0 },
+    { "domains-get-control 2108 in@4=cnt 0x08",  0x2080901bu, 2108, 0x00000008u, 4, 1, 0 },
+    { "domains-get-control 2108 in@4=cnt 0x10",  0x2080901bu, 2108, 0x00000010u, 4, 1, 0 },
+    { "domains-get-control 2108 in@4=cnt 0x20",  0x2080901bu, 2108, 0x00000020u, 4, 1, 0 },
+    { "domains-get-control 2108 in@4=cnt 0x40",  0x2080901bu, 2108, 0x00000040u, 4, 1, 0 },
+    { "domains-get-control 2108 in@4=cnt 0x80",  0x2080901bu, 2108, 0x00000080u, 4, 1, 0 },
+    /* The 9019 directory carries 10 entries, i.e. mask bits 0..9; 0x3FF asks
+     * for all ten records in one shot as the cross-check on the per-bit runs. */
+    { "domains-get-control 2108 in@4=cnt 0x3FF", 0x2080901bu, 2108, 0x000003ffu, 4, 1, 0 },
     /* The offset/range read: GSP-verified size 2108, not the NVAPI 2404. */
     { "domains-get-control 2108 mask=0xFF",  0x2080901bu, 2108, 0x000000ffu, 8, 0, 0 },
     { "domains-get-control 2108 mask=all",   0x2080901bu, 2108, 0xffffffffu, 8, 0, 0 },
@@ -1410,6 +1439,13 @@ static const clkctl_case nvx_clkctl[] = {
     { "domains-get-control 2108 in@4=3",     0x2080901bu, 2108, 0x00000003u, 4, 0, 0 },
     { "domains-get-control 2108 in@4=FF cnt",0x2080901bu, 2108, 0x000000ffu, 4, 1, 0 },
     { "domains-get-info 12336",              0x20809019u, 12336, 0, ~0u, 0, 0 },
+    /* Counter pre-seed on the directory and on the range block: their heads
+     * and record strides are known from the zeroed hex dumps, but a counter
+     * image is what separates "written 0" from "never touched" -- the same
+     * ambiguity that made the 2108 B head look like two writes instead of
+     * fourteen. */
+    { "domains-get-info 12336 counter",      0x20809019u, 12336, 0, ~0u, 1, 0 },
+    { "freq-ctrl-info 7188 counter",         0x20809025u, 7188, 0, ~0u, 1, 0 },
     { "measure-freq 8 (x2, 1 s)",            0x20809006u, 8, 0, ~0u, 0, 1 },
     { "vfp582 get-status 648",               0x20809062u, 648, 0, ~0u, 0, 0 },
     { "freq-ctrl-info 7188",                 0x20809025u, 7188, 0, ~0u, 0, 0 },

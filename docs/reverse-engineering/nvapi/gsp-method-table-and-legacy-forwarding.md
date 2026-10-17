@@ -209,47 +209,114 @@ natural first suspects for a "clock control enabled" precondition, and they are
 why a first write attempt has to re-verify the gates instead of assuming that
 the GET's success implies the SET's.
 
-### 4.2 What the mask selects, and the record shape (falsifiable)
+### 4.2 What the mask selects, and the record shape (measured, not fitted)
 
-Two numbers in the `0xA5` log pin the geometry down, and one model explains both.
+Three logs pin the geometry down. The third one corrects an arithmetic error in
+the first two-read model (see "the earlier model was wrong" below).
 
-* `0x2080901b` with `mask@+4 = 0xFF`: the header line says `106/527 dwords
-  changed` and `last @564`.
-* `0x20809019`'s directory lists **10 entries** with record types
-  `08,09,08,09,09,09,03,08,09,09` (domain bits `0,1,4,2,3,20,19,6,21,5`). If the
-  901b mask were a *domain-bit* mask, its low 8 bits would name only 7 domains
-  (bit 7 is not in the directory), so `0xFF` would fill 7 records ->
-  `2 + 7*13 = 93` changed dwords, not 106.
+**(a) `0xA5` background, `mask@+4 = 0xFF`** (`clkctl-offsweep-run1-A5.txt`):
+header says `106/527 dwords changed (first @0 last @564)`. With an all-`0xA5`
+pre-seed *every* write changes a dword (no field legitimately holds
+`0xA5A5A5A5`), so changed == written. The run's per-dword list was capped at 40
+lines by the then-current build; it shows, in address order, the writes
+`0, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56` (14 dwords below the
+first record) and then two 13-dword groups at `60+64k+{0,8,12,16,20,24,28,32,
+36,40,44,52,56}` for `k = 0, 1`.
 
-The model: the mask selects **domain entries (indices), not domain bits**; each
-selected entry fills one 64-byte record at `+60 + 64*i`, and the handler writes
-exactly 13 dwords per record -- `rec+0` (the type, written as a `u16`), the ten
-dwords `rec+8 … rec+44`, and `rec+52`/`rec+56` -- while leaving `rec+4`,
-`rec+48` and `rec+60` untouched. Those three are the only per-record dwords that
-survive an `0xA5` background, which is how the write set is known at all.
+**(b) small-counter background (`dword[i] = i+1`), `mask@+4 = 0x2`**
+(`clkctl-read-mask-sweep-lite.txt`, case `counter`): `U=500 W=3 Z=24`, with
+`W +0:s00000001>w000000ff`, `W +8:s000000ff>w01010000`,
+`W +124:s00000020>w00000909`. The `Z` runs are the writes of a zero value that
+a zeroed background cannot show, and the verbatim dump confirms they are
+`+12..+56` (12 dwords) and the record at `+124`'s twelve value slots. This is
+the measurement that fixes the head: **14 writes**, not 2.
 
-Check: `2 + 8*13 = 106` and entry 7's last written dword is
-`60 + 7*64 + 56 = 564`. Both match the log exactly.
+**(c) same run, `mask@+0 = 0xFF` (`in@0=FF cnt`)**: `W +8 +124` only, `Z=24`,
+i.e. the identical body. The `+0 = 0xFF` write is invisible here only because
+`+0` was seeded `0xFF` by the case itself.
 
-Predictions this makes -- and the reason the §8 battery now seeds `+4` with
-`0x1`, `0xFF` and `0x3FF` and dumps the whole block:
+The model that explains all three:
 
-| `mask@+4` | records | non-zero bytes in a zeroed block |
-| --- | --- | --- |
-| `0x1` | 1 | `+60 = 08 08` |
-| `0xFF` | 8 | `+60 08`, `+124 09`, `+188 08`, `+252 09`, `+316 09`, `+380 09`, `+444 03`, `+508 08` |
-| `0x3FF` | 10 | the eight above plus `+572 09`, `+636 09` |
+* the head is **60 bytes**; it is written unconditionally:
+  `+0` = `0xFF` (a **u8** -- the `0xA5` log shows only byte 0 changing),
+  `+8` = `0x01010000` (constant), `+12 … +56` = twelve zero dwords.
+  `+4` is the caller's **input mask** (echoed, so a same-value write is
+  invisible in a delta log -- which is why (a) shows 14 head writes and not 15).
+* the records are **64 bytes** at `+60 + 64*k`, `k = 0 … 31` (2108 = 60 + 32·64),
+  indexed by the mask **bit**: in (b) the mask the driver actually read is the
+  counter value at `+4`, i.e. `0x2` = bit 1, and the one record written is the
+  one at `+60 + 64*1 = +124`. So bit -> record index, one to one.
+* each selected record writes the same 13 slots: `rec+0` (**u16** type stamp,
+  both bytes equal: `08 08`, `09 09`, `03 03`), `rec+8, 12, 16, 20, 24, 28, 32,
+  36, 40, 44` and `rec+52`, `rec+56`. `rec+4`, `rec+48` and `rec+60` are the only
+  per-record dwords a GET never writes (measured in (a) and re-measured as `U`
+  in (b): `+128`, `+172`, `+184` stayed at their counter values).
 
-Everything else the handler writes is a zero, which is why a *zeroed*
-background cannot show the record shape at all (a zero write is
-indistinguishable from an untouched byte) and why the shape had to come from the
-`0xA5` sweep. A `0x25` answer to `0x3FF`/`0x1` would mean the value is out of
-range for the field, i.e. that the mask is not an entry selector.
+**The earlier model was wrong.** It read the `106` as `2 + 8*13` and concluded
+the two extra head dwords were `+0`/`+8` alone. But (b) measures 14 head writes,
+and 14 + 8*13 = 118 != 106. The count *is* 106, so the records cannot all carry
+13 fields: `106 = 14 + 92`, and the two records the capped list reaches (types
+`08` and `09`) do carry 13 each -> the remaining six records behind mask bits
+`2…7` must average `(92-26)/6 = 11`. That is a **per-type field set**, exactly
+the shape the NVAPI V1 handler shows (`internal type -> which dwords get
+marshalled`), and it is the open item this note now carries.
+
+Predictions this makes (registered in the probe as `--clkctl-read`'s leading
+counter pass: one request per mask bit `0x1…0x80`, plus `0xFF`/`0x3FF`):
+
+| `mask@+4` (counter bg) | expected |
+| --- | --- |
+| any single bit `b` | writes only at `+60+64b`; the head's 14 writes; the record's field count says the type |
+| `0xFF` | 8 records -> 14 + (2x13 + 6x11) = 106 written dwords, last @564 |
+| `0x3FF` | the 10 directory entries of `0x20809019` -> 14 + 2x13 + 8x11 = 128 (if every other type carries 11) |
+
+A `0x25` answer to a single-bit mask would mean that bit names a domain with no
+record on this part, and the per-bit answer then fixes the bit -> index map
+directly instead of by inference.
 
 Consequence for the write path: `rec+4`, `rec+48` and `rec+60` are the only
 per-record dwords this GET never overwrites, so they are the first place a SET
-input could live -- to be confirmed against `0x2080d01c`, not assumed.
+input could live -- to be confirmed against `0x2080d01c`, not assumed. The
+*current offset* is still not identified: every value slot reads back `0` at
+stock, so the offset field can be pinned only by (i) the per-type field map
+above plus the NVAPI-field correspondence of §5.1, or (ii) a gated single-step
+SET with a same-field read-back.
 
+### 4.3 Candidate mapping of the 64 B record fields (not yet verified)
+
+The record's 13 written slots are `rec+0` (u16 type) plus twelve dwords. Two
+independent coordinate facts suggest which of them is the *offset*:
+
+1. **Measured field shift.** `0x20809025` (same ClockClient controller tree, same
+   driver) carries `max_kHz`/`offset_floor`/`offset_ceiling` at `rec+8`,
+   `rec+0x14`, `rec+0x18`; the NVAPI struct for the same control
+   (`nvapi-rs` `clk_freq_ctrl_info_entry`) carries the same three at `+0x2C`,
+   `+0x38`, `+0x3C`. Same spacing, constant `0x24` shift -> the RM record's
+   field *order* is the NVAPI record's field order shifted by `0x24`.
+2. **NVAPI V1 field list** for this very control
+   (`nvapi-rs/sys/src/gpu/clock.rs:1393` `clk_ctrl_entry`): `OFFSET_KHZ = 44`
+   (`0x2C`), `RANGE_MIN = 48`, `RANGE_MAX = 52`, `APPLIED = 56`, `EXTRA = 60`.
+
+Applying the `0x24` shift to fact 2 gives the candidate mapping
+
+| RM offset | candidate | TU116 stock |
+| --- | --- | --- |
+| `rec+8` | `offset_kHz` (i32), the **current offset** | `0` |
+| `rec+12` | `range_min` | `0` |
+| `rec+16` | `range_max` | `0` |
+| `rec+20` | `applied` | `0` |
+| `rec+24` | `extra` | `0` |
+| `rec+28 … rec+44`, `rec+52`, `rec+56` | unr attributed / per-type tail | `0` |
+
+Caveats, stated because they matter: the shift is *measured* only on
+`0x20809025`'s three fields, the V1 caller struct is layer **L1** (its `+44`
+is absolute inside a 2404 B caller block, so the "shift" is a coordinate
+correspondence and not a pointer arithmetic claim), and the 901b record does
+**not** return `-18750/+18750` in `rec+12`/`rec+16` at stock, so those two are
+*not* the supported range -- the range lives in `0x20809025`. Treat the table as
+a ranked candidate list: the per-bit counter map (§4.2) and a gated
+same-field read-back after a single-step SET are the two tests that can promote
+or kill each row. Nothing here is evidence that a SET is safe.
 
 ## 5. Neighbouring containers that *do* carry values
 
