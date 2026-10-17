@@ -1480,3 +1480,26 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - **格式** ✔：CI 的 fmt job 是 `ruff format . --check`（`preview = true` ⇒ **版本敏感** ✔）。本机用 `ruff@0.17.1` 只对**本工具这一个文件**执行 `ruff format`：该文件从 would-be-reformatted 变为 **already formatted** ✔；全仓库"would be reformatted"文件数 **10→9** ✔。**其余 9 个漂移文件一律未动** ✔ —— 它们是别人/别族的代码，本轮不去制造无关 diff ✔。
 - **行为不变（这是关键证据）** ✔：格式化后 `--selftest` 仍输出 `selftest ok: geometry + round-trip + field decode + write-set model` ✔；对已录 `clkctl-hex.txt` 的解码输出 **md5 前后完全一致**（`7bf52cb8eb151a575ad3d1d70c824750`）✔ ⇒ **纯格式改动，零语义变化** ✔。
 - **规模与边界** ✔：`174 insertions / 104 deletions`，**只限本工具文件** ✔（我自撰的工具，未触碰他人文件 ✔，无 `reset --hard`／无 `clean` ✔）。
+
+## 45. 把数字钉到捕获上：runbook 规则表述纠错 + 位标记类的实测（2026-10-18）
+
+### 45.1 触发
+两个**活文档**（不是历史记录）里各有一个可疑数字/表述：`probe-macos-rm/tools/clock-offset-write-run.sh` 把 SET 孪生规则写成 `(id | 0x4000) + 1` 并称 "the corrected table carries 47 instances"，又写 "on the corrected 1118-row table that test selects exactly the 92 write-half ids"；`core/src/macos_rm.rs` 的文档注释把同一句 "exactly the 92 write-half ids" 放在**未指明捕获**的语境里。§42 已把规则纠正为"category byte +0x40 且 message id +1"并记录 304/304 实测 ⇒ 活文档与已证结论不一致，必须改。
+
+### 45.2 实测（本机可复现，889 行捕获 `gsp-table-full.tsv`）
+- 按 **bit15/bit14 组合**分类（不再留"缺省桶"）：`0x0` **481** 行、`0x4000` **19** 行、`0x8000` **300** 行、`0xc000` **89** 行，合计 889 ✔。**自我纠错**：我第一次的分类脚本只写了 `0x8000..0xBFFF`／`0xC000`／`0` 三桶，**漏掉 `0x4000` 单独出现这一桶**，19 行被静默并进 "public/other"（481 里含它们）；本节按四桶重算并记录该失误 ✔。
+- `0x4000` 单独出现的 19 行**全部落在公开类别 0x40-0x44**：`0x20804006@776`、`0x20804001@6616`、`0x20804101@8`、`0x20804102@8`、`0x20804201@104`、`0x20804402@140` 等（flags：`0xc0` 十六行、`0x158`、`0x48`）⇒ **bit14 单独不构成"特权"**；转发器的判定式是 `(cmd & 0xC000) == 0xC000`，它在这份捕获上**只选出那 89 行写半边、一个读行都不选** ✔。所以"写半边＝特权半边"对**该判定式**成立，而"bit14 = privileged"的说法不精确。
+- 孪生规则按 §42 的纠正形式实测：存在 **(category byte + 0x40, message id + 1)** 孪生的读行 **56/300**，其中同 paramSize **41**；写成 `(id | 0x4000) + 1` 在这份捕获上给出同一批 56 个（因为读半边是 0x80-0xBF 字节，加 0x40 与 `| 0x4000` 等价；这个等价对已含 bit6 的字节不成立）✔ ⇒ runbook 里 "47 instances" 与 "92 write-half ids" 属于**另一份捕获（1118 行 recount）**的数，与我这 889 行的 56／89 **不能互推** ✔。
+- 逐 id 核对 runbook 的两个例子：`0x2080901b` size **2108** flags `0x48` → `0x2080d01c` size **2108** flags `0x44` ✔；`0x2080901f@19416` → `0x2080d020@19416` ✔；`0x2080d01b` **不存在** ✔。
+
+### 45.3 改动（只改活文档/注释与其依据，不改任何行为）
+1. runbook 的规则段改写为实测形式（category byte +0x40 与 message id +1；注明 `| 0x4000` 只在读半边等价），计数**按捕获指名**（889 行：56/300，同尺寸 41）。
+2. runbook 的特权段与 `core/src/macos_rm.rs` 的注释改为"该判定式选出恰好写半边——1118 行 recount 里 92 行、889 行 dump 里 89 行，两次都没选到读行"。
+3. `dump-gsp-families.py` 的模块 docstring 补上"bit14 单独不是特权"的实测反例（19 行公开 0x40-0x44）；其**机器可读输出行未改**（避免破坏下游 grep）。
+
+### 45.4 仍然未知 / 新候选（均为只读，未做设备请求）
+- **候选**：`0x20804006@776` 与私有时钟文档 `0x20809061@776` 的 paramSize 相同 ⇒ 公开族里是否存在同一份文档结构？尺寸巧合的可能同样存在，**未测**，只记为候选。
+- 1118 行 recount 与 889 行 disassembly dump 的**差集内容**仍未定位（是否另一固件映像／另一台机器的导出）。
+
+### 45.5 验证范围与提交
+本机：`sh -n` 通过 ✔；`cargo fmt --all -- --check` 干净 ✔；`cargo test --package nvoc-core --all-targets` **115 passed / 0 failed** ✔（注释改动，行为不变）；`ruff check` 对被触动的 py 文件 All checks passed ✔；`dump-gsp-families.py` 属**既存** 9 个格式漂移文件之一（已用 `git show HEAD:` 证明**改动前就漂移** ✔），故不整文件重排、保持 diff 最小 ✔。**测试机零 GPU 请求** ✔。

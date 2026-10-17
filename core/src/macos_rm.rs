@@ -118,7 +118,9 @@ pub const SETTINGS_RESTORE_SUPPORTED: bool = false;
 /// these ids carries the legacy privileged bits, so an unprivileged client is
 /// refused before the GSP is consulted. This is a precondition that has been
 /// located (the host forwarder's own `(cmd & 0xC000) == 0xC000` test selects
-/// exactly the 92 write-half ids and nothing else), not a missing control.
+/// exactly the table's write half and nothing else: 92 of the 1118 rows of the
+/// recounted export, 89 of the 889 of the disassembly dump), not a missing
+/// control.
 pub const WRITE_NEEDS_PRIVILEGE_REASON: &str = "needs a write, and a private SET is refused below root on this host: the write half sits one category byte over (the read id's 0x80-0xBF legacy-non-privileged byte gains 0x40 and its message id advances by one: 0x2080901B -> 0x2080D01C, the twin the method table itself records), and that 0xC0-0xFF half is what the host forwarder refuses below root with 0x1b, so no SET has been issued (see notes)";
 
 /// The power-limit write: the same privilege gap as every other write, and one

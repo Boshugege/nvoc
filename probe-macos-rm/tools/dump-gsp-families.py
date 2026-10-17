@@ -10,6 +10,12 @@ that byte are the legacy/privilege marker:
     bit 15 = 0x8000  legacy non-privileged  (client-reachable, forwarded)
     bit 14 = 0x4000  privileged             (SET half of the same interface)
 
+Read as a pair, because bit 14 alone is not privilege: the forwarder's test is
+`(cmd & 0xC000) == 0xC000`, and on the 889-row dump exactly its 89 write-half rows
+pass it -- while 19 rows carry bit 14 with bit 15 clear, all of them in the public
+0x40-0x44 category range (`0x20804006@776`, `0x20804101@8`, ...), and the test
+selects none of those.
+
 so `0x2080_901b` (CLK read) and `0x2080_d01c` (CLK write) are the same
 interface, one nibble apart.  Grouping the table by that byte is how the
 private families (CLK / VOLT / PMGR / THERMAL / PERF / internal) become visible
