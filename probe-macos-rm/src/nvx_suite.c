@@ -2755,7 +2755,8 @@ static void doc_decode_clk_ctrl(nvx_ctx *c, const char *name,
     char line[200];
     int off = 0;
     off += snprintf(line + off, sizeof line - (size_t)off,
-                    "clock-domains control: seed/echo mask@+8=0x%08x;", mask);
+                    "clock-domains control (nvapi V1): seed/echo "
+                    "mask@+8=0x%08x;", mask);
     for (unsigned bit = 0; bit < 32 && off + 8 < (int)sizeof line; ++bit) {
         unsigned ro = 100 + 72 * bit;
         if (ro + 60 > sz) break;
@@ -2764,13 +2765,13 @@ static void doc_decode_clk_ctrl(nvx_ctx *c, const char *name,
     }
     if (!filled) {
         nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
-                 "clock-domains control: mask@+8=0x%08x, but 0 of 32 per-domain "
+                 "clock-domains control (nvapi V1): mask@+8=0x%08x, but 0 of 32 "
                  "records carry a non-zero type byte => no domain description "
                  "returned for this seed", mask);
         return;
     }
     nvx_emit(c, "V2.clkdoc", name, 0, NVX_V_SKIP,
-             "clock-domains control: mask@+8=0x%08x, %u of 32 per-domain "
+             "clock-domains control (nvapi V1): mask@+8=0x%08x, %u of 32 "
              "records non-zero (see following lines)", mask, filled);
     for (unsigned bit = 0; bit < 32; ++bit) {
         unsigned ro = 100 + 72 * bit;

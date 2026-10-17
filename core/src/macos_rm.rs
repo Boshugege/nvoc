@@ -110,17 +110,24 @@ const SETTINGS_UNREADABLE_REASON: &str =
 /// *range*, and the current offset is measured **zero** rather than missing --
 /// on a background that cannot miss a write, the domain-control GET writes its
 /// value dwords and they are all zero, so no offset is applied. The measurement
-/// is exactly as wide as the selection mask that produced it: the mask is an
-/// input the handler does not write back, the recorded run seeded it at +4 with
-/// `0xFF`, and that reaches the first eight of the ten directory entries, so the
-/// zero is measured for those eight and unchecked for the last two. What is
+/// is exactly as wide as the selection mask that produced it: the mask at +4 is
+/// an input whose value changes the reply (the seed sweep is the behaviour
+/// proof), the recorded run seeded it with `0xFF`, and that reaches the first
+/// eight of the ten entries the directory itself declares -- its head carries
+/// `+4 = 0x3ff`, ten consecutive row bits, plus the union of those rows' domain
+/// bits -- so the zero is measured for those eight and unchecked for the last
+/// two. Whether the handler also *echoes* the seed back is not settled by that
+/// run: the seed overwrote the probe's `0xA5` background, so "left alone" and
+/// "echoed" look identical in it; the runbook's `0x1` and `0x3FF` seeds separate
+/// them, and `0x1` additionally distinguishes index-addressing from
+/// domain-bit-addressing. What is
 /// still open is *which* of those twelve dwords is the offset (the slot identity
 /// needed to write one), so the family stays unwritable. The session does carry
 /// the block now, so the *window* is reported as measured data in
 /// [`DeviceSettings::clock_offset_limits_khz`]; only the offset itself stays out
 /// of the numbers, because saying "0" would assert a slot identity this backend
 /// does not have.
-const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 for the records the measured selection mask reaches (0x2080901B seeded at +4 with 0xFF wrote its value dwords as zero on an 0xA5 background, where a field the handler skipped would have kept 0xA5, so the zero is a write and not a missing reading); the directory lists ten entries and 0xFF selects the first eight, so the last two are unmeasured until the offset runbook's wider mask answers; the window the driver enforces is reported as measured data in clock_offset_limits_khz; which of the twelve value dwords carries the offset is not yet pinned, so the offset itself is not reported as a number and no SET is issued (see notes)";
+const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 for the records the measured selection mask reaches (0x2080901B seeded at +4 with 0xFF wrote its value dwords as zero on an 0xA5 background, where a field the handler skipped would have kept 0xA5, so the zero is a write and not a missing reading); the directory itself declares ten entries (its head carries +4 = 0x3ff, ten consecutive row bits, alongside the union of those rows' domain bits 0x38007f) and 0xFF selects the first eight, so the last two are unmeasured until the offset runbook's wider mask answers; the window the driver enforces is reported as measured data in clock_offset_limits_khz; which of the twelve value dwords carries the offset is not yet pinned, so the offset itself is not reported as a number and no SET is issued (see notes)";
 
 /// The offset window the driver reports for a clock domain, in kHz.
 ///
