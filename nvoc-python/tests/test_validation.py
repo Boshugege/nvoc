@@ -156,7 +156,9 @@ class TestPstateValidation:
 class TestBackendAliases:
     """Verify valid backend strings are accepted by parse_backends()."""
 
-    @pytest.mark.parametrize("backend", ["both", "all", "nvml", "nvapi"])
+    @pytest.mark.parametrize(
+        "backend", ["auto", "default", "both", "all", "nvml", "nvapi", "macos-rm"]
+    )
     def test_valid_backend_set(self, pynvoc, backend):
         try:
             pynvoc.discover_gpus(backend)

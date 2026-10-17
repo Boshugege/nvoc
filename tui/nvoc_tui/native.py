@@ -20,6 +20,13 @@ NVAPI_PATH_ENV = "NVOC_NVAPI_PATH"
 NVML_PATH_ENV = "NVOC_NVML_PATH"
 
 
+# The backend set every TUI pynvoc call passes. `auto` is resolved inside
+# pynvoc with the same rule the CLI's `Auto` backend uses: the native NullMoth
+# RM on macOS (NVAPI/NVML do not exist there) and NVAPI+NVML elsewhere. Sharing
+# the literal keeps GUI/TUI/CLI on one selection path.
+DEFAULT_BACKENDS = "auto"
+
+
 def apply_native_paths(
     nvapi_path: str | None = None,
     nvml_path: str | None = None,
@@ -115,7 +122,7 @@ class NativeService:
 
     def list_gpus(self) -> tuple[int, str, list[GpuDescriptor]]:
         try:
-            items = self._pynvoc().discover_gpus("both")
+            items = self._pynvoc().discover_gpus(DEFAULT_BACKENDS)
         except Exception as exc:
             return -1, f"pynvoc GPU discovery failed: {exc}", []
         gpus = [
@@ -165,11 +172,11 @@ class NativeService:
         try:
             native = self._pynvoc()
             if command_name == "info":
-                parsed = native.query_info(gpu, "both")
+                parsed = native.query_info(gpu, DEFAULT_BACKENDS)
             elif command_name == "status":
-                parsed = native.query_status(gpu, "both")
+                parsed = native.query_status(gpu, DEFAULT_BACKENDS)
             elif command_name == "get":
-                parsed = native.query_settings(gpu, "both")
+                parsed = native.query_settings(gpu, DEFAULT_BACKENDS)
             else:
                 return -1, f"Unsupported native query: {command_name}", {}
             return 0, self._query_output(command_name, gpu, parsed), parsed

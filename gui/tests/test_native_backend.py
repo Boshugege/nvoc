@@ -156,7 +156,7 @@ def test_list_gpus_uses_pynvoc_discovery() -> None:
     assert code == 0
     assert "pynvoc" in output
     assert gpus == [{"index": 0, "name": "GPU", "gpu_id_hex": "0x0000"}]
-    assert app.native.calls == [("discover_gpus", "both")]
+    assert app.native.calls == [("discover_gpus", "auto")]
 
 
 def test_run_query_returns_json_output() -> None:
@@ -169,7 +169,7 @@ def test_run_query_returns_json_output() -> None:
     assert code == 0
     assert parsed == {"gpu_id_hex": "0x0000", "name": "GPU"}
     assert '"name": "GPU"' in output
-    assert app.native.calls == [("query_info", "0x0000", "both")]
+    assert app.native.calls == [("query_info", "0x0000", "auto")]
 
 
 def test_fan_settings_call_native_action() -> None:

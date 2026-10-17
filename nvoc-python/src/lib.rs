@@ -51,8 +51,23 @@ fn invalid_value(err: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(err.to_string())
 }
 
+/// The platform default backend set, mirroring the CLI's `Auto` choice: the
+/// native NullMoth RM on macOS (NVAPI and NVML do not exist there) and
+/// NVAPI+NVML everywhere else. Resolved from the compile target, not from a
+/// provider probe, so it is stable and identical across GUI/TUI/CLI.
+fn default_backend_set() -> BackendSet {
+    if cfg!(target_os = "macos") {
+        BackendSet::MacosRm
+    } else {
+        BackendSet::Both
+    }
+}
+
 fn parse_backends(raw: &str) -> PyResult<BackendSet> {
     match raw.trim().to_ascii_lowercase().as_str() {
+        // Platform default: the string a GUI/TUI/CLI can share without knowing
+        // the host OS. On macOS this is the RM path, elsewhere NVAPI+NVML.
+        "auto" | "default" => Ok(default_backend_set()),
         "both" | "all" => Ok(BackendSet::Both),
         "nvapi" => Ok(BackendSet::Nvapi),
         "nvml" => Ok(BackendSet::Nvml),
@@ -61,7 +76,7 @@ fn parse_backends(raw: &str) -> PyResult<BackendSet> {
         // never loads NVAPI/NVML (which do not exist on macOS).
         "macos-rm" | "macos_rm" | "macosrm" => Ok(BackendSet::MacosRm),
         other => Err(invalid_value(format!(
-            "invalid backend set {other:?}; expected 'both'/'all', 'nvapi', 'nvml', or 'macos-rm'"
+            "invalid backend set {other:?}; expected 'auto'/'default', 'both'/'all', 'nvapi', 'nvml', or 'macos-rm'"
         ))),
     }
 }
@@ -5632,6 +5647,14 @@ mod tests {
         assert_eq!(parse_backends("nvapi").unwrap(), BackendSet::Nvapi);
         assert_eq!(parse_backends("nvml").unwrap(), BackendSet::Nvml);
         assert!(parse_backends("cuda").is_err());
+        // 'auto' follows the CLI's Auto choice: RM on macOS, NVAPI+NVML elsewhere.
+        let expected = if cfg!(target_os = "macos") {
+            BackendSet::MacosRm
+        } else {
+            BackendSet::Both
+        };
+        assert_eq!(parse_backends("auto").unwrap(), expected);
+        assert_eq!(parse_backends("DEFAULT").unwrap(), expected);
     }
 
     #[test]
