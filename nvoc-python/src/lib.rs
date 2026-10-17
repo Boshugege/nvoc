@@ -1467,6 +1467,29 @@ fn settings_macos_rm_to_map(
             u64_value(limits.records as u64),
         );
     }
+    // The offsets the driver currently applies, per domain, from the clock
+    // document. Absent rather than empty when that block was refused or
+    // malformed, so "no offset was read" never looks like "no offset is
+    // applied". The frequency is carried alongside because it is what identifies
+    // the domain: only bit 0x10 can be named (as memory) from the in-tree NVAPI
+    // copy, and its frequency is the live memory clock.
+    if let Some(offsets) = &settings.clock_offsets {
+        map.insert(
+            "clock_offsets".into(),
+            Value::Array(
+                offsets
+                    .iter()
+                    .map(|offset| {
+                        value_object([
+                            ("domain_bit", u64_value(offset.domain_bit as u64)),
+                            ("frequency_khz", u64_value(offset.frequency_khz as u64)),
+                            ("offset_khz", i64_value(offset.offset_khz as i64)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        );
+    }
     // The domains the driver will offset. Each entry is the device's own index,
     // domain bit and type stamp: the bit is a *position* in a domain namespace
     // this frontend cannot name (see `ClockOffsetDomain`), so no name is
@@ -5890,6 +5913,13 @@ mod tests {
                 domain_bit: 1,
                 type_stamp: 0x0808,
             }]),
+            // The offsets the clock document publishes, from the same capture:
+            // the memory bit's record, whose frequency is the live memory clock.
+            clock_offsets: Some(vec![nvoc_core::ClockOffsetReading {
+                domain_bit: 0x10,
+                frequency_khz: 6_000_984,
+                offset_khz: -126,
+            }]),
             unavailable: std::collections::BTreeMap::from([(
                 "core_clock_offset".to_string(),
                 nvoc_core::macos_rm::CLOCK_OFFSET_UNREADABLE_REASON.to_string(),
@@ -5913,11 +5943,20 @@ mod tests {
         assert!(!map.contains_key("mem_clock_current"));
         assert!(!map.contains_key("voltage_boost_current"));
         assert!(map["unavailable"].get("core_clock_offset").is_some());
-        // The window is a measurement, so it is a number -- while the offset
-        // itself stays absent, because its slot is not pinned yet.
+        // The window and the offsets are measurements, so they are numbers. The
+        // named NVAPI-style keys stay absent: macOS reports an offset per domain
+        // bit, and only one of those bits can be named from the in-tree copy, so
+        // the per-bit list is carried instead of two named values.
         assert_eq!(map["clock_offset_min_khz"], i64_value(-18_750));
         assert_eq!(map["clock_offset_max_khz"], i64_value(18_750));
         assert_eq!(map["clock_offset_limits_records"], u64_value(3));
+        let offsets = map["clock_offsets"]
+            .as_array()
+            .expect("the offset list is an array");
+        assert_eq!(offsets.len(), 1);
+        assert_eq!(offsets[0]["domain_bit"], u64_value(0x10));
+        assert_eq!(offsets[0]["frequency_khz"], u64_value(6_000_984));
+        assert_eq!(offsets[0]["offset_khz"], i64_value(-126));
         let domains = map["clock_offset_domains"]
             .as_array()
             .expect("the domain list is an array");

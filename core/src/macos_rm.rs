@@ -181,7 +181,27 @@ pub const VOLTAGE_BOOST_UNREADABLE_REASON: &str = "the boost *write* is a SET an
 /// [`DeviceSettings::clock_offset_limits_khz`]; only the offset itself stays out
 /// of the numbers, because saying "0" would assert a slot identity this backend
 /// does not have.
-pub const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 for the records the measured selection mask reaches (0x2080901B seeded at +4 with 0xFF wrote its value dwords as zero on an 0xA5 background, where a field the handler skipped would have kept 0xA5, so the zero is a write and not a missing reading); the directory itself declares ten entries (its head carries +4 = 0x3ff, ten consecutive row bits, alongside the union of those rows' domain bits 0x38007f) and 0xFF selects the first eight, so the last two are unmeasured until the offset runbook's wider mask answers -- those two are the MSD (id 21) and HOST (id 5) rows, so the core and memory domains this backend reports (rows 0 and 2, ids 0 and 4) are inside the measured window; the window the driver enforces is reported as measured data in clock_offset_limits_khz; which of the twelve value dwords carries the offset is not yet pinned, so the offset itself is not reported as a number and no SET is issued -- the documented NVAPI view of this same command calls slot 0 the signed kHz offset with its neighbours range/voltage terms, but that ordering is for the caller's 8-slot record and not for our 12-dword one, and its own author marks the order unconfirmed, so the queued write (bit 0, value at record +8 = slot 0) tests that hypothesis first rather than a random dword; on the same authority the write set is per record type, and the type-03 record took only its stamp here while the V1 set includes 3, so the runbook must not assume a type-03 record accepts a value (see notes)";
+pub const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 for the records the measured selection mask reaches (0x2080901B seeded at +4 with 0xFF wrote its value dwords as zero on an 0xA5 background, where a field the handler skipped would have kept 0xA5, so the zero is a write and not a missing reading); the directory itself declares ten entries (its head carries +4 = 0x3ff, ten consecutive row bits, alongside the union of those rows' domain bits 0x38007f) and 0xFF selects the first eight, so the last two are unmeasured until the offset runbook's wider mask answers -- those two are the MSD (id 21) and HOST (id 5) rows, so the core and memory domains this backend reports (rows 0 and 2, ids 0 and 4) are inside the measured window; the window the driver enforces is reported as measured data in clock_offset_limits_khz; which of the twelve value dwords carries the offset is not yet pinned, so no SET is issued -- the offset itself *is* reported, but from a different read than that one (0x20809061, see clock_offsets in this projection), which is why the older 0x2080901B slot identity is what stays out of the numbers and out of the queued write; the documented NVAPI view of this same command calls slot 0 the signed kHz offset with its neighbours range/voltage terms, but that ordering is for the caller's 8-slot record and not for our 12-dword one, and its own author marks the order unconfirmed, so the queued write (bit 0, value at record +8 = slot 0) tests that hypothesis first rather than a random dword; on the same authority the write set is per record type, and the type-03 record took only its stamp here while the V1 set includes 3, so the runbook must not assume a type-03 record accepts a value (see notes)";
+
+/// One domain's offset, as the clock document reports it.
+///
+/// This is the *current value* the write gate asks for, and the only offset this
+/// backend reports with a number attached. Two fields carry the corroboration
+/// rather than a guess: `frequency_khz` is what the same record published for the
+/// domain (two of them are bit-for-bit the live graphics and memory clocks RUSD
+/// reported in the same session), and `domain_bit` is the device's own, not a
+/// name this frontend invented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ClockOffsetReading {
+    /// The device's domain bit, as the document carries it. No name is attached
+    /// here: the in-tree NVAPI copy names only `0x10`, which its records agree is
+    /// memory because the frequency it published is the live memory clock.
+    pub domain_bit: u32,
+    /// The frequency the record published for that domain, in kHz.
+    pub frequency_khz: u32,
+    /// The signed offset the record published, in kHz.
+    pub offset_khz: i32,
+}
 
 /// The offset window the driver reports for a clock domain, in kHz.
 ///
@@ -265,6 +285,14 @@ pub struct DeviceSettings {
     /// as returned. `None` when that block was refused or malformed, so an
     /// unread directory is never an empty capability list.
     pub clock_offset_domains: Option<Vec<ClockOffsetDomain>>,
+    /// The offsets the driver currently applies, per domain, from the clock
+    /// document (`0x20809061`). `None` when that block was refused or malformed,
+    /// so an unread offset is never an offset of zero -- which is the whole
+    /// reason this is not a plain `Vec`.
+    ///
+    /// Read-only evidence, not a capability: the write gate is unchanged, and the
+    /// queued write is what would prove these numbers move when one is set.
+    pub clock_offsets: Option<Vec<ClockOffsetReading>>,
     /// Configuration families this backend cannot read (or write) yet, keyed by
     /// the family name, with the cause.
     pub unavailable: BTreeMap<String, String>,
@@ -323,6 +351,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
         // projection leaves it absent rather than guessing a window.
         clock_offset_limits_khz: None,
         clock_offset_domains: None,
+        clock_offsets: None,
         unavailable,
         capabilities: SettingsCapabilities {
             settings_read: true,
@@ -435,16 +464,30 @@ fn apply_offset_channel(
     }
 
     // The one block that publishes an offset rather than a window or a set of
-    // unlabelled dwords. It stays a note while the structured fields above stay
-    // reserved for blocks that name what they describe: the domain bits here are
-    // the driver's own, and only `0x10` can be named from the in-tree NVAPI copy
-    // (as MCLK, which the frequency agrees with), so promoting all eleven to
-    // named fields would be a guess about names rather than about values.
+    // unlabelled dwords, so it is the one that fills a structured field. It is
+    // also listed in the note below, the same way the other blocks report their
+    // outcome, so a caller reading `None` can see whether the block was refused,
+    // malformed or simply not requested.
     match &channel.clock_document {
         Parsed(document) if document.entries.is_empty() => {
             outcomes.push("the clock document carried no entry, so no offset is listed".into());
         }
         Parsed(document) => {
+            // Reported bit by bit: only `0x10` can be *named* from the in-tree
+            // NVAPI copy (as MCLK, which the frequency it published agrees with),
+            // so promoting the rest to named domains would guess at names rather
+            // than report measured values.
+            settings.clock_offsets = Some(
+                document
+                    .entries
+                    .iter()
+                    .map(|entry| ClockOffsetReading {
+                        domain_bit: entry.domain_bit,
+                        frequency_khz: entry.frequency_khz,
+                        offset_khz: entry.offset_khz,
+                    })
+                    .collect(),
+            );
             let listed = document
                 .entries
                 .iter()
@@ -2353,6 +2396,10 @@ mod tests {
     const OFFSET_DIRECTORY_FIXTURE: &[u8] =
         include_bytes!("../tests/data/macos-offset-directory.bin");
 
+    /// The clock document from the same capture: the one block that publishes an
+    /// offset rather than a window or a set of unlabelled dwords.
+    const CLK_DOCUMENT_FIXTURE: &[u8] = include_bytes!("../tests/data/macos-clkdoc-776.bin");
+
     /// A snapshot that varies only the directory block; the other two keep the
     /// status the live wedge read returned for them.
     fn directory_snapshot(
@@ -2385,6 +2432,72 @@ mod tests {
     /// A projection with no window, as `settings_from` leaves it before any
     /// channel read, so the tests start from the state a caller sees when the
     /// block was never requested.
+    /// The clock document is the one block that publishes an offset, so it is the
+    /// one that fills the structured field, and it does so from the captured
+    /// payload rather than from one built to match the parser.
+    #[test]
+    fn the_clock_document_fills_the_offsets_and_a_refusal_leaves_them_absent() {
+        use macos_offset::OffsetBlockRead::{Parsed, Refused};
+
+        let document = macos_offset::parse_clock_document(CLK_DOCUMENT_FIXTURE)
+            .expect("the captured document parses at its declared geometry");
+        let mut settings = bare_settings();
+        apply_offset_channel(
+            &mut settings,
+            &macos_offset::OffsetChannelSnapshot {
+                directory: Refused(0x62),
+                range: Refused(0x62),
+                control: Refused(0x62),
+                clock_document: Parsed(document),
+            },
+        );
+
+        let offsets = settings
+            .clock_offsets
+            .expect("the document carried offsets");
+        assert_eq!(offsets.len(), 11);
+        // The two that can be checked against something else: the graphics clock
+        // RUSD reported in the same session, and the bit the in-tree NVAPI copy
+        // names MCLK, whose frequency is that session's live memory clock.
+        assert_eq!(
+            offsets
+                .iter()
+                .find(|offset| offset.domain_bit == 1)
+                .map(|offset| (offset.frequency_khz, offset.offset_khz)),
+            Some((1_530_000, -1))
+        );
+        assert_eq!(
+            offsets
+                .iter()
+                .find(|offset| offset.domain_bit == 0x10)
+                .map(|offset| (offset.frequency_khz, offset.offset_khz)),
+            Some((6_000_984, -126))
+        );
+
+        // A refused document must leave the field absent rather than empty, or
+        // "the offset was not read" would look like "no offset is applied" --
+        // the distinction the whole channel exists to keep.
+        let mut wedged = bare_settings();
+        apply_offset_channel(
+            &mut wedged,
+            &macos_offset::OffsetChannelSnapshot {
+                directory: Refused(0x62),
+                range: Refused(0x62),
+                control: Refused(0x62),
+                clock_document: Refused(0x62),
+            },
+        );
+        assert_eq!(wedged.clock_offsets, None);
+        assert!(
+            wedged
+                .notes
+                .iter()
+                .any(|note| note.contains("0x20809061") && note.contains("0x00000062")),
+            "the note names the block and its refusal: {:?}",
+            wedged.notes
+        );
+    }
+
     fn bare_settings() -> DeviceSettings {
         DeviceSettings {
             pstate: None,
@@ -2398,6 +2511,7 @@ mod tests {
             project: None,
             clock_offset_limits_khz: None,
             clock_offset_domains: None,
+            clock_offsets: None,
             unavailable: BTreeMap::new(),
             capabilities: SettingsCapabilities {
                 settings_read: true,
