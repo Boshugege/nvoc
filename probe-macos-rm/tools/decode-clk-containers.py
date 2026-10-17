@@ -45,6 +45,15 @@ re-derives that repetition from `fixtures/tu116-1d-32680-A5.txt` (md5 checked, s
 the bytes cannot drift) and prints both candidate predictions for the third
 occurrence, which is the observation that would settle it.
 
+The parser has a control of its own, because every other check here feeds it bytes
+this file also produced: `check_real_capture()` reads a whole device capture
+(`fixtures/tu116-clkctl-hex-20261017T092536Z.txt`, md5 checked) and asserts both
+accepted blocks come back whole, with the head words, directory rows, signed
+16-bit pairs and offset-window fields the 2026-10-17 decode read off that same
+file -- then drops one dump line to prove the lengths came off the lines.  A
+healthy run's decode is worth this much because the GET cannot be repeated after a
+wedge.
+
 Usage:
     probe-macos-rm-idle --clkctl-hex > clkctl-hex.txt
     python3 tools/decode-clk-containers.py clkctl-hex.txt [more.txt ...]
@@ -938,6 +947,186 @@ def check_measured_repetition(verbose: bool = False) -> bool:
     return True
 
 
+# A real capture, kept for the reason a fixture exists here at all: every other
+# check in this file feeds the parser bytes this file also produced, so a change
+# to `parse_blocks` or to the probe's line format could empty a healthy run's
+# decode without failing anything.  This fixture is device output -- 167499 B of
+# `--clkctl-hex` from 2026-10-17, the run whose two accepted blocks are the
+# evidence 0x20809019's and 0x20809025's layouts rest on -- and the facts below
+# are the ones the decode of the very same file printed that day.  The check is
+# therefore a round trip through real lines: whole-block recovery by length, the
+# head words, the 10-row directory, the signed 16-bit pairs, and the offset
+# window.  A short payload is a failure, not a smaller observation.
+REAL_CAPTURES = [
+    {
+        "fixture": "probe-macos-rm/fixtures/tu116-clkctl-hex-20261017T092536Z.txt",
+        "fixture_md5": "8817a92fe8dad405568e58bb599c9797",
+        "artifact": "outputs/stage-gsp-clkctl-20261017T092536Z/clkctl-hex.txt",
+        "provenance": (
+            "GTX 1650 SUPER / TU116, macOS 15.8.1, NullMoth 2.0.4, RM 610.57.04"
+        ),
+        "blocks": {
+            0x20809019: {
+                "size": 12336,
+                "header": 48,
+                "stride": 384,
+                "head": {
+                    0: 0x000000FF,
+                    4: 0x000003FF,
+                    8: 0x00000335,
+                    12: 0x0038007F,
+                    16: 0x03FC007F,
+                    20: 0x0038007F,
+                    24: 0x00000085,
+                    28: 0x00000005,
+                },
+                # (entry, domain_bit, type bytes) exactly as the directory line
+                # printed them; the entry order is what makes the 0x2080901b
+                # mask an entry selector rather than a domain-bit mask.
+                "directory": [
+                    (0, 1, "0808"),
+                    (1, 2, "0909"),
+                    (2, 16, "0808"),
+                    (3, 4, "0909"),
+                    (4, 8, "0909"),
+                    (5, 1048576, "0909"),
+                    (6, 524288, "0303"),
+                    (7, 64, "0808"),
+                    (8, 2097152, "0909"),
+                    (9, 32, "0909"),
+                ],
+                # rec+44 read as two i16s: the only reading that produces the
+                # recorded floor/ceiling pairs, and the reason the printer shows
+                # both the pair and the raw dword.
+                "i16_pairs": [(92, -1000, 1000), (860, -1000, 3000)],
+            },
+            0x20809025: {
+                "size": 7188,
+                "header": 20,
+                "stride": 224,
+                "head": {0: 0x000000FF, 4: 0x00000007, 12: 0x00000064, 16: 0x00000100},
+                "records": [
+                    (20, 1638400, -18750, 18750),
+                    (244, 1638400, -18750, 18750),
+                    (468, 1638400, -18750, 18750),
+                ],
+            },
+        },
+    },
+]
+
+
+def _u32(buf: bytes, off: int) -> int:
+    return struct.unpack_from("<I", buf, off)[0]
+
+
+def _i16_pair(buf: bytes, off: int) -> tuple[int, int]:
+    return struct.unpack_from("<hh", buf, off)
+
+
+def check_real_capture(verbose: bool = False) -> bool:
+    """Round-trip a real capture through the parser and pin what it decoded to.
+
+    Returns False (with a printed SKIP) when the fixture is absent, so a missing
+    artifact can never look like a passing check -- the same rule the other
+    fixture-backed check follows.
+    """
+    cap = REAL_CAPTURES[0]
+    path = fixture_path(cap["fixture"])
+    if path is None:
+        print(
+            f"SKIP real capture: no fixture at {cap['fixture']}"
+            f" (set {FIXTURE_ENV} to the directory holding it; the captured copy is"
+            f" {cap['artifact']})"
+        )
+        return False
+    data = path.read_bytes()
+    digest = hashlib.md5(data).hexdigest()
+    assert digest == cap["fixture_md5"], (
+        f"fixture drifted: {digest} != {cap['fixture_md5']}"
+    )
+    text = data.decode("utf-8", errors="replace")
+    blocks = parse_blocks(text)
+    for mid, want in cap["blocks"].items():
+        key = (mid, want["size"])
+        assert key in blocks, (
+            f"0x{mid:08x}@{want['size']} not recovered from the capture;"
+            f" parsed keys: {sorted((hex(m), s) for m, s in blocks)}"
+        )
+        buf = blocks[key]
+        assert len(buf) == want["size"], (
+            f"0x{mid:08x}: recovered {len(buf)} B, the dump declares {want['size']} B"
+            " -- a shorter payload is a failure, not a smaller observation"
+        )
+        size, header, stride = GEOMETRY[mid]
+        assert (size, header, stride) == (
+            want["size"],
+            want["header"],
+            want["stride"],
+        ), f"0x{mid:08x}: GEOMETRY {(size, header, stride)} != the capture's split"
+        for off, value in want["head"].items():
+            assert _u32(buf, off) == value, (
+                f"0x{mid:08x} head +{off} = 0x{_u32(buf, off):08x}, not 0x{value:08x}"
+            )
+        for entry, domain_bit, stamp in want.get("directory", []):
+            base = header + entry * stride
+            assert _u32(buf, base + 4) == domain_bit, (
+                f"0x{mid:08x} entry {entry} domain bit 0x{_u32(buf, base + 4):08x}"
+                f" != 0x{domain_bit:08x}"
+            )
+            assert f"{buf[base]:02x}{buf[base + 1]:02x}" == stamp, (
+                f"0x{mid:08x} entry {entry} type bytes"
+                f" {buf[base]:02x}{buf[base + 1]:02x} != {stamp}"
+            )
+        for off, low, high in want.get("i16_pairs", []):
+            assert _i16_pair(buf, off) == (low, high), (
+                f"0x{mid:08x} +{off} as two i16s = {_i16_pair(buf, off)} != {(low, high)}"
+            )
+        for base, max_vf, floor, ceiling in want.get("records", []):
+            assert _u32(buf, base + 8) == max_vf, f"0x{mid:08x} +{base + 8} max_vf"
+            assert struct.unpack_from("<i", buf, base + 20)[0] == floor, (
+                f"0x{mid:08x} +{base + 20} floor"
+            )
+            assert struct.unpack_from("<i", buf, base + 24)[0] == ceiling, (
+                f"0x{mid:08x} +{base + 24} ceiling"
+            )
+    # Negative control: the parser must notice a truncated dump.  Dropping the
+    # last *dump* line of the file shortens exactly the block that line belonged
+    # to, by exactly the bytes it carried -- which is also the statement that the
+    # lengths above came off the lines and not off the summary text.
+    lines = text.splitlines()
+    kept, dropped_line = [], None
+    for line in reversed(lines):
+        if dropped_line is None and DUMP_RE.search(line):
+            dropped_line = line
+            continue
+        kept.append(line)
+    kept.reverse()
+    assert dropped_line is not None, "the capture has no dump line to drop"
+    dropped_bytes = len(DUMP_RE.search(dropped_line).group(2).split())
+    before = {key: len(buf) for key, buf in blocks.items()}
+    after = {key: len(buf) for key, buf in parse_blocks("\n".join(kept)).items()}
+    shorter = [
+        key
+        for key, length in before.items()
+        if after.get(key, length) == length - dropped_bytes
+    ]
+    assert len(shorter) == 1, (
+        f"dropping a {dropped_bytes}-byte dump line shortened {len(shorter)} blocks"
+        f" (before {before}, after {after}) instead of exactly one"
+    )
+    if verbose:
+        print(
+            f"  real capture: {len(data)} B from {cap['provenance']}; recovered"
+            f" 0x20809019@{cap['blocks'][0x20809019]['size']} and"
+            f" 0x20809025@{cap['blocks'][0x20809025]['size']} whole, with their head"
+            " words, the 10-row directory, the signed 16-bit pairs and the offset"
+            f" window; dropping a {dropped_bytes}-byte dump line shortens exactly"
+            f" 0x{shorter[0][0]:08x} and nothing else"
+        )
+    return True
+
+
 def selftest() -> int:
     check_geometry()
     # The 0x2080901d candidate above claims a measured 128-byte period over a
@@ -955,6 +1144,7 @@ def selftest() -> int:
     for head, stride in solutions:
         assert stride % 128 != 0, (head, stride)
     measured = check_measured_repetition(verbose=True)
+    real = check_real_capture(verbose=True)
     # Synthetic 0x20809025 payload: mask 0x7, three NAFLL-style records with the
     # values this TU116 actually returned (1638400 kHz, -18750/+18750 kHz).
     header, stride = GEOMETRY[0x20809025][1:]
@@ -1168,9 +1358,34 @@ def selftest() -> int:
         finally:
             rep["fixture_md5"] = hashlib.md5(bytes_at_start).hexdigest()
             os.environ.pop(FIXTURE_ENV, None)
+    # The real capture is a 167 KB device file, so the same two failures matter:
+    # it must be present in the checkout, and one changed byte must stop the
+    # round trip rather than quietly decoding a shorter (still plausible) block.
+    assert real, (
+        "the committed --clkctl-hex fixture is missing; run without --selftest to skip it"
+    )
+    cap = REAL_CAPTURES[0]
+    original = fixture_path(cap["fixture"])
+    assert original is not None
+    text_at_start = original.read_text(errors="replace")
+    mutant = text_at_start.replace(" 00384:", " 00385:", 1)
+    assert mutant != text_at_start, "the mutation did not change anything"
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, Path(cap["fixture"]).name).write_text(mutant)
+        os.environ[FIXTURE_ENV] = tmp
+        try:
+            try:
+                check_real_capture()
+                raise AssertionError("the capture's hash gate did not fire")
+            except AssertionError as err:
+                assert "fixture drifted" in str(err), err
+        finally:
+            os.environ.pop(FIXTURE_ENV, None)
     print(
         "selftest ok: geometry + round-trip + field decode + write-set model + rust field map"
         " + measured 1d repetition"
+        f" + real capture ({'parsed' if real else 'SKIPPED'});"
+        f" measured repetition {'checked' if measured else 'SKIPPED'}"
     )
     return 0
 
