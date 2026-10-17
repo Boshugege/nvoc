@@ -608,3 +608,19 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **公开措辞更正（本轮唯一代码改动）**：`CLOCK_OFFSET_UNREADABLE_REASON` 原写「no current offset … come back zero」，读起来像「驱动从不填值」——那正是 §15/§18 已经推翻的读法。实测相反：handler**确实会写**它的 value dword，在「写不会被漏掉」的背景上它们**全为 0** ⇒ 正确表述是「**当前没有施加偏移**」，缺的只是**承载偏移的那个 dword 的身份**。理由串与 `notes` 已按此更正，并把**按类型全有/全无**的写集一并写进 notes。「族仍留在 `unavailable`」是刻意的：公共会话**根本还没携带该块**，两个能力位保持 false，**只有陈述的成因变了**。字符串级改动，无测试断言旧措辞。
 
 **验证范围（如实）**：静态读 `core/build.rs`、`core/native/*`、`core/src/macos_rm.rs`、`nvoc-python/src/lib.rs` 与已录盘探针记录；**开发端不构建**。代码改动在**测试机**（macOS，真实 cfg）验证：源文件 sha256 与开发端一致（`13c2589b…`），`cargo fmt -p nvoc-core -- --check` **rc=0**、`cargo check -p nvoc-core --offline` **rc=0**（22.39 s）。**未发出任何 GPU 请求、未发任何 SET、未提权、未改驱动/EFI/boot-args、未重启、未操作 PR。**
+
+### 本轮追加十一（2026-10-17，无 GPU：把 9019/9025/901b 接进公共 core 的**读**路径，状态语义分层）
+
+**做了什么（两个可独立 review 的提交）**：`b1e24c8` 加 `core/src/macos_offset.rs`——三条私有命令的**封送几何解析**（纯 `&[u8]` → 类型化数据，平台无关、可无 GPU 单测）；`cf2848c` 把解析接到设备：native 侧新增 `nvoc_macos_rm_session_offset()`，Rust 侧新增 `MacosRmSession::read_offset_channel()`。
+
+**选择依据（为什么这是有界扩展而不是新传输层）**：`core/build.rs:19-23` 已把探针的 `nvx_xnu.c`/`nvx_rm.c` 编进本库，`core/native/macos_rm.c:133` 的 `read_live_controls()` 每个采样**已在发实时 RM 控制** ⇒ 这是**同一条既有调用路径上的第四次调用**，内核与驱动都不用动。
+
+**几何取自实测，不是猜**：三个容器尺寸逐字节吻合（`48+32*384`、`20+32*224`、`60+32*64`），并有单测断言该吻合——步长错一点记录就会跨出容器末尾。控制记录携带的 12 个 value dword 正是 0xA5 预填证明handler**会写**的那些；`+4`/`+48`/`+60` 从不写入，故不携带，且单测在这三处埋标记，证明它们不会被误当成 value。
+
+**状态语义分层（本轮的关键设计）**：native 侧按 kind + **精确尺寸**索取，并在调用前清零缓冲，使**拒绝绝不会留下半填的块**；只有返回 0 才代表 payload 有效。Rust 侧把该区分一路上抛为 `Parsed` / `Refused(status)` / `Malformed(parse error)`，三个块**各自独立**——一个块被拒不得丢掉另外两个，且 `0x62` **绝不能被渲染成「偏移为 0」**。这正是本轮最高优先第 4 条（不得以假值代替）在公共面的落实。
+
+**刻意不定的两件事**：① 12 个 dword 里**哪个**是偏移仍然不定——stock 读不出来，只有「写入 + 同字段回读」能定，所以解析器只**逐字报告**这 12 个值；② 9025 记录首 dword（`0x01030101/0x01040101/…`）的**域归属**仍未确立，故按记录报告。
+
+**实际验证范围（如实）**：`rustfmt --check` **rc=0**；`cargo clippy -p nvoc-core --all-targets --offline -- -D warnings` **rc=0**（强制 `touch` 后确认确有 `Compiling nvoc-core`）；`cargo test -p nvoc-core --lib --offline` **80 passed / 0 failed**（含 ABI 布局镜像测试，故 ABI_VERSION 3→4 两端同步已被机器校验）；测试二进制**链接**了新的 C 符号，这正是 native 侧确实被编译的证据（若 C 未重编，链阶段会因未定义符号失败）。**分类：已实现、已编译、待实测**——本机 wedge 未解，三条 GET 现在都会以 `Refused(0x62)` 返回，所以「拿真实 GSP 读到目录/范围/当前值」这一步**仍未发出**。ABI 版本 3→4：**结构布局零改动**（头文件所有断言仍成立），版本号只因「调用方无法从布局判断这条通道是否存在」而上移。
+
+**未发出**：任何 GPU 请求、任何 RM 会话、任何 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。
