@@ -1720,6 +1720,23 @@ static const clkctl_case nvx_clkctl[] = {
      * Derived shape (section 16.4): 32680 = 40 + 32*1020, so a selected
      * record's fields should land at 40+1020k+... -- not at 60+64k. */
     { "gc-1d 32680 zeroed",                  0x2080901du, 32680, 0, ~0u, 0, 0 },
+    /* 0x20809006@8 (CLK measure) is 8 B wide, so it has exactly ONE input
+     * dword.  The zeroed case above already covers "input 0"; these three add
+     * the other two readings the size admits: the *domain* selector (0, 1, 2
+     * are the GPC/XBAR/SYS bits the 0x20809019 directory names) at dword 0,
+     * and the same value at dword 1 for the case where the input is the
+     * second dword.  Documented basis: the NVAPI MeasureFreq V1 caller carries
+     * `domain@+4`, i.e. the selector is the input and the rest of the block is
+     * output.  Recorded behaviour to beat: a zeroed 8 B block answered
+     * 0x1f NV_ERR_INVALID_ARGUMENT pre-wedge, where the *size* is right (this
+     * row is in the corrected GSP table) -- so 0x1f has to be about the
+     * argument, and a selector is the only argument there is.  This id is a
+     * measurement command, has never been involved in a wedge, and its answers
+     * are only ever recorded as cross-evidence: realtime kHz never proves an
+     * offset was applied. */
+    { "measure-freq 8 d0=1",                 0x20809006u, 8, 0x00000001u, 0, 0, 1 },
+    { "measure-freq 8 d0=2",                 0x20809006u, 8, 0x00000002u, 0, 0, 1 },
+    { "measure-freq 8 d1=1",                 0x20809006u, 8, 0x00000001u, 4, 0, 1 },
     /* Anchors: the two ids whose sizes were already confirmed empirically.
      * The battery order is unchanged from the reviewed version: discovery
      * cases first, then the value containers, then these anchors and the two

@@ -1692,6 +1692,25 @@ checks remain — id class `0x2080`, `0 < paramSize < 8_000_000`, both
 
 ### 16.1 Retraction: `0x20809006` and `0x20809062` *are* in the GSP table
 
+**Live corroboration of the corrected size, and its one caveat.** The recorded
+pre-wedge runs (`outputs/stage-gsp-clkctl-20261017T092536Z/clkctl-read-first.txt`,
+`clkctl-read-mask-sweep-lite.txt`) sent both ids, and their status codes
+separate the two layers the size gate can come from
+(`nvstatuscodes.h`: `0x1f NV_ERR_INVALID_ARGUMENT`, `0x3a
+NV_ERR_INVALID_PARAM_STRUCT`, `0x56 NV_ERR_NOT_SUPPORTED`, `0x62
+NV_ERR_RESET_REQUIRED`, `0x65 NV_ERR_TIMEOUT`, `0x6c NV_ERR_GPU_IN_DEBUG_MODE`):
+
+| id | size sent | recorded status | reading |
+| --- | --- | --- | --- |
+| `0x20809062` | 648 (corrected row) | **`0x3a` INVALID_PARAM_STRUCT** | the size was **accepted** and the record was rejected on its structure/stamp — so 648 is confirmed *live*, independently of the table |
+| `0x20809006` | 8 (corrected row) | `0x1f` INVALID_ARGUMENT | **not** confirmed: either the argument (a zeroed 8 B block has only one input dword, and an unseeded selector could be what 0x1f is about) or this row's `flags 0x81074a` marks it as not client-reachable. Both readings are open; three seeded variants (`d0=1`, `d0=2`, `d1=1`) are in the probe battery as the discriminating series |
+
+That asymmetry is also the first *independent* validation of this section:
+`0x20809062`'s 648 was reported "not derivable" before, and the live GSP
+answers a size-correct request to it with a *structure* error rather than a
+*size* error.
+
+
 §3/§13 recorded "`0x20809006` 与 `0x20809062` 根本不在 GSP 表里（此前用的
 8/648 不可推导）". That is an artifact of the dropped rows: both are rows, at
 exactly the sizes that had been used. `0x20809006@8` is therefore a
