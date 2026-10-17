@@ -29,6 +29,14 @@
 #                     caller struct, so "the id is dangerous" would overstate it
 #                     -- it is the RM-sized form this battery stays away from)
 #                     and aborts on the first 0x65/0x62
+#   3. --fan-read     the fan family's only named candidate: the private
+#                     0x20808532 and its documented public twin 0x20800532, 336 B
+#                     on an 0xA5 background.  It is here because the census tool
+#                     found that neither id appears in ANY returned status under
+#                     outputs/ -- the fan RM face has been described as measured
+#                     but was never dispatched in a recorded run, so this run is
+#                     what turns it into an artifact (tools/audit-live-attempts.py).
+#                     Read-only, and a 0x62 is expected while the wedge lasts.
 #
 # Nothing here is a write: the probe refuses every documented SET id before it
 # builds a buffer, and the idle-only build cannot send stage-3 writes at all.
@@ -94,6 +102,11 @@ if [ "${wedge:-0}" -ne 0 ]; then
 fi
 
 run_one clkctl-read  --clkctl-read
+
+# The fan candidate has no artifact at all yet, so it is read on every healthy
+# run rather than described as measured.  Its result lands in fan-read.txt and the
+# census tool picks the id up from there.
+run_one fan-read    --fan-read
 
 if command -v python3 >/dev/null 2>&1; then
     python3 "$root/tools/decode-clk-containers.py" "$bundle/clkctl-hex.txt" \
