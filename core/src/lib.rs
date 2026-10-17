@@ -6,8 +6,13 @@ mod gpu_type;
 
 pub use gpu::nvapi_init_attempted;
 pub mod legacy_vbios_parser;
+pub mod macos_eval;
 pub mod macos_offset;
 pub mod macos_rm;
+pub use macos_eval::{
+    LoadSummary, PLAN_NOTE, PlanDocument, PlanRequest, Stats, ThrottleSummary, fps_tail,
+    load_summary, parse_plan_requests, plan_document, stats, throttle_summary,
+};
 pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{
     ABI_LAYOUT_SLOTS, ClockOffsetDomain, ClockOffsetLimits, ClockOffsetReading, DeviceInfo,

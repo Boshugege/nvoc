@@ -2525,6 +2525,13 @@ fn query_clock_offset(
 
 #[pyfunction]
 #[pyo3(signature = (gpu, target, delta, backends = None))]
+/// Return the shared plan document for one offset request.
+///
+/// The document is the one the CLI (`--plan-delta`), the macOS stock evaluation
+/// and this function all publish: `applied`, `settings_write`, `requests`, the
+/// `note` saying what `ready` does and does not mean, and one step per request
+/// under `steps`. Nothing is written; `settings_write` reports whether this
+/// backend would write at all.
 fn plan_clock_offset_step(
     py: Python<'_>,
     gpu: &str,
@@ -2550,8 +2557,11 @@ fn plan_clock_offset_step(
             // The production settings path, so the snapshot this plans against
             // is the same one `query_settings` reports -- names included.
             let settings = device.settings().map_err(to_py_err)?;
-            let step = nvoc_core::plan_offset_step(&settings, &requested, delta_khz);
-            serde_json::to_value(&step).map_err(to_py_err)
+            let request = nvoc_core::PlanRequest {
+                target: requested,
+                delta_khz,
+            };
+            serde_json::to_value(nvoc_core::plan_document(&settings, &[request])).map_err(to_py_err)
         })
     })?;
     py_value(py, &value)

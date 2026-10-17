@@ -81,22 +81,13 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                     let domain = option_domain(invocation, ClockDomain::Graphics)?;
                     let name = domain_label(domain);
                     let settings = run(&target, nvoc_core::QueryMacosRmSettings)?.output;
-                    // The optional dry-run step. It is computed from this same
-                    // snapshot with the core planner the optimizer and the
-                    // Python bindings call, so all three accept the same request
-                    // grammar and report the same verdicts; nothing is written.
+                    // The optional dry-run step, as the shared plan document:
+                    // the same object, keys and note the optimizer's `--plan`
+                    // section publishes, so one question has one answer shape.
+                    // Nothing is written.
                     let plan = match option_one(invocation, "plan-delta") {
                         None => serde_json::Value::Null,
-                        Some(token) => {
-                            let delta_khz =
-                                nvoc_core::parse_offset_delta(token).map_err(CliError::new)?;
-                            let step = nvoc_core::plan_offset_step(
-                                &settings,
-                                &nvoc_core::OffsetStepTarget::Domain(name.to_string()),
-                                delta_khz,
-                            );
-                            serde_json::to_value(&step)?
-                        }
+                        Some(token) => offset_plan_json(&settings, name, token)?,
                     };
                     offset_entry_json(&settings, name, plan)?
                 }
@@ -190,6 +181,24 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
         },
         results,
     })
+}
+
+/// The `--plan-delta` half of the offset entry: one request, published as the
+/// shared plan document the optimizer and the Python bindings publish.
+fn offset_plan_json(
+    settings: &nvoc_core::DeviceSettings,
+    name: &str,
+    token: &str,
+) -> Result<serde_json::Value, CliError> {
+    let delta_khz = nvoc_core::parse_offset_delta(token).map_err(CliError::new)?;
+    let request = nvoc_core::PlanRequest {
+        target: nvoc_core::OffsetStepTarget::Domain(name.to_string()),
+        delta_khz,
+    };
+    Ok(serde_json::to_value(nvoc_core::plan_document(
+        settings,
+        &[request],
+    ))?)
 }
 
 /// The `get-pstate-global-freq-offset` body, built from one read.
@@ -306,6 +315,58 @@ mod tests {
         assert_eq!(entry["offset_khz"], -1, "the offset is still reported");
 
         assert!(offset_entry_json(&settings, "video", serde_json::Value::Null).is_err());
+    }
+
+    /// The plan section this entry publishes is the shared document: same keys,
+    /// same note, same write flag as the optimizer's, pinned here because a
+    /// second shape for one question is exactly what a reader cannot see a
+    /// reason for.
+    #[test]
+    fn the_offset_entry_publishes_the_shared_plan_document() {
+        let settings = nvoc_core::DeviceSettings {
+            clock_offset_limits_khz: Some(nvoc_core::ClockOffsetLimits {
+                min_khz: -18_750,
+                max_khz: 18_750,
+                records: 1,
+            }),
+            clock_offsets: Some(vec![nvoc_core::ClockOffsetReading {
+                domain_bit: 0x1,
+                frequency_khz: 1_575_000,
+                offset_khz: -126,
+            }]),
+            clock_offsets_named: Some(vec![nvoc_core::NamedClockOffset {
+                name: "graphics".to_string(),
+                domain_bit: 0x1,
+                frequency_khz: 1_575_000,
+                offset_khz: -126,
+                corroboration: "matched the live graphics clock of this snapshot".to_string(),
+            }]),
+            ..Default::default()
+        };
+
+        let plan = offset_plan_json(&settings, "graphics", "+8mhz").expect("parses and serialises");
+        assert_eq!(plan["applied"], serde_json::json!(false));
+        assert_eq!(plan["settings_write"], serde_json::json!(false));
+        assert_eq!(plan["requests"], serde_json::json!(1));
+        assert_eq!(plan["steps"][0]["verdict"], serde_json::json!("ready"));
+        assert_eq!(plan["steps"][0]["domain_bit"], serde_json::json!(1));
+        assert!(
+            plan["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nothing was written"),
+            "{plan}"
+        );
+        // This entry spells the target with --domain, so --plan-delta carries a
+        // step size only; the shared grammar still owns what a step size is, and
+        // a token that is not one is refused with the grammar's words rather than
+        // read as zero.
+        let refused = offset_plan_json(&settings, "graphics", "8mhzz").expect_err("not a step");
+        let message = format!("{refused}");
+        assert!(
+            message.contains("khz") && message.contains("mhz"),
+            "{message}"
+        );
     }
 
     #[test]
