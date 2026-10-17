@@ -3,15 +3,16 @@ use nvapi::hi::{
 };
 use nvml_wrapper::enum_wrappers::device::{Api, PerformanceState};
 use nvoc_core::{
-    BackendSet, CheckVoltageFrequency, ClearEdid, ClkVfDomainClass, ConvertEnum,
-    DisableNvapiThermalSim, FabricTree, FanCurvePointReadout, GetFanCurves, GpuTarget, GpuType,
-    NvapiPStateNativeLock, NvapiPerfFreqCap, PmgrArbiterProbe, QueryApiRestriction, QueryAutoBoost,
-    QueryDisplays, QueryDomainVfpPoints, QueryEdid, QueryFanInfo, QueryGpuInfo, QueryGpuSettings,
-    QueryGpuStatus, QueryLegacyCoreOvervoltRanges, QueryNvapiClkDomainFreq,
-    QueryNvapiClkDomainFreqDirect, QueryNvapiClkDomainFreqsBatch, QueryNvapiClkDomains,
-    QueryNvapiClkVfPoints, QueryNvapiCoolerInfo, QueryNvapiCoreVoltageControl, QueryNvapiDNotifier,
-    QueryNvapiOcScannerIncomplete, QueryNvapiPmgrVoltageArbiter, QueryNvapiPowerCeiling,
-    QueryNvapiRatedTdp, QueryNvapiTargetTempPolicies, QueryNvapiTgpWattRange, QueryNvapiThermalSim,
+    BackendSet, CheckVoltageFrequency, ClearEdid, ClkVfDomainClass, ConvertEnum, DeviceInfo,
+    DeviceStatus, DisableNvapiThermalSim, FabricTree, FanCurvePointReadout, GetFanCurves,
+    GpuTarget, GpuType, NvapiPStateNativeLock, NvapiPerfFreqCap, PmgrArbiterProbe,
+    QueryApiRestriction, QueryAutoBoost, QueryDisplays, QueryDomainVfpPoints, QueryEdid,
+    QueryFanInfo, QueryGpuInfo, QueryGpuSettings, QueryGpuStatus, QueryLegacyCoreOvervoltRanges,
+    QueryNvapiClkDomainFreq, QueryNvapiClkDomainFreqDirect, QueryNvapiClkDomainFreqsBatch,
+    QueryNvapiClkDomains, QueryNvapiClkVfPoints, QueryNvapiCoolerInfo,
+    QueryNvapiCoreVoltageControl, QueryNvapiDNotifier, QueryNvapiOcScannerIncomplete,
+    QueryNvapiPmgrVoltageArbiter, QueryNvapiPowerCeiling, QueryNvapiRatedTdp,
+    QueryNvapiTargetTempPolicies, QueryNvapiTgpWattRange, QueryNvapiThermalSim,
     QueryNvapiVoltRails, QueryPowerLimits, QueryPstateBaseVoltage, QueryPstates,
     QuerySupportedApplicationsClocks, QueryTdpTempLimits, QueryTemperatureThresholds,
     QueryThrottleReasons, QueryVbiosImage, QueryVfpPointVoltage, QueryVoltageBoost,
@@ -55,8 +56,12 @@ fn parse_backends(raw: &str) -> PyResult<BackendSet> {
         "both" | "all" => Ok(BackendSet::Both),
         "nvapi" => Ok(BackendSet::Nvapi),
         "nvml" => Ok(BackendSet::Nvml),
+        // Native NullMoth RM: the macOS backend. Kept as an explicit opt-in so
+        // a GUI/TUI on macOS can drive the RM path directly through pynvoc and
+        // never loads NVAPI/NVML (which do not exist on macOS).
+        "macos-rm" | "macos_rm" | "macosrm" => Ok(BackendSet::MacosRm),
         other => Err(invalid_value(format!(
-            "invalid backend set {other:?}; expected 'both'/'all', 'nvapi', or 'nvml'"
+            "invalid backend set {other:?}; expected 'both'/'all', 'nvapi', 'nvml', or 'macos-rm'"
         ))),
     }
 }
@@ -225,12 +230,14 @@ struct InventoryCache {
     both: Option<Arc<SyncInventory>>,
     nvapi: Option<Arc<SyncInventory>>,
     nvml: Option<Arc<SyncInventory>>,
+    macos_rm: Option<Arc<SyncInventory>>,
 }
 
 static INVENTORY_CACHE: std::sync::Mutex<InventoryCache> = std::sync::Mutex::new(InventoryCache {
     both: None,
     nvapi: None,
     nvml: None,
+    macos_rm: None,
 });
 
 fn lock_inventory_cache() -> std::sync::MutexGuard<'static, InventoryCache> {
@@ -350,11 +357,7 @@ impl InventoryCache {
             BackendSet::Both => &mut self.both,
             BackendSet::Nvapi => &mut self.nvapi,
             BackendSet::Nvml => &mut self.nvml,
-            BackendSet::MacosRm => {
-                return Err(invalid_value(
-                    "macOS RM is currently exposed through Rust core and nvoc-cli",
-                ));
-            }
+            BackendSet::MacosRm => &mut self.macos_rm,
         };
         if slot.is_none() {
             *slot = Some(Arc::new(SyncInventory(
@@ -371,11 +374,7 @@ impl InventoryCache {
             BackendSet::Both => &mut self.both,
             BackendSet::Nvapi => &mut self.nvapi,
             BackendSet::Nvml => &mut self.nvml,
-            BackendSet::MacosRm => {
-                return Err(invalid_value(
-                    "macOS RM is currently exposed through Rust core and nvoc-cli",
-                ));
-            }
+            BackendSet::MacosRm => &mut self.macos_rm,
         };
         let fresh = discover_targets(backends).map_err(to_py_err)?;
         *slot = Some(Arc::new(SyncInventory(fresh)));
@@ -608,7 +607,256 @@ fn normalize_info_nvml(target: &GpuTarget<'_>) -> PyResultValue {
     Ok(Value::Object(map))
 }
 
+/// Identity keys shared by every backend's `info`/`status` map.
+fn macos_rm_id_map(gpu_id: u32, index: usize) -> Map<String, Value> {
+    let mut map = Map::new();
+    map.insert("backend".into(), text("macos-rm"));
+    map.insert("gpu_id".into(), u64_value(gpu_id as u64));
+    map.insert("gpu_id_hex".into(), text(format!("0x{gpu_id:04X}")));
+    map.insert("index".into(), u64_value(index as u64));
+    map
+}
+
+/// macOS RM p-state number → the "P<n>" label every other backend emits.
+fn macos_rm_pstate_label(pstate: Option<u32>) -> Option<String> {
+    pstate.map(|p| format!("P{p}"))
+}
+
+/// Normalize the native macOS RM [`DeviceInfo`] into the same dict shape the
+/// NVAPI/NVML `normalize_info` produces, so pynvoc's `query_info`/`discover_gpus`
+/// and the GUI/TUI read one contract regardless of backend. Values the RM
+/// backend genuinely cannot read on this platform (architecture codename,
+/// VBios image, ...) are omitted rather than fabricated; the RM-native fields
+/// (project, chip_sku, board_id, ...) ride along under their own keys.
+fn info_macos_rm_to_map(gpu_id: u32, index: usize, info: &DeviceInfo) -> Value {
+    let mut map = macos_rm_id_map(gpu_id, index);
+    map.insert("vendor".into(), text("NVIDIA"));
+    let name = info
+        .name
+        .clone()
+        .unwrap_or_else(|| "NVIDIA GPU".to_string());
+    map.insert("name".into(), text(&name));
+    map.insert("gpu_name".into(), text(name));
+    map.insert("driver_version".into(), text(&info.driver_version));
+    // `bus` mirrors the NVAPI/NVML "domain:bus:device.0" spelling the GUI
+    // dropdown and automation key off; `pci_address` keeps the RM form.
+    map.insert("bus".into(), text(&info.pci_address));
+    map.insert("pci_address".into(), text(&info.pci_address));
+    map.insert("vendor_id".into(), u64_value(info.vendor_id as u64));
+    map.insert("device_id".into(), u64_value(info.device_id as u64));
+    map.insert("rm_gpu_id".into(), u64_value(info.rm_gpu_id as u64));
+    if let Some(value) = info.subsystem_id {
+        map.insert("subsystem_id".into(), u64_value(value as u64));
+    }
+    if let Some(value) = info.revision {
+        map.insert("revision".into(), u64_value(value as u64));
+    }
+    if let Some(value) = info.board_id {
+        map.insert("board_id".into(), u64_value(value as u64));
+    }
+    if let Some(value) = &info.chip_sku {
+        map.insert("chip_sku".into(), text(value));
+    }
+    if let Some(value) = &info.project {
+        map.insert("project".into(), text(value));
+    }
+    if let Some(value) = info.supported_class_count {
+        map.insert("supported_class_count".into(), u64_value(value as u64));
+    }
+    // Memory totals are the same quantities NVML's `memory_info`/`bar1` report;
+    // the NVAPI path spells the total as MiB, so emit both.
+    if let Some(bytes) = info.memory_total_bytes {
+        map.insert("memory_total_bytes".into(), u64_value(bytes));
+        map.insert("memory_total_mib".into(), u64_value(bytes / (1024 * 1024)));
+    }
+    if let Some(bytes) = info.memory_usable_bytes {
+        map.insert("memory_usable_bytes".into(), u64_value(bytes));
+        map.insert("memory_usable_mib".into(), u64_value(bytes / (1024 * 1024)));
+    }
+    if let Some(bytes) = info.bar1_bytes {
+        map.insert("bar1_bytes".into(), u64_value(bytes));
+    }
+    if let Some(bytes) = info.l2_cache_bytes {
+        map.insert("l2_cache_bytes".into(), u64_value(bytes));
+    }
+    if !info.unavailable.is_empty() {
+        map.insert(
+            "unavailable".into(),
+            value_object(info.unavailable.iter().map(|(k, v)| (k.as_str(), text(v)))),
+        );
+    }
+    Value::Object(map)
+}
+
+/// Normalize the native macOS RM [`DeviceStatus`] into the same dict shape the
+/// NVAPI/NVML `normalize_status` produces. All unit conversion is centralized
+/// here (kHz→MHz, mW→W, bytes→MiB) so a consumer that already renders
+/// `gpu_clock_mhz`/`mem_clock_mhz`/`temperature_c`/`power_w` needs no macOS
+/// branch. The RM-only extras (per-fan rpm, engine utilization, PCIe gen,
+/// decoded throttle reasons, ...) are emitted alongside under their own keys.
+fn status_macos_rm_to_map(gpu_id: u32, index: usize, status: &DeviceStatus) -> Value {
+    let mut map = macos_rm_id_map(gpu_id, index);
+    if let Some(label) = macos_rm_pstate_label(status.pstate) {
+        map.insert("pstate".into(), text(label));
+    }
+    if let Some(value) = status.pstate {
+        map.insert("pstate_id".into(), u64_value(value as u64));
+    }
+    // Actual (effective) clocks. NVAPI/CLI report MHz; the RM backend reads kHz.
+    let actual_clocks = [
+        ("gpu_clock_mhz", status.graphics_clock_khz),
+        ("mem_clock_mhz", status.memory_clock_khz),
+        ("video_clock_mhz", status.video_clock_khz),
+        ("sm_clock_mhz", status.sm_clock_khz),
+    ];
+    for (key, khz) in actual_clocks {
+        if let Some(khz) = khz {
+            map.insert(key.into(), f64_value(khz as f64 / 1000.0));
+        }
+    }
+    // The TUI dashboard prefers the `eff_*` keys (actually-running clocks);
+    // on this backend the measured clock IS the effective one.
+    if let Some(khz) = status.graphics_clock_khz {
+        map.insert("eff_gpu_clock_mhz".into(), f64_value(khz as f64 / 1000.0));
+    }
+    if let Some(khz) = status.memory_clock_khz {
+        map.insert("eff_mem_clock_mhz".into(), f64_value(khz as f64 / 1000.0));
+    }
+    // Driver-requested targets, kept distinct from the measured clocks.
+    let target_clocks = [
+        ("gpu_target_clock_mhz", status.graphics_target_clock_mhz),
+        ("mem_target_clock_mhz", status.memory_target_clock_mhz),
+        ("video_target_clock_mhz", status.video_target_clock_mhz),
+        ("sm_target_clock_mhz", status.sm_target_clock_mhz),
+    ];
+    for (key, mhz) in target_clocks {
+        if let Some(mhz) = mhz {
+            map.insert(key.into(), u64_value(mhz as u64));
+        }
+    }
+    // Temperatures: `temperature_c`/`temp_core` keep the NVAPI/nvidia-smi
+    // meaning (GPU core), the remaining sensors ride along typed.
+    if let Some(celsius) = status.temperature_c {
+        map.insert("temperature_c".into(), f64_value(celsius));
+        map.insert("temp_core".into(), f64_value(celsius));
+    }
+    if let Some(celsius) = status.temperature_memory_c {
+        map.insert("temperature_memory_c".into(), f64_value(celsius));
+        map.insert("temp_memory".into(), f64_value(celsius));
+    }
+    if let Some(celsius) = status.temperature_board_c {
+        map.insert("temperature_board_c".into(), f64_value(celsius));
+    }
+    if let Some(celsius) = status.temperature_power_supply_c {
+        map.insert("temperature_power_supply_c".into(), f64_value(celsius));
+    }
+    // Power: `power_w`/`power_limit_w` match NVML/NVAPI semantics (instant
+    // draw / enforced TGP wall); the requested limit and the driver's own
+    // average/policy blocks are distinct quantities.
+    if let Some(mw) = status.power_mw {
+        map.insert("power_w".into(), f64_value(mw as f64 / 1000.0));
+    }
+    if let Some(mw) = status.power_limit_mw {
+        map.insert("power_limit_w".into(), f64_value(mw as f64 / 1000.0));
+    }
+    if let Some(mw) = status.power_limit_requested_mw {
+        map.insert(
+            "power_limit_requested_w".into(),
+            f64_value(mw as f64 / 1000.0),
+        );
+    }
+    if let Some(mw) = status.average_power_mw {
+        map.insert("average_power_w".into(), f64_value(mw as f64 / 1000.0));
+    }
+    if let Some(mw) = status.power_policy_tgp_mw {
+        map.insert("power_policy_tgp_w".into(), f64_value(mw as f64 / 1000.0));
+    }
+    if let Some(mask) = status.throttle_reason_mask {
+        map.insert("throttle_reason_mask".into(), u64_value(mask as u64));
+    }
+    if !status.throttle_reasons.is_empty() {
+        map.insert(
+            "throttle_reasons".into(),
+            Value::Array(status.throttle_reasons.iter().map(text).collect()),
+        );
+    }
+    // Fans: `fan_rpm` is the highest live reading (NVML-style single value),
+    // `fan_rpms` is the per-cooler list. A stopped fan reads 0 and stays 0.
+    if let Some(rpm) = status.fan_rpm {
+        map.insert("fan_rpm".into(), u64_value(rpm as u64));
+    }
+    if !status.fan_rpms.is_empty() {
+        map.insert(
+            "fan_rpms".into(),
+            Value::Array(
+                status
+                    .fan_rpms
+                    .iter()
+                    .map(|rpm| u64_value(*rpm as u64))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(percent) = status.utilization_percent {
+        map.insert("utilization_percent".into(), u64_value(percent as u64));
+        map.insert("gpu_utilization".into(), u64_value(percent as u64));
+    }
+    if let Some(percent) = status.memory_utilization_percent {
+        map.insert(
+            "memory_utilization_percent".into(),
+            u64_value(percent as u64),
+        );
+        map.insert("mem_utilization".into(), u64_value(percent as u64));
+    }
+    if !status.engine_utilization_percent.is_empty() {
+        map.insert(
+            "engine_utilization_percent".into(),
+            value_object(
+                status
+                    .engine_utilization_percent
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), f64_value(*v))),
+            ),
+        );
+    }
+    if let Some(link_gen) = status.pcie_link_gen {
+        map.insert("pcie_link_gen".into(), u64_value(link_gen as u64));
+    }
+    if let Some(max_link_gen) = status.pcie_max_link_gen {
+        map.insert("pcie_max_link_gen".into(), u64_value(max_link_gen as u64));
+    }
+    if let Some(bytes) = status.memory_used_bytes {
+        map.insert("memory_used_bytes".into(), u64_value(bytes));
+        map.insert(
+            "memory_used_mib".into(),
+            f64_value(bytes as f64 / (1024.0 * 1024.0)),
+        );
+    }
+    if !status.unavailable.is_empty() {
+        map.insert(
+            "unavailable".into(),
+            value_object(
+                status
+                    .unavailable
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), text(v))),
+            ),
+        );
+    }
+    Value::Object(map)
+}
+
 fn normalize_info(target: &GpuTarget<'_>) -> PyResultValue {
+    // macOS RM devices have no NVAPI/NVML handle, so `QueryGpuInfo` cannot
+    // serve them; normalize the native RM info into the same contract.
+    if target.has_macos_rm() {
+        let device = target.macos_rm().map_err(to_py_err)?;
+        return Ok(info_macos_rm_to_map(
+            target.id.0,
+            target.index,
+            device.info(),
+        ));
+    }
     let info = match run(target, QueryGpuInfo) {
         Ok(report) => report.output,
         Err(_) if !target.has_nvapi() && target.has_nvml() => return normalize_info_nvml(target),
@@ -749,6 +997,14 @@ fn normalize_info(target: &GpuTarget<'_>) -> PyResultValue {
 }
 
 fn normalize_status(target: &GpuTarget<'_>) -> PyResultValue {
+    // macOS RM devices bypass the NVAPI/NVML status sweep entirely: one RM
+    // session snapshot covers clocks, temperatures, power, fans, utilization,
+    // PCIe width and memory-in-use, and never touches NVAPI/NVML.
+    if target.has_macos_rm() {
+        let device = target.macos_rm().map_err(to_py_err)?;
+        let status = device.status().map_err(to_py_err)?;
+        return Ok(status_macos_rm_to_map(target.id.0, target.index, &status));
+    }
     let status = run(target, QueryGpuStatus).map_err(to_py_err)?.output;
     // NOTE on NVML: this function is the GUI/TUI 1Hz dashboard poll and must
     // NOT call any NVML device-level query (`power_usage`,
@@ -1662,7 +1918,31 @@ fn discover_gpus(py: Python<'_>, backends: Option<&str>) -> PyResult<Py<PyAny>> 
             item.insert("gpu_id_hex".into(), text(format!("0x{:04X}", target.id.0)));
             item.insert("backend_nvapi".into(), bool_value(target.has_nvapi()));
             item.insert("backend_nvml".into(), bool_value(target.has_nvml()));
-            if let Ok(info) = run(&target, QueryGpuInfo).map(|report| report.output) {
+            item.insert("backend_macos_rm".into(), bool_value(target.has_macos_rm()));
+            if target.has_macos_rm() {
+                // No NVAPI handle on macOS: name/ids come from the RM device
+                // info, and the NVAPI-only capability flags stay absent so the
+                // GUI falls back to its name heuristics.
+                if let Ok(device) = target.macos_rm() {
+                    let info = device.info();
+                    item.insert(
+                        "name".into(),
+                        text(
+                            info.name
+                                .clone()
+                                .unwrap_or_else(|| "NVIDIA GPU".to_string()),
+                        ),
+                    );
+                    item.insert("driver_version".into(), text(&info.driver_version));
+                    item.insert("pci_address".into(), text(&info.pci_address));
+                    if let Some(value) = &info.chip_sku {
+                        item.insert("chip_sku".into(), text(value));
+                    }
+                    if let Some(value) = &info.project {
+                        item.insert("project".into(), text(value));
+                    }
+                }
+            } else if let Ok(info) = run(&target, QueryGpuInfo).map(|report| report.output) {
                 // Capability flags from gpu_type.rs detect_gpu_type (name +
                 // codename) right at probe time — the GUI builds the correct
                 // mobile/desktop layout on FIRST paint instead of drawing the
@@ -5250,6 +5530,131 @@ mod tests {
         assert_eq!(parse_backends("nvapi").unwrap(), BackendSet::Nvapi);
         assert_eq!(parse_backends("nvml").unwrap(), BackendSet::Nvml);
         assert!(parse_backends("cuda").is_err());
+    }
+
+    #[test]
+    fn backend_parsing_accepts_macos_rm() {
+        assert_eq!(parse_backends("macos-rm").unwrap(), BackendSet::MacosRm);
+        assert_eq!(parse_backends("MACOS_RM").unwrap(), BackendSet::MacosRm);
+        assert_eq!(parse_backends(" macosrm ").unwrap(), BackendSet::MacosRm);
+        // Unknown sets stay a hard error (the PyErr message is only formatted
+        // with a live interpreter, which the --no-default-features unit tests
+        // do not start).
+        assert!(parse_backends("cuda").is_err());
+        assert!(parse_backends("").is_err());
+    }
+
+    /// The native macOS status uses kHz/mW/bytes; the normalized dict must carry
+    /// the same MHz/W keys the NVAPI/NVML backends emit, and must not invent a
+    /// value for a field the RM backend left unavailable.
+    #[test]
+    fn macos_rm_status_normalizes_units_into_the_common_contract() {
+        let status = DeviceStatus {
+            pstate: Some(8),
+            graphics_clock_khz: Some(1_530_000),
+            memory_clock_khz: Some(6_000_984),
+            video_clock_khz: Some(1_410_000),
+            sm_clock_khz: None,
+            graphics_target_clock_mhz: Some(1530),
+            memory_target_clock_mhz: Some(6000),
+            video_target_clock_mhz: Some(1410),
+            sm_target_clock_mhz: None,
+            temperature_c: Some(44.125),
+            temperature_memory_c: None,
+            temperature_board_c: None,
+            temperature_power_supply_c: None,
+            power_mw: Some(11_559),
+            power_limit_mw: Some(100_000),
+            power_limit_requested_mw: Some(100_000),
+            average_power_mw: None,
+            power_policy_tgp_mw: Some(11_426),
+            throttle_reason_mask: Some(0),
+            throttle_reasons: Vec::new(),
+            fan_rpm: Some(1650),
+            fan_rpms: vec![1650],
+            utilization_percent: Some(92),
+            memory_utilization_percent: Some(0),
+            engine_utilization_percent: std::collections::BTreeMap::from([
+                ("gr".to_string(), 91.49),
+                ("fb".to_string(), 0.0),
+            ]),
+            pcie_link_gen: Some(3),
+            pcie_max_link_gen: Some(3),
+            memory_used_bytes: Some(209_649_664),
+            rusd_timestamps: std::collections::BTreeMap::new(),
+            unavailable: std::collections::BTreeMap::from([(
+                "temperature_memory_c".to_string(),
+                "RUSD section has no valid timestamp (driver does not publish it)".to_string(),
+            )]),
+        };
+        let value = status_macos_rm_to_map(0x100, 2, &status);
+        let map = value.as_object().expect("status map is an object");
+        assert_eq!(map["gpu_id"], u64_value(0x100));
+        assert_eq!(map["gpu_id_hex"].as_str(), Some("0x0100"));
+        assert_eq!(map["index"], u64_value(2));
+        assert_eq!(map["pstate"].as_str(), Some("P8"));
+        assert_eq!(map["pstate_id"], u64_value(8));
+        approx(map, "gpu_clock_mhz", 1530.0);
+        approx(map, "mem_clock_mhz", 6000.984);
+        approx(map, "video_clock_mhz", 1410.0);
+        approx(map, "eff_gpu_clock_mhz", 1530.0);
+        approx(map, "temperature_c", 44.125);
+        approx(map, "temp_core", 44.125);
+        approx(map, "power_w", 11.559);
+        approx(map, "power_limit_w", 100.0);
+        approx(map, "memory_used_mib", 209_649_664.0 / (1024.0 * 1024.0));
+        assert_eq!(map["fan_rpm"], u64_value(1650));
+        assert_eq!(map["pcie_link_gen"], u64_value(3));
+        assert_eq!(map["utilization_percent"], u64_value(92));
+        // Unavailable sections stay absent: no 0 MHz / 0 C fabrication.
+        assert!(!map.contains_key("sm_clock_mhz"));
+        assert!(!map.contains_key("temperature_memory_c"));
+        assert!(!map.contains_key("average_power_w"));
+        assert!(map["unavailable"].get("temperature_memory_c").is_some());
+    }
+
+    #[test]
+    fn macos_rm_info_normalizes_identity_into_the_common_contract() {
+        let info = DeviceInfo {
+            name: Some("NVIDIA GeForce GTX 1650 SUPER".to_string()),
+            driver_version: "610.57.04".to_string(),
+            rm_gpu_id: 0x100,
+            pci_address: "0000:01:00.0".to_string(),
+            vendor_id: 0x10DE,
+            device_id: 0x2187,
+            subsystem_id: Some(0x4018_0062),
+            revision: Some(0xA1),
+            board_id: Some(376),
+            chip_sku: Some("250".to_string()),
+            project: Some("G166".to_string()),
+            memory_total_bytes: Some(4_294_967_296),
+            memory_usable_bytes: Some(4_075_880_448),
+            bar1_bytes: Some(268_435_456),
+            l2_cache_bytes: Some(1_048_576),
+            supported_class_count: Some(95),
+            unavailable: std::collections::BTreeMap::new(),
+        };
+        let value = info_macos_rm_to_map(0x100, 0, &info);
+        let map = value.as_object().expect("info map is an object");
+        assert_eq!(map["backend"].as_str(), Some("macos-rm"));
+        assert_eq!(map["gpu_id"], u64_value(0x100));
+        assert_eq!(map["name"].as_str(), Some("NVIDIA GeForce GTX 1650 SUPER"));
+        assert_eq!(map["gpu_name"], map["name"]);
+        assert_eq!(map["vendor"].as_str(), Some("NVIDIA"));
+        assert_eq!(map["bus"].as_str(), Some("0000:01:00.0"));
+        assert_eq!(map["driver_version"].as_str(), Some("610.57.04"));
+        assert_eq!(map["memory_total_mib"], u64_value(4096));
+        assert_eq!(map["project"].as_str(), Some("G166"));
+        // No codename is exposed by RM: do not fabricate an architecture.
+        assert!(!map.contains_key("codename"));
+        assert!(!map.contains_key("arch"));
+    }
+
+    fn approx(map: &Map<String, Value>, key: &str, expected: f64) {
+        let got = map[key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("{key} is not a number"));
+        assert!((got - expected).abs() < 1e-6, "{key}: {got} != {expected}");
     }
 
     #[test]
