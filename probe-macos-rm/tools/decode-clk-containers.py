@@ -15,6 +15,10 @@ ids whose split has that evidence; everything else is reported as "derived,
 unverified" so nobody mistakes a decomposition for a layout.
 
 * `0x20809019` -> 48 / 384: the record field pattern repeats at +48, +432, +816
+  and the lossless 12336 B dump fills exactly 10 records in directory order,
+  each carrying its own domain bit at rec+4 -- the same order and the same type
+  stamps the `0x2080901b` directory uses, which is why 901b's +4 mask is an
+  *entry selector* and not a domain-bit mask (see the doc §14.1/§14.3)
 * `0x2080901b` -> 60 / 64: an `0xA5` background shows the driver writing record
   type bytes at +60 and +124
 * `0x20809025` -> 20 / 224: records at +20, +244, +468, and the named fields
@@ -70,6 +74,11 @@ PAIRS = {
     0x20809019: {44: "i16 pair"},
 }
 
+# Containers whose records are packed in directory order and carry their own
+# domain bit, so the printable directory is itself the evidence for the mask
+# semantics (doc §14.3).
+DIRECTORY_IDS = {0x20809019}
+
 # Same RM struct as another id (the GET/SET twin shares paramSize, §5.2).
 INHERITS = {0x2080D01C: 0x2080901B}
 
@@ -81,7 +90,15 @@ NAMED = {
         24: "offset_ceiling_khz",
         28: "flags",
     },
-    0x20809019: {4: "domain_bit", 8: "count_or_mask", 28: "version_pair"},
+    0x20809019: {
+        0: "type_stamp_u16x2",
+        2: "flag_u16",
+        4: "domain_bit",
+        8: "count_or_mask",
+        28: "version_pair",
+        40: "khz_candidate_gpc_only",
+        52: "ffff_or_zero",
+    },
 }
 
 # Candidate value slots, printed for every domain the block's own echoed input
@@ -207,6 +224,26 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
         print(f"  rec{index:<2} @+{base}: " + " ".join(words), file=out)
     if not populated:
         print("  (no populated record)", file=out)
+    if mid in DIRECTORY_IDS:
+        # The directory is the *point* of this container: the records are packed
+        # in directory order and each one states its own domain bit, so the
+        # caller's mask is an entry selector.  Print it as one checkable line --
+        # it is what makes "mask 0xFF fills 8 records although only 7 of its
+        # bits name a domain" a measurement rather than an inference.
+        entries = []
+        for index in range(32):
+            base = header + index * stride
+            record = buf[base:base + stride]
+            if len(record) < stride or not any(record):
+                continue
+            entries.append("%d:%d:0x%04x" % (
+                index,
+                struct.unpack_from("<I", record, 4)[0],
+                struct.unpack_from("<H", record, 0)[0],
+            ))
+        if entries:
+            print("  directory (entry:domain_bit:type) = " + " ".join(entries),
+                  file=out)
     if mid in CANDIDATES:
         # Mask-driven: the echoed mask at +4 IS the set of records the caller
         # asked for, so this prints one candidate row per requested domain even
@@ -288,6 +325,8 @@ def selftest() -> int:
     assert decode(0x20809019, GEOMETRY[0x20809019][0], bytes(buf19), sink) == 0
     report19 = sink.getvalue()
     assert "i16 pair = [-1000, 1000]" in report19, report19
+    assert "directory (entry:domain_bit:type) = 0:1:0x0808" in report19, report19
+    assert "+0(type_stamp_u16x2)=" in report19, report19
     assert "65600536" in report19, report19
     # 0x2080901b candidate table: the stock case is an ALL-ZERO record whose
     # value slots the driver did write, so the mask-driven rows must appear even

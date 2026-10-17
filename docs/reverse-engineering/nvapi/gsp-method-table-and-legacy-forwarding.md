@@ -1454,6 +1454,11 @@ record*, and the domain bit is **data inside the record**, not a bit of the
 mask. It is why `mask 0xFF` fills 8 records while only 7 of bits 0..7 name a
 domain.
 
+`probe-macos-rm/tools/decode-clk-containers.py` prints this as one
+`directory (entry:domain_bit:type) = 0:1:0x0808 1:2:0x0909 …` line, so the
+correlation is reproducible with a single command against the recorded dump
+instead of being an eyeball claim.
+
 Two cautions, both from this dump:
 
 * the `+44`/`+46` i16 pair is a *range-shaped* field (`(-1000, +1000)`,
