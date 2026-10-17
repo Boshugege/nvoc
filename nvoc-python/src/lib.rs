@@ -13,9 +13,8 @@ use nvoc_core::{
     QueryNvapiCoreVoltageControl, QueryNvapiDNotifier, QueryNvapiOcScannerIncomplete,
     QueryNvapiPmgrVoltageArbiter, QueryNvapiPowerCeiling, QueryNvapiRatedTdp,
     QueryNvapiTargetTempPolicies, QueryNvapiTgpWattRange, QueryNvapiThermalSettings,
-    QueryNvapiThermalSim,
-    QueryNvapiVoltRails, QueryPowerLimits, QueryPstateBaseVoltage, QueryPstates,
-    QuerySupportedApplicationsClocks, QueryTdpTempLimits, QueryTemperatureThresholds,
+    QueryNvapiThermalSim, QueryNvapiVoltRails, QueryPowerLimits, QueryPstateBaseVoltage,
+    QueryPstates, QuerySupportedApplicationsClocks, QueryTdpTempLimits, QueryTemperatureThresholds,
     QueryThrottleReasons, QueryVbiosImage, QueryVfpPointVoltage, QueryVoltageBoost,
     ResetAutoboostStatus, ResetCoolerLevels, ResetFanCurve, ResetFanSpeed, ResetFreqLock,
     ResetLegacyApplicationFreqLock, ResetLegacyGpcRailOvervoltLimit, ResetNvapiFanControl,
@@ -1775,11 +1774,7 @@ fn normalize_supported_app_clocks(target: &GpuTarget<'_>) -> PyResultValue {
 /// projection ever ran -- the backend could answer and the entry still refused.
 /// `macos: false` keeps the other platforms byte-for-byte as they were.
 fn fan_power_backends(macos: bool) -> &'static str {
-    if macos {
-        "macos-rm"
-    } else {
-        "nvml"
-    }
+    if macos { "macos-rm" } else { "nvml" }
 }
 
 fn normalize_power_limits(target: &GpuTarget<'_>) -> PyResultValue {
@@ -1821,7 +1816,9 @@ fn normalize_legacy_temp_sensor(target: &GpuTarget<'_>) -> PyResultValue {
         let view = device.thermal_view().map_err(to_py_err)?;
         return serde_json::to_value(&view).map_err(to_py_err);
     }
-    let sensors = run(target, QueryNvapiThermalSettings).map_err(to_py_err)?.output;
+    let sensors = run(target, QueryNvapiThermalSettings)
+        .map_err(to_py_err)?
+        .output;
     Ok(Value::Array(
         sensors
             .into_iter()
@@ -2334,11 +2331,7 @@ fn query_supported_applications_clocks(
 
 #[pyfunction]
 #[pyo3(signature = (gpu, backends = None))]
-fn query_power_limits(
-    py: Python<'_>,
-    gpu: &str,
-    backends: Option<&str>,
-) -> PyResult<Py<PyAny>> {
+fn query_power_limits(py: Python<'_>, gpu: &str, backends: Option<&str>) -> PyResult<Py<PyAny>> {
     let value = with_target(
         gpu,
         backends.unwrap_or_else(|| fan_power_backends(cfg!(target_os = "macos"))),
