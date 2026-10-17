@@ -393,8 +393,6 @@ class IdleCli(unittest.TestCase):
                 self.assertNotIn("FAKE close", result.stdout)
 
 
-
-
 class DecodeClkContainers(unittest.TestCase):
     """Offline decoder for the private clock containers (tools/decode-*.py).
 
@@ -408,7 +406,8 @@ class DecodeClkContainers(unittest.TestCase):
     def run_tool(self, *args):
         return subprocess.run(
             [sys.executable, str(self.TOOL), *args],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
 
     def test_selftest_covers_geometry_and_fields(self):
@@ -430,8 +429,10 @@ class DecodeClkContainers(unittest.TestCase):
             "7188-byte hex follows"
         ]
         for off in range(0, len(buf), 16):
-            lines.append("    %05d: %s" % (off, " ".join(
-                "%02x" % b for b in buf[off:off + 16])))
+            lines.append(
+                "    %05d: %s"
+                % (off, " ".join("%02x" % b for b in buf[off : off + 16]))
+            )
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "hex.txt"
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")

@@ -31,25 +31,51 @@ Usage:
 
 Read-only: reads the tsv and, if given, the kext.
 """
+
 import argparse
 import collections
 import struct
 import sys
 
-ENTRY = 40                      # NVOC_EXPORTED_METHOD_DEF x86_64
+ENTRY = 40  # NVOC_EXPORTED_METHOD_DEF x86_64
 
 # interface id -> family, derived from the *public* SDK: for every
 # "#define NV2080_CTRL_CMD_<NAME> (0x2080xxxx)" the category is (id >> 8) & 0x3f.
 # Categories with no public define are deliberately left unnamed.
 CATEGORY_NAMES = {
-    0x00: "NULL/VGPU", 0x01: "GET/GPU/GSP/HSHUB/INTERNAL/RUSD", 0x03: "EVENT",
-    0x04: "TIMER", 0x05: "THERMAL", 0x06: "I2C", 0x08: "BIOS",
-    0x0A: "INTERNAL/KGR", 0x0B: "INTERNAL", 0x10: "CLK", 0x11: "FIFO",
-    0x12: "GR", 0x13: "FB/GMMU/GSP", 0x17: "MC", 0x18: "BUS", 0x20: "PERF",
-    0x22: "RC/TDR", 0x23: "INTERNAL", 0x24: "NVD", 0x25: "DMA", 0x26: "PMGR",
-    0x27: "GC6/INTERNAL", 0x28: "LPWR", 0x2A: "CE/INTERNAL", 0x30: "NVLINK",
-    0x31: "FLCN", 0x34: "ECC", 0x35: "FLA", 0x36: "GSP", 0x38: "GRMGR",
-    0x3A: "DMABUF", 0x3B: "BIF", 0x3D: "OS",
+    0x00: "NULL/VGPU",
+    0x01: "GET/GPU/GSP/HSHUB/INTERNAL/RUSD",
+    0x03: "EVENT",
+    0x04: "TIMER",
+    0x05: "THERMAL",
+    0x06: "I2C",
+    0x08: "BIOS",
+    0x0A: "INTERNAL/KGR",
+    0x0B: "INTERNAL",
+    0x10: "CLK",
+    0x11: "FIFO",
+    0x12: "GR",
+    0x13: "FB/GMMU/GSP",
+    0x17: "MC",
+    0x18: "BUS",
+    0x20: "PERF",
+    0x22: "RC/TDR",
+    0x23: "INTERNAL",
+    0x24: "NVD",
+    0x25: "DMA",
+    0x26: "PMGR",
+    0x27: "GC6/INTERNAL",
+    0x28: "LPWR",
+    0x2A: "CE/INTERNAL",
+    0x30: "NVLINK",
+    0x31: "FLCN",
+    0x34: "ECC",
+    0x35: "FLA",
+    0x36: "GSP",
+    0x38: "GRMGR",
+    0x3A: "DMABUF",
+    0x3B: "BIF",
+    0x3D: "OS",
 }
 U32 = struct.Struct("<I")
 U64 = struct.Struct("<Q")
@@ -96,8 +122,9 @@ def load_host(path):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("gsp_table")
     ap.add_argument("--host", help="NVRM kext executable, to flag host-registered ids")
     ap.add_argument("--family", help="print every row of one family byte, e.g. 0xb2")
@@ -113,12 +140,21 @@ def main():
     if args.family:
         b = int(args.family, 16)
         print("# family 0x%02x: %d rows" % (b, len(fam.get(b, []))))
-        print("# %-12s %-9s %-8s %-6s %s" % ("id", "paramSize", "flags", "host?", "priv?"))
+        print(
+            "# %-12s %-9s %-8s %-6s %s" % ("id", "paramSize", "flags", "host?", "priv?")
+        )
         for m in sorted(fam.get(b, [])):
             psize, flags, _ar = gsp[m]
-            print("0x%08x  %-9d 0x%04x   %-6s %s"
-                  % (m, psize, flags, "yes" if m in host else "-",
-                     "SET" if (m & 0x4000) else "GET"))
+            print(
+                "0x%08x  %-9d 0x%04x   %-6s %s"
+                % (
+                    m,
+                    psize,
+                    flags,
+                    "yes" if m in host else "-",
+                    "SET" if (m & 0x4000) else "GET",
+                )
+            )
         return 0
 
     cat = collections.defaultdict(list)
@@ -126,9 +162,15 @@ def main():
         cat[(m >> 8) & 0x3F].append(m)
 
     print("# GSP private-surface family map")
-    print("# id layout (low 16 bits): bit15 0x8000 = legacy non-privileged (read half),")
-    print("# bit14 0x4000 = privileged (write half).  So a category c appears as the byte")
-    print("# 0x80|c (read) and 0xC0|c (write); c alone is the public (non-legacy) form.")
+    print(
+        "# id layout (low 16 bits): bit15 0x8000 = legacy non-privileged (read half),"
+    )
+    print(
+        "# bit14 0x4000 = privileged (write half).  So a category c appears as the byte"
+    )
+    print(
+        "# 0x80|c (read) and 0xC0|c (write); c alone is the public (non-legacy) form."
+    )
     print("#")
     print("# %-6s %-28s %6s %6s %6s" % ("cat", "family", "GET", "SET", "host"))
     for c in sorted(cat):
@@ -136,28 +178,40 @@ def main():
         gets = sorted(m for m in ids if not (m & 0x4000))
         sets = sorted(m for m in ids if (m & 0x4000))
         nh = sum(1 for m in ids if m in host)
-        print("  0x%02x %-28s %6d %6d %6d"
-              % (c, CATEGORY_NAMES.get(c, "(no public define)"), len(gets), len(sets), nh))
-    print("# totals: %d GSP rows, %d host rows, %d ids shared, %d GSP-only"
-          % (len(gsp), len(host), len(set(gsp) & set(host)),
-             len(set(gsp) - set(host))))
+        print(
+            "  0x%02x %-28s %6d %6d %6d"
+            % (c, CATEGORY_NAMES.get(c, "(no public define)"), len(gets), len(sets), nh)
+        )
+    print(
+        "# totals: %d GSP rows, %d host rows, %d ids shared, %d GSP-only"
+        % (len(gsp), len(host), len(set(gsp) & set(host)), len(set(gsp) - set(host)))
+    )
     print("#")
-    print("# %-8s %-20s %6s %6s %6s   %s"
-          % ("byte", "role", "rows", "GET", "SET", "examples"))
+    print(
+        "# %-8s %-20s %6s %6s %6s   %s"
+        % ("byte", "role", "rows", "GET", "SET", "examples")
+    )
     for b in sorted(fam):
         # the legacy pair lives in bits 15:14: 10 = read (0x80|c), 11 = write
         # (0xc0|c).  Testing bit 15 first (as this did) labels every 0xc0|c
         # row a "read half" -- 0xd0 (the clock SET family) included.
-        role = ("write half of cat 0x%02x" % (b & 0x3F) if (b & 0xC0) == 0xC0 else
-                "read half of cat 0x%02x" % (b & 0x3F) if (b & 0xC0) == 0x80 else
-                "public form of cat 0x%02x" % b)
+        role = (
+            "write half of cat 0x%02x" % (b & 0x3F)
+            if (b & 0xC0) == 0xC0
+            else "read half of cat 0x%02x" % (b & 0x3F)
+            if (b & 0xC0) == 0x80
+            else "public form of cat 0x%02x" % b
+        )
         ids = sorted(fam[b])
         gets = [m for m in ids if not (m & 0x4000)]
         sets = [m for m in ids if (m & 0x4000)]
-        ex = ", ".join("0x%08x@%d%s" % (m, gsp[m][0], "H" if m in host else "")
-                       for m in ids[:3])
-        print("  0x%02x   %-20s %6d %6d %6d   %s"
-              % (b, role, len(ids), len(gets), len(sets), ex))
+        ex = ", ".join(
+            "0x%08x@%d%s" % (m, gsp[m][0], "H" if m in host else "") for m in ids[:3]
+        )
+        print(
+            "  0x%02x   %-20s %6d %6d %6d   %s"
+            % (b, role, len(ids), len(gets), len(sets), ex)
+        )
     return 0
 
 

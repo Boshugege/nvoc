@@ -342,9 +342,9 @@ bindings the GUI/TUI drive, so macOS telemetry is not CLI-only:
 ```python
 import pynvoc
 
-gpus = pynvoc.discover_gpus("macos-rm")     # backend_macos_rm: true
+gpus = pynvoc.discover_gpus("macos-rm")  # backend_macos_rm: true
 gpu = gpus[0]["gpu_id_hex"]
-info = pynvoc.query_info(gpu, "macos-rm")   # identity, VRAM, driver version
+info = pynvoc.query_info(gpu, "macos-rm")  # identity, VRAM, driver version
 status = pynvoc.query_status(gpu, "macos-rm")
 ```
 

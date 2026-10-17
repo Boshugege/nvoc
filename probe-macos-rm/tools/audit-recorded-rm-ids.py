@@ -15,6 +15,7 @@ per-category histogram plus the family-level lists.
 
 Read-only: it only reads files.
 """
+
 import argparse
 import collections
 import pathlib
@@ -25,11 +26,29 @@ SUFFIXES = (".rs", ".md", ".c", ".h", ".py", ".txt", ".toml", ".json")
 SKIP_PARTS = ("target", ".git", "node_modules", "third_party")
 
 CATEGORY = {
-    0x01: "GPU", 0x03: "EVENT", 0x04: "TIMER", 0x05: "THERMAL", 0x06: "I2C",
-    0x08: "BIOS", 0x0A: "INTERNAL", 0x10: "CLK", 0x11: "FIFO", 0x12: "GR",
-    0x13: "FB", 0x17: "MC", 0x18: "BUS", 0x20: "PERF", 0x22: "RC",
-    0x26: "PMGR", 0x27: "POWER", 0x2A: "CE", 0x30: "NVLINK", 0x32: "VOLT",
-    0x34: "ECC", 0x36: "GSP", 0x40: "DISPLAY",
+    0x01: "GPU",
+    0x03: "EVENT",
+    0x04: "TIMER",
+    0x05: "THERMAL",
+    0x06: "I2C",
+    0x08: "BIOS",
+    0x0A: "INTERNAL",
+    0x10: "CLK",
+    0x11: "FIFO",
+    0x12: "GR",
+    0x13: "FB",
+    0x17: "MC",
+    0x18: "BUS",
+    0x20: "PERF",
+    0x22: "RC",
+    0x26: "PMGR",
+    0x27: "POWER",
+    0x2A: "CE",
+    0x30: "NVLINK",
+    0x32: "VOLT",
+    0x34: "ECC",
+    0x36: "GSP",
+    0x40: "DISPLAY",
 }
 # Families the overclocking work actually cares about, reported individually.
 FAMILIES = (0x05, 0x10, 0x20, 0x26, 0x27, 0x32)
@@ -67,8 +86,9 @@ def category(method_id):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("table", help="method table TSV from extract-nvrm-method-table.py")
     ap.add_argument("root", nargs="?", default=".", help="repo root (default: .)")
     args = ap.parse_args()
@@ -87,16 +107,24 @@ def main():
         hist[category(method_id)][0 if method_id in live else 1] += 1
     print("cat   name                in-table  absent")
     for cat in sorted(hist):
-        print("0x%02x  %-19s %5d %8d"
-              % (cat, CATEGORY.get(cat, "?"), hist[cat][0], hist[cat][1]))
+        print(
+            "0x%02x  %-19s %5d %8d"
+            % (cat, CATEGORY.get(cat, "?"), hist[cat][0], hist[cat][1])
+        )
     print()
 
     for cat in FAMILIES:
         ids = sorted(i for i in found if category(i) == cat)
         if not ids:
             continue
-        print("0x%02x %s: %s" % (cat, CATEGORY.get(cat, "?"), " ".join(
-            "0x%08x%s" % (i, "*" if i in live else "") for i in ids)))
+        print(
+            "0x%02x %s: %s"
+            % (
+                cat,
+                CATEGORY.get(cat, "?"),
+                " ".join("0x%08x%s" % (i, "*" if i in live else "") for i in ids),
+            )
+        )
     print("\n(* = present in the loaded method table)")
     return 0
 

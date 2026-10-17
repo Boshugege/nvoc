@@ -52,8 +52,12 @@ def load(path):
             field = line.split()
             if len(field) < 5:
                 continue
-            rows.append((int(field[0], 16), int(field[1]), int(field[2], 16),
-                         int(field[3])))
+            rows.append((
+                int(field[0], 16),
+                int(field[1]),
+                int(field[2], 16),
+                int(field[3]),
+            ))
     return rows
 
 
@@ -76,11 +80,15 @@ def main(argv):
         print(f"         flags: {top}")
         read_bit = sum(1 for _, _, f, _ in sub if f & 0x08)
         write_bit = sum(1 for _, _, f, _ in sub if f & 0x04)
-        print(f"         flag bit 0x08 set {read_bit}/{len(sub)}, "
-              f"bit 0x04 set {write_bit}/{len(sub)}")
+        print(
+            f"         flag bit 0x08 set {read_bit}/{len(sub)}, "
+            f"bit 0x04 set {write_bit}/{len(sub)}"
+        )
     print()
-    print("direction-flag exceptions (a write-half row flagged as a read, or the"
-          " reverse):")
+    print(
+        "direction-flag exceptions (a write-half row flagged as a read, or the"
+        " reverse):"
+    )
     for mid, size, flags, _ in rows:
         side = half(mid)
         want = 0x08 if side == "read" else 0x04 if side == "write" else None
@@ -102,13 +110,17 @@ def main(argv):
                 pairs.append((mid, size, flags, candidate, by_id[candidate]))
                 break
     same = [p for p in pairs if p[1] == p[4][0]]
-    print(f"read ids with a present write sibling (adjacent id, then bare |0x4000): "
-          f"{len(pairs)}; same paramSize: {len(same)}")
+    print(
+        f"read ids with a present write sibling (adjacent id, then bare |0x4000): "
+        f"{len(pairs)}; same paramSize: {len(same)}"
+    )
     if "--pairs" in argv:
         for mid, size, flags, twin, (tsize, tflags, _) in pairs:
             mark = "same" if size == tsize else "DIFF"
-            print(f"  0x{mid:08x} size {size:<7d} flags 0x{flags:04x} -> "
-                  f"0x{twin:08x} size {tsize:<7d} flags 0x{tflags:04x}  [{mark}]")
+            print(
+                f"  0x{mid:08x} size {size:<7d} flags 0x{flags:04x} -> "
+                f"0x{twin:08x} size {tsize:<7d} flags 0x{tflags:04x}  [{mark}]"
+            )
     return 0
 
 

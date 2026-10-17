@@ -36,8 +36,10 @@ import sys
 from collections import Counter
 
 ID = re.compile(r"0x2080[0-9a-fA-F]{4}")
-CASE = re.compile(r'(?:\{\s*)?"([^"]{0,60})"\s*,\s*'
-                  r"(0x2080[0-9a-fA-F]{4})u?\s*,\s*(\d+)")
+CASE = re.compile(
+    r'(?:\{\s*)?"([^"]{0,60})"\s*,\s*'
+    r"(0x2080[0-9a-fA-F]{4})u?\s*,\s*(\d+)"
+)
 
 
 def load_table(path):
@@ -71,7 +73,7 @@ def main(argv):
     if "--host" in argv:
         i = argv.index("--host")
         host_table = load_table(argv[i + 1])
-        argv = argv[:i] + argv[i + 2:]
+        argv = argv[:i] + argv[i + 2 :]
     else:
         host_table = {}
     if len(argv) < 2:
@@ -82,33 +84,49 @@ def main(argv):
     for path in argv[1:]:
         text = open(path, encoding="utf-8", errors="replace").read()
         named.update(int(m, 16) for m in ID.findall(text))
-        cases.extend((int(b, 16), int(c), label, path)
-                     for label, b, c in CASE.findall(text))
+        cases.extend(
+            (int(b, 16), int(c), label, path) for label, b, c in CASE.findall(text)
+        )
 
-    print(f"table: {len(table)} ids"
-          + (f"; host table: {len(host_table)} ids" if host_table else ""))
-    print(f"probe sources: {len(argv) - 1}; ids named: {len(named)}; "
-          f"(id,size) cases: {len(cases)}")
+    print(
+        f"table: {len(table)} ids"
+        + (f"; host table: {len(host_table)} ids" if host_table else "")
+    )
+    print(
+        f"probe sources: {len(argv) - 1}; ids named: {len(named)}; "
+        f"(id,size) cases: {len(cases)}"
+    )
     known = table.keys() | host_table.keys()
     in_table = {m for m in named if m in known}
     absent = sorted(named - in_table)
     print()
     print("ids named, by half:", dict(Counter(half(m) for m in named)))
-    print(f"  declared by a table: {len(in_table)}"
-          + (f" (host side: {sum(1 for m in named if m in host_table)})"
-             if host_table else ""))
+    print(
+        f"  declared by a table: {len(in_table)}"
+        + (
+            f" (host side: {sum(1 for m in named if m in host_table)})"
+            if host_table
+            else ""
+        )
+    )
     print(f"  in neither table: {len(absent)}")
     for m in absent:
         print(f"    0x{m:08x} {half(m):5s} privileged={privileged(m)}")
     print()
-    print("read-path self-consistency (a privileged id can never have been read"
-          " successfully below root):")
+    print(
+        "read-path self-consistency (a privileged id can never have been read"
+        " successfully below root):"
+    )
     bad = sorted(m for m in named if half(m) != "write" and privileged(m))
-    print(f"  non-write ids that are privileged: {len(bad)}"
-          + ("" if not bad else "  " + " ".join(f"0x{m:08x}" for m in bad)))
+    print(
+        f"  non-write ids that are privileged: {len(bad)}"
+        + ("" if not bad else "  " + " ".join(f"0x{m:08x}" for m in bad))
+    )
     w = sorted(m for m in named if half(m) == "write")
-    print(f"  write-half ids the probe names: {len(w)}  "
-          + " ".join(f"0x{m:08x}" for m in w))
+    print(
+        f"  write-half ids the probe names: {len(w)}  "
+        + " ".join(f"0x{m:08x}" for m in w)
+    )
     print()
     print("case sizes vs the table:")
     exact, other = 0, []
@@ -120,8 +138,10 @@ def main(argv):
         else:
             other.append((mid, size, tsize, label, path))
     print(f"  cases using the table's own size: {exact}")
-    print(f"  cases using something else: {len(other)} (labels are the"
-          " justification, so read them before calling any of these wrong)")
+    print(
+        f"  cases using something else: {len(other)} (labels are the"
+        " justification, so read them before calling any of these wrong)"
+    )
     seen = set()
     for mid, size, tsize, label, path in sorted(other):
         key = (mid, size)
@@ -129,8 +149,10 @@ def main(argv):
             continue
         seen.add(key)
         t = "in neither table" if tsize is None else f"table {tsize}"
-        print(f"    0x{mid:08x} sends {size:<7d} ({t}): {label!r}"
-              f"  [{path.split('/')[-1]}]")
+        print(
+            f"    0x{mid:08x} sends {size:<7d} ({t}): {label!r}"
+            f"  [{path.split('/')[-1]}]"
+        )
     return 0
 
 

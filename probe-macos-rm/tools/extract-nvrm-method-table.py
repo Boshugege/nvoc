@@ -34,6 +34,7 @@ function names from the generated ``g_*_nvoc.c`` tables.
 
 Read-only: the tool only reads files.
 """
+
 import argparse
 import glob
 import os
@@ -80,7 +81,7 @@ def names_from_ogkm(ogkm_root):
     for path in glob.glob(os.path.join(ogkm_root, "src/nvidia/generated/g_*_nvoc.c")):
         text = open(path, errors="ignore").read()
         for match in pattern.finditer(text):
-            window = text[max(0, match.start() - 900):match.start()]
+            window = text[max(0, match.start() - 900) : match.start()]
             ids = re.findall(r"0x(20[0-9a-fA-F]{6})u", window)
             if ids:
                 names.setdefault(int(ids[-1], 16), match.group(1))
@@ -88,10 +89,13 @@ def names_from_ogkm(ogkm_root):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("binary", help="path to the NVRM kext executable")
-    ap.add_argument("ogkm", nargs="?", help="open-gpu-kernel-modules source root (optional)")
+    ap.add_argument(
+        "ogkm", nargs="?", help="open-gpu-kernel-modules source root (optional)"
+    )
     args = ap.parse_args()
 
     entries = extract(args.binary)
@@ -99,8 +103,10 @@ def main():
     print("# methodId\tparamSize\tclassPtr\toffset\tname")
     for method_id in sorted(entries):
         param_size, class_ptr, off = entries[method_id]
-        print("0x%08x\t%d\t0x%x\t0x%x\t%s"
-              % (method_id, param_size, class_ptr, off, names.get(method_id, "")))
+        print(
+            "0x%08x\t%d\t0x%x\t0x%x\t%s"
+            % (method_id, param_size, class_ptr, off, names.get(method_id, ""))
+        )
     return 0
 
 
