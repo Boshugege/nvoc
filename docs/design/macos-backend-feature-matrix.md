@@ -1013,3 +1013,17 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **判读方式（留给下次健康读取）**：① 非零只在末四槽 ⇒ 走 V1 值窗口；② 前段槽位非零 ⇒ 另有布局；③ 全零 ⇒ **该记录的值未被封送**，此时"零"不能当作"偏移为零" ✔（与既有"stamp 变化 ≠ 值被接受"一致 ✔）。
 
 **验证范围**：测试机重建通过，`built probe-macos-rm-idle (profile idle)` ✔ 且无 warning ✔；**本轮没有运行 probe**（wedge 仍在，anchor 轮询已用掉本交互的唯一一次设备访问 ✔）⇒ 分类为**已实现待实测** ✔，不谎称已实测 ✔。客户端未构建 ✔。
+
+### 本轮追加四十三（2026-10-18，压力侧：Vulkan 复用的代码审计与实测状态；分类＝已实现待实测（编译已通过））
+
+**审计结论：原 NVOC 的 Vulkan 压力实现，其 loader 发现逻辑**已经就是为本机这套黑苹果写的** ✔。
+证据（`cli-stressor-cuda-rs/src/vulkan_loader.rs:27-46`）：macOS 专用候选表 **`/Library/GPUBundles/nvmtl/libvulkan.1.dylib`、`/Library/GPUBundles/nvmtl/libvulkan.dylib`** ✔ 与 ICD 候选 **`/Library/GPUBundles/nvmtl/nvk_icd.json`** ✔，另有逃生口 `NVOC_VULKAN_LOADER` / `NVOC_VULKAN_ICD` ✔；非 macOS 上候选表为空、覆盖变量被忽略 ✔。**先走平台查找、失败才回退到该 bundle** ✔；`prepare()` 必须在主线程、且在派生工作线程之前调用（因为选择 ICD 需要写 `VK_DRIVER_FILES`）✔。**全程未出现 MoltenVK** ✔——与 goal 的提醒（不要默认必须经 MoltenVK）一致 ✔。
+
+**编译（本轮实测）**：在测试机 `cargo build -p cli-stressor-cuda-rs --features vulkan` ⇒ **`Finished dev profile … 25.72s`，成功** ✔（顺带编译了 `cudarc v0.19.10` ✔ ⇒ macOS 上 CUDA 侧也可编译、无需 GPU ✔）。
+**发现的配方注意点**：`cli-stressor-cuda-rs/Cargo.toml` 中 `default = ["cuda12"]` ✔ ⇒ 单写 `--features vulkan` **仍会带上默认 CUDA 特性** ✗；要**纯 Vulkan** 构建需 `--no-default-features --features vulkan` ✔（`vulkan = ["ash","dep:naga","dep:windows-sys"]` ✔）。`--vulkan-only` 需要 `--features vulkan`（`main.rs:1315` 给出该提示）✔。
+
+**实测状态**：**已实现、编译通过**，**运行待 wedge 解除**（低强度、5–10 s、可停止 ✔）⇒ 分类**已实现待实测** ✔，不谎称已跑过 ✔。
+
+**区分"压力负载"与"正确性校验"（goal 明确要求）**：这个压测提供的是**负载**——持续 GPU 工作，用来观察负载下的功耗/温度/频率行为 ✔；它**不是**正确性校验：**渲染成功 / 未崩溃 ≠ 超频稳定** ✔；**更不是**偏移设置成功的证据（goal 第 4 条：**不得以实时频率变化代替偏移设置成功** ✔）⇒ 偏移是否被接受，只能靠**回读控制块的值 dword** 判定 ✔。
+
+**验证范围**：本机（客户端）只做阅读与 Git/传输 ✔；**构建与运行只在测试机** ✔，本轮只构建、未运行核算程序、未碰 GPU ✔；wedge 轮询 1 次 ✔。
