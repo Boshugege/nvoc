@@ -60,6 +60,23 @@ def rows(text: str) -> list[tuple[str, str, str]]:
     return out
 
 
+def row_ids(line: str) -> set[str]:
+    """The ids a row is about, each counted once.
+
+    One row is one dispatch, so the same id written twice on it -- a probe prints
+    both the label ("fan-private-0x20808532") and the argument ("cmd 0x20808532
+    size 336") -- must not be counted twice.  Counting mentions instead of rows
+    inflated every figure in the first census by exactly the number of times a row
+    happened to repeat its id; see the selftest, which asserts the dedupe.
+
+    An id that a row only *mentions* in its detail (a twin, a note) is still
+    credited with that row, so the census is exact for the id a row is about and
+    an upper bound for one merely named inside it.  "Never dispatched" is sound
+    either way: no row names the id at all.
+    """
+    return {"0x" + m.group(1).lower() for m in ID_RE.finditer(line)}
+
+
 def census(paths: list[Path]) -> dict[str, dict[str, object]]:
     seen: dict[str, dict[str, object]] = {}
     for path in paths:
@@ -68,8 +85,7 @@ def census(paths: list[Path]) -> dict[str, dict[str, object]]:
         except OSError:
             continue
         for status, label, line in rows(text):
-            for match in ID_RE.finditer(line):
-                cid = "0x" + match.group(1).lower()
+            for cid in sorted(row_ids(line)):
                 entry = seen.setdefault(cid, {"ok": 0, "labels": {}, "files": set()})
                 if status == OK:
                     entry["ok"] += 1  # type: ignore[operator]
@@ -137,6 +153,12 @@ def selftest() -> int:
     sample_txt = (
         "[OK] V2.5 thermal-read status 0x00000000 (NV_OK)  cmd 0x20800513 size 1432 -> NV_OK\n"
         "[REJECTED] V2.clkctl gc-1d status 0x00000062 (NV_ERR_RESET_REQUIRED)  cmd 0x2080901d size 32680 -> 0x62\n"
+        # The probe's own shape: the label and the argument repeat the same id, and
+        # one dispatch has to stay one count.
+        "[REJECTED] V2.fan fan-private-0x20808532 status 0x00000062 (NV_ERR_RESET_REQUIRED)  cmd 0x20808532 size 336 -> NV_ERR_RESET_REQUIRED\n"
+        # A row that names a second id (a twin, a note) credits both: exact for the
+        # id the row is about, an upper bound for one only mentioned in it.
+        "[OK] V2.twin twin-read status 0x00000000 (NV_OK)  private 0x20809027 twin 0x20809028 -> NV_OK\n"
         "no status on this line 0x20809999 is not a row\n"
     )
     prose = "A review saying 0x2080ffff returned NV_OK is not evidence.\n"
@@ -154,6 +176,12 @@ def selftest() -> int:
         assert seen["0x20809019"]["ok"] == 1, seen["0x20809019"]
         assert seen["0x2080901d"]["ok"] == 0, seen["0x2080901d"]
         assert seen["0x20808513"]["ok"] == 0, seen["0x20808513"]
+        assert seen["0x20808532"]["labels"] == {
+            "00000062 REJECTED NV_ERR_RESET_REQUIRED": 1
+        }, "a row that spells its id twice is one dispatch, not two"
+        assert seen["0x20809027"]["ok"] == 1 and seen["0x20809028"]["ok"] == 1, (
+            "an id a row only mentions is still credited (documented upper bound)"
+        )
         assert "0x20809999" not in seen, "a row without a status must not count"
         assert "0x2080ffff" not in seen, "prose in an .md file must not count"
         table = table_ids(root / "table.tsv")
