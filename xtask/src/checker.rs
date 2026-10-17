@@ -130,7 +130,137 @@ pub fn check() -> Res<()> {
     util::step("ruff check (.)");
     let mut lint = util::uv_run(&root, "nvoc-tui", &["ruff", "check", "."]);
     lint.args(&excludes);
-    util::run(&mut lint)
+    util::run(&mut lint)?;
+
+    util::step("probe tool selftests (device-free instruments)");
+    probe_tool_selftests(&root)
+}
+
+/// The probe tools are the instruments behind every claim about what the driver
+/// answered, and until now nothing executed them: ruff reads their syntax and
+/// no step ran their assertions, so what they pin -- the dump format a real
+/// capture must still parse, the Rust field map a decode must agree with, the
+/// inputs behind a claim tally -- could rot silently between runs. Each tool
+/// below is executed with `python3` (the interpreter the runbooks call them
+/// with, so the gate follows the runbooks rather than a private environment)
+/// and must both exit 0 and print its own `selftest ok` line: a selftest that
+/// has quietly become a no-op fails here instead of passing.
+///
+/// `probe-macos-rm/tools/gsp-handler-map.py --selftest` needs the GSP firmware
+/// blob, which is not in the repo, so it is named as needing input and is run
+/// only when `NVOC_GSP_FIRMWARE` points at one; unset, the step prints a SKIP
+/// that names the reason rather than a pass. The remaining tools are listed as
+/// having no selftest at all, which is what stops a *new* tool from being added
+/// and never run: the directory is enumerated and an unlisted file fails.
+fn probe_tool_selftests(root: &std::path::Path) -> Res<()> {
+    const RUNNABLE: [&str; 5] = [
+        "audit-entry-parity.py",
+        "audit-live-attempts.py",
+        "audit-matrix-claims.py",
+        "decode-clk-containers.py",
+        "record-run-provenance.py",
+    ];
+    const NEEDS_FIRMWARE: &str = "gsp-handler-map.py";
+    const NO_SELFTEST: [&str; 6] = [
+        "audit-probe-ids.py",
+        "audit-recorded-rm-ids.py",
+        "dump-gsp-families.py",
+        "extract-gsp-method-table.py",
+        "extract-nvrm-method-table.py",
+        "summarise-method-table.py",
+    ];
+    const FIRMWARE_ENV: &str = "NVOC_GSP_FIRMWARE";
+    let dir = root.join("probe-macos-rm").join("tools");
+    let entries = std::fs::read_dir(&dir)
+        .map_err(|error| format!("cannot list {}: {error}", dir.display()))?;
+    let mut found = Vec::new();
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("cannot read an entry of {}: {error}", dir.display()))?
+            .path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("py") {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_string();
+        let declared = RUNNABLE.contains(&name.as_str())
+            || name == NEEDS_FIRMWARE
+            || NO_SELFTEST.contains(&name.as_str());
+        if !declared {
+            return Err(format!(
+                "probe-macos-rm/tools/{name} is neither run by this step nor declared as having \
+                 no selftest; add it to RUNNABLE, NEEDS_FIRMWARE or NO_SELFTEST in \
+                 xtask/src/checker.rs"
+            ));
+        }
+        found.push(name);
+    }
+    for name in RUNNABLE {
+        run_tool_selftest(root, &dir, name, None)?;
+    }
+    match std::env::var(FIRMWARE_ENV) {
+        Ok(firmware) if !firmware.is_empty() => {
+            if !std::path::Path::new(&firmware).is_file() {
+                return Err(format!(
+                    "{FIRMWARE_ENV} is set to {firmware}, which is not a file; unset it or point \
+                     it at the GSP firmware blob"
+                ));
+            }
+            run_tool_selftest(root, &dir, NEEDS_FIRMWARE, Some(&firmware))?;
+        }
+        _ => println!(
+            "  SKIP probe-macos-rm/tools/{NEEDS_FIRMWARE} --selftest: it reads the GSP firmware \
+             blob, which is not in the repo; set {FIRMWARE_ENV}=/path/to/gsp_tu10x.bin to run it"
+        ),
+    }
+    Ok(())
+}
+
+/// Runs one tool's `--selftest` and requires its own success line, quoted back
+/// into the gate log so the run is visible rather than merely counted.
+fn run_tool_selftest(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    name: &str,
+    firmware: Option<&str>,
+) -> Res<()> {
+    let tool = dir.join(name);
+    let mut command = Command::new("python3");
+    command.arg(&tool);
+    if let Some(firmware) = firmware {
+        command.arg(firmware);
+    }
+    command.arg("--selftest").current_dir(root);
+    let output = command.output().map_err(|error| {
+        format!(
+            "failed to run python3 for probe-macos-rm/tools/{name} (the runbooks call the tools \
+             with python3): {error}"
+        )
+    })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if !output.status.success() {
+        print!("{stdout}");
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        return Err(format!(
+            "probe-macos-rm/tools/{name} --selftest exited with {}",
+            output.status
+        ));
+    }
+    let reported = stdout
+        .lines()
+        .rev()
+        .find(|line| line.contains("selftest ok"))
+        .ok_or_else(|| {
+            format!(
+                "probe-macos-rm/tools/{name} --selftest exited 0 without printing a `selftest ok` \
+                 line, so no assertion result was reported"
+            )
+        })?;
+    println!("  {}", reported.trim());
+    Ok(())
 }
 
 /// Re-runs the CI clippy shape against the platform this host is NOT, so
