@@ -86,6 +86,17 @@ enum TargetRequirement {
     MacosRm,
 }
 
+impl TargetRequirement {
+    /// True for requirements satisfiable only by NVAPI/NVML, neither of which
+    /// exists on macOS.
+    fn requires_nvapi(self) -> bool {
+        matches!(
+            self,
+            TargetRequirement::NvapiAny | TargetRequirement::NvapiSingle
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CommandRequirements {
     target: TargetRequirement,
@@ -125,6 +136,21 @@ fn main_result() -> Result<i32, Box<dyn std::error::Error>> {
 
     let (command_name, _) = matches.subcommand().expect("subcommand required");
     let requirements = command_requirements(command_name).expect("known subcommand");
+
+    // macOS has no NVAPI/NVML runtime, so every command that requires them
+    // (`optimize`, `autoscan-vfp*`, `reset-vfp`, `import-vfp`, `export-vfp`)
+    // would otherwise fail deep inside library discovery with a cascade of
+    // loader / dlopen errors. Fail fast with one actionable message instead:
+    // the native NullMoth RM backend is the only macOS backend, and it is
+    // read-only.
+    if cfg!(target_os = "macos") && requirements.target.requires_nvapi() {
+        return Err(format!(
+            "`{command_name}` requires NVAPI/NVML, which do not exist on macOS. \
+             The native NullMoth RM backend is read-only and does not implement \
+             performance writes; use `macos-eval` for the read-only stock evaluation."
+        )
+        .into());
+    }
 
     if requirements.target == TargetRequirement::None {
         match matches.subcommand() {

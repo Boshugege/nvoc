@@ -81,6 +81,24 @@ fn parse_backends(raw: &str) -> PyResult<BackendSet> {
     }
 }
 
+/// macOS has no NVAPI/NVML runtime: the native NullMoth RM backend
+/// ([`BackendSet::MacosRm`], which is also what `auto`/`default` resolves to
+/// here) is the only backend, and it is read-only. Any request that resolves to
+/// NVAPI or NVML — every write entry point, plus explicit
+/// `backend="nvapi"/"nvml"/"both"` reads — is refused here with one actionable
+/// message instead of the cascade of library-load / dlopen failures (including
+/// a literal `dlopen("nvml.dll")` on macOS) that would otherwise surface.
+fn ensure_backend_available(backends: BackendSet) -> PyResult<()> {
+    if cfg!(target_os = "macos") && backends != BackendSet::MacosRm {
+        return Err(PyRuntimeError::new_err(
+            "NVAPI/NVML are not available on macOS; the native NullMoth RM backend \
+             (backend 'macos-rm', the default here) is read-only and does not implement \
+             performance writes.",
+        ));
+    }
+    Ok(())
+}
+
 fn parse_backend(raw: &str) -> PyResult<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "nvapi" => Ok("nvapi"),
@@ -368,6 +386,7 @@ impl InventoryCache {
     /// 获取指定 backend 集的 inventory；首次访问时发现并缓存。
     /// 返回 Arc 快照 —— 调用方在锁外持有并查询，并发查询互不阻塞。
     fn entry(&mut self, backends: BackendSet) -> PyResult<Arc<SyncInventory>> {
+        ensure_backend_available(backends)?;
         let slot = match backends {
             BackendSet::Both => &mut self.both,
             BackendSet::Nvapi => &mut self.nvapi,
@@ -385,6 +404,7 @@ impl InventoryCache {
     /// 强制重新发现指定集并更新缓存（discover_gpus 的显式刷新入口）。
     /// 刷新会替换槽位；仍在途的旧快照查询由 Arc 引用计数保活，安全。
     fn refresh(&mut self, backends: BackendSet) -> PyResult<Arc<SyncInventory>> {
+        ensure_backend_available(backends)?;
         let slot = match backends {
             BackendSet::Both => &mut self.both,
             BackendSet::Nvapi => &mut self.nvapi,
@@ -2017,7 +2037,10 @@ fn normalize_domain_vfp_points(
 
 #[pyfunction]
 fn discover_gpus(py: Python<'_>, backends: Option<&str>) -> PyResult<Py<PyAny>> {
-    let backends_str = backends.unwrap_or("both").to_string();
+    // Default to the platform default ("auto"): RM on macOS, NVAPI+NVML
+    // elsewhere. A literal "both" would fail on macOS, where neither NVAPI nor
+    // NVML exists; on other platforms "auto" resolves to the same Both set.
+    let backends_str = backends.unwrap_or("auto").to_string();
     // Release the GIL: discovery loads nvapi64 + inits NVAPI (hundreds of
     // ms) and the GUI calls it at tick zero to overlap UI construction —
     // holding the GIL would stall the main thread's Python widget build.
@@ -5667,6 +5690,25 @@ mod tests {
         // do not start).
         assert!(parse_backends("cuda").is_err());
         assert!(parse_backends("").is_err());
+    }
+
+    /// macOS has no NVAPI/NVML, so any backend set other than the native RM is
+    /// refused up front with one actionable message; other platforms keep
+    /// every set available. This guards the write-path error parity (the
+    /// cascade of `dlopen("nvml.dll")` failures is gone on macOS).
+    #[test]
+    fn macos_backend_availability_matches_the_platform() {
+        if cfg!(target_os = "macos") {
+            assert!(ensure_backend_available(BackendSet::MacosRm).is_ok());
+            assert!(ensure_backend_available(BackendSet::Nvapi).is_err());
+            assert!(ensure_backend_available(BackendSet::Nvml).is_err());
+            assert!(ensure_backend_available(BackendSet::Both).is_err());
+        } else {
+            assert!(ensure_backend_available(BackendSet::Nvapi).is_ok());
+            assert!(ensure_backend_available(BackendSet::Nvml).is_ok());
+            assert!(ensure_backend_available(BackendSet::Both).is_ok());
+            assert!(ensure_backend_available(BackendSet::MacosRm).is_ok());
+        }
     }
 
     /// The native macOS status uses kHz/mW/bytes; the normalized dict must carry
