@@ -40,7 +40,7 @@
 | V2.1 | `FB_GET_INFO_V2` 0x20801303 | ctrl2080fb.h（A-proven，NVK 用于 VRAM 尺寸） | RAM/BAR1/L2 数值应与卡相符；失败 ⇒ subdevice 级 GSP ctrl-RPC 有问题 |
 | V2.2 | `FB_STATS_GET` 0x2080132F | ctrl2080fb.h（A-tree） | 接受度探针（v1 不解码内容） |
 | V2.3 | `PERF_GET_CURRENT_PSTATE` 0x20802068 | ctrl2080perf.h（A-tree） | 空闲应 P8 附近，负载 P0；**性能状态域活着的直接证据** |
-| V2.4 | `PERF_RATED_TDP_GET_CONTROL` 0x2080206E | ctrl2080perf.h（A-tree；12B 参数） | rated TDP 仲裁控制读面；REJECTED 也记录（客户机枚举差异） |
+| V2.4 | `PERF_RATED_TDP_GET_CONTROL` 0x2080206E（+ `--rated-tdp-read` 扩展扫描） | ctrl2080perf.h:399（A-tree；结构 `{client,input,vPstateType}` 12 B） | rated TDP 仲裁控制**读面**。默认电池只查 client 0（RM）；`--rated-tdp-read` 展开扫描：**5 个 client 全 `NV_OK`，action 全 `DEFAULT(0)`**（GLOBAL/OS/PROFILE 的 vPstate=TURBO_BOOST，RM/WAR=RATED_TDP），越界 client（5/255）返回 `0x1f NV_ERR_INVALID_ARGUMENT` ⇒ **查找经校验**、非无脑 NV_OK；姊妹命令 STATUS 的 SDK 只给 message id 0x6D，推导 id `0x2080206d` 实测 `0x56 NV_ERR_NOT_SUPPORTED`（未实现/推导存疑）。该 GET 是公开 perf 头里唯一被接受的 RATED_TDP 面；其 SET 孪生 0x2080206f **门控未发** |
 | V2.5 | `GET_EDPP_LIMIT_INFO` 0x20800AFD | ctrl2080internal.h:3984（A-tree） | **功耗墙 min/rated/max/curr mW** —— M3 功耗墙写入的基准；GB207 台式卡期望 max≈额定 TGP |
 | V2.6 | `GET_GPUMON_UTIL_SAMPLES_V2` 0x20802096 | ctrl2080perf.h + ctrl2080gpumon.h（A-tree，V2 无内嵌指针） | 引擎利用率环形队列；tracker 推进 ⇒ GPUMON 采样管线活着 |
 | V2.7 | `CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES` 0x20801037 | ctrl2080clk.h（A-tree） | **gpcClkFreqKHz / dramClkFreqKHz** —— 核心/显存频率读数（M0 频率遥测主通道） |
@@ -91,17 +91,18 @@ NullMoth 自家 push_test（`kexts/NVRM/push.inc`）的移植。不含任何调�
 
 ## 后续探针（v1 代码不发送，按风险递增排序）
 
-1. **legacy 温度读数 ID 核实**：MODS 4060 IDA 库（`reverse/mods_analysis/a3_work/mods4060.i64`）找 THERMAL 族（0x2080 11xx）分发点，取 `THERMAL_GET_INFO` 精确 ID + 参数尺寸，做成 B 层探针。（RUSD 已覆盖温度，此项为冗余备份。）
-2. **VF 偏移 SET**：`nvmlDeviceSetGpcClkVfOffset` → RM `0x2080D031`（580）/`0x2080F031`（610 文档，参数 0x608 B，blackwell audit T2-10）。**M2 的核心写面**。先 GET 对应面（`0x208090A2` 已在 V2.11 探路），再小步幅（±15 MHz）+ V2.7 频率回读。
-3. **电压轨 SET**：`0x20801ACF`（7 轨 ×316 B，uV；MODS REPORT.md）。前置：确认 kext 侧 RM registry key 通道（`RmVFPointCheckIgnore=1` 的 macOS 等价物，Linux 是 `NVreg_RegistryDwords`）——否则越限写会被 OV/reliability 预检拦下。**风险最高档**，必须在 M0 遥测闭环建立后进行。
-4. **perf-point 提交族**：MODS `SetPerfPoint`/`InjectPerfPoint` 的精确 cmd 未定（audit §GSP 分派表："待 MODS 二进制 assert 桥接确认"）。锁定后即为"行为化频率写入"的正式路径（NVAPI record 面 0x2080D01C/D02D 已证不行为化，勿用）。
-5. **风扇写面**：RUSD 只读 fan rpm；写面走 GSP boardobj/cooler 族（0x2080 26xx? 未核实）或 FINN I2C 控制（0x208006xx，在树）。属 M4，报告判定中低可行性。
+1. **RATED_TDP 仲裁 SET**：`NV2080_CTRL_CMD_PERF_RATED_TDP_SET_CONTROL` 0x2080206f（ctrl2080perf.h:438，结构与读面同）。把 client GLOBAL(2) 置 `FORCE_EXCEED(1)` = 解除 RATED_TDP 限制以允许越过 RATED_TDP 点（文档指其预期使用方为 EVGA Precision 这类终端工具）。**这是本战役目前找到的最低风险写对**：无偏移、无电压、可逆（回 DEFAULT=0 即恢复），且读面(V2.4)已证同结构可用、越界校验有效。**但仍属性能写，门控未发**；启用需：先记录 5 client 的 input/vPstate 原值 → SET → 回读确认 → 退出前恢复 DEFAULT。注意它只放开/限制越点，**不等于超频偏移**，不得据此宣称稳定。
+2. **legacy 温度读数 ID 核实**：MODS 4060 IDA 库（`reverse/mods_analysis/a3_work/mods4060.i64`）找 THERMAL 族（0x2080 11xx）分发点，取 `THERMAL_GET_INFO` 精确 ID + 参数尺寸，做成 B 层探针。（RUSD 已覆盖温度，此项为冗余备份。）
+3. **VF 偏移 SET**：`nvmlDeviceSetGpcClkVfOffset` → RM `0x2080D031`（580）/`0x2080F031`（610 文档，参数 0x608 B，blackwell audit T2-10）。**M2 的核心写面**。先 GET 对应面（`0x208090A2` 已在 V2.11 探路），再小步幅（±15 MHz）+ V2.7 频率回读。
+4. **电压轨 SET**：`0x20801ACF`（7 轨 ×316 B，uV；MODS REPORT.md）。前置：确认 kext 侧 RM registry key 通道（`RmVFPointCheckIgnore=1` 的 macOS 等价物，Linux 是 `NVreg_RegistryDwords`）——否则越限写会被 OV/reliability 预检拦下。**风险最高档**，必须在 M0 遥测闭环建立后进行。
+5. **perf-point 提交族**：MODS `SetPerfPoint`/`InjectPerfPoint` 的精确 cmd 未定（audit §GSP 分派表："待 MODS 二进制 assert 桥接确认"）。锁定后即为"行为化频率写入"的正式路径（NVAPI record 面 0x2080D01C/D02D 已证不行为化，勿用）。
+6. **风扇写面**：RUSD 只读 fan rpm；写面走 GSP boardobj/cooler 族（0x2080 26xx? 未核实）或 FINN I2C 控制（0x208006xx，在树）。属 M4，报告判定中低可行性。
 
 ## 与可行性报告的映射
 
 - M0（遥测）= 阶段 0–2 + V2.12/12b RUSD 全字段
 - M1（boost 复现）= V3.1a/1b
-- M2 前置探路 = V2.11 + V2.15（合法频率范围）+ 后续探针 2
-- M3 前置探路 = V2.5 + V3.3 + 后续探针 3
+- M2 前置探路 = V2.11 + V2.15（合法频率范围）+ 后续探针 3
+- M3 前置探路 = V2.5 + V3.3 + 后续探针 4
 - 引擎提交路径 = V1.9 + 阶段 5（macOS 压测/推流的前提，对应报告 §8 stressor 落点）
 - 报告 §3.4 特权面问题 = V1.1–V1.8 + V3.1 直接回答

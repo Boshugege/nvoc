@@ -61,6 +61,8 @@ static void usage(void)
         "  --sample <sec>   run the 1 Hz telemetry loop for <sec> seconds\n"
         "  --tierb-read     run the campaign-sourced read-only Tier-B GETs\n"
         "                   (voltage rails + V/F points; explicit opt-in)\n"
+        "  --rated-tdp-read read-only PERF_RATED_TDP_GET_CONTROL (+ derived\n"
+        "                   status); never sends the SET twin\n"
         "  --jsonl <file>   also write every result/sample as JSON lines\n"
         "  --gpu <id>       attach explicit gpuId (default: first from CARD_INFO)\n"
         "  --quiet          suppress text detail, keep JSONL\n"
@@ -75,7 +77,7 @@ int main(int argc, char **argv)
     const char *stages = "012";
     const char *jsonl_path = NULL;
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
-    int tierb_read = 0;
+    int tierb_read = 0, rated_tdp_read = 0;
     NvU32 gpuId = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -98,6 +100,7 @@ int main(int argc, char **argv)
             explicit_gpu = 1;
         }
         else if (!strcmp(argv[i], "--tierb-read")) tierb_read = 1;
+        else if (!strcmp(argv[i], "--rated-tdp-read")) rated_tdp_read = 1;
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
         else if (!strcmp(argv[i], "--help")) { usage(); return 0; }
         else { usage(); return 2; }
@@ -174,6 +177,11 @@ int main(int argc, char **argv)
     if (tierb_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_tierb_read(&g_ctx) != 0) rc = 1;
+    }
+
+    if (rated_tdp_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_rated_tdp_read(&g_ctx) != 0) rc = 1;
     }
 
     if (sample_sec > 0 && !strchr(stages, '4')) {

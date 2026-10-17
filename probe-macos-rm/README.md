@@ -61,6 +61,13 @@ OGKM=/path/to/ogkm python3 tests/test_idle_cli.py
 ./probe-macos-rm --stages 4 --sample 30 --jsonl load.jsonl  # 30 s 遥测采样
 ```
 
+只读专项（idle-only 构建即可，不需要 `--write`）：
+
+```bash
+./probe-macos-rm-idle --stages 0 --tierb-read      # campaign 来源的 legacy rails/VfPoints GET
+./probe-macos-rm-idle --stages 0 --rated-tdp-read   # PERF_RATED_TDP_GET_CONTROL 全 client 扫描 + 越界反证
+```
+
 - 退出码：`0` 阶段调度完成，具体支持情况仍需查看每项 verdict；`1` 传输/对象链或阶段失败；`3` full profile 中有 --write 门控项未授权；`2` 用法或 profile 限制错误。
 - 每个条目输出 `[OK|REJECTED|SKIP|GATED|HARD]` 判定 + `NV_STATUS` 名；`--jsonl` 同步落盘（结果 + 采样流），供与 Linux/Windows 实机三方对照。
 

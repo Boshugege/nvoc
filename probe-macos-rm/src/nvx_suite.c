@@ -621,6 +621,112 @@ int nvx_stage2_tierb_read(nvx_ctx *c)
     return 0;
 }
 
+/* RATED_TDP read-only probe (--rated-tdp-read).
+ *
+ * NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL (0x2080206e) is the only public,
+ * header-defined read face of the RATED_TDP arbitration feature
+ * (ctrl2080perf.h:387). It is a GET: it reports, per arbitration client, the
+ * requested action RM would arbitrate. Its SET twin (0x2080206f) is never sent
+ * here; the point of this item is to establish whether an end-user tool can
+ * even *see* the feature through the macOS RM surface before any write path is
+ * contemplated. All client indices are queried so a partly-implemented kext
+ * cannot hide behind a single accepted call. */
+static const char *rated_tdp_client_name(NvU32 cl)
+{
+    switch (cl) {
+    case NV2080_CTRL_PERF_RATED_TDP_CLIENT_RM:              return "RM";
+    case NV2080_CTRL_PERF_RATED_TDP_CLIENT_WAR_BUG_1785342: return "WAR_1785342";
+    case NV2080_CTRL_PERF_RATED_TDP_CLIENT_GLOBAL:          return "GLOBAL";
+    case NV2080_CTRL_PERF_RATED_TDP_CLIENT_OS:              return "OS";
+    case NV2080_CTRL_PERF_RATED_TDP_CLIENT_PROFILE:         return "PROFILE";
+    default:                                                return "?";
+    }
+}
+
+static const char *rated_tdp_action_name(NvU32 a)
+{
+    switch (a) {
+    case NV2080_CTRL_PERF_RATED_TDP_ACTION_DEFAULT:      return "DEFAULT";
+    case NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_EXCEED: return "FORCE_EXCEED";
+    case NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_LIMIT:  return "FORCE_LIMIT";
+    case NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_LOCK:   return "FORCE_LOCK";
+    case NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_FLOOR:  return "FORCE_FLOOR";
+    default:                                             return "?";
+    }
+}
+
+/* The STATUS command id is not exported as a CMD_ macro by the SDK header -- it
+ * only ships the message id (NV2080_CTRL_PERF_RATED_TDP_STATUS_PARAMS_MESSAGE_ID
+ * = 0x6D). Derive the full id from the perf interface base (0x20802000, cf.
+ * GET_CURRENT_PSTATE 0x20802068 <-> msg 0x68). Read-only; a kext that does not
+ * implement it will answer NV_ERR_NOT_SUPPORTED, which is itself a result. */
+#define NVX_RM_CMD_PERF_RATED_TDP_GET_STATUS 0x2080206Du
+
+static void item_rated_tdp_reads(nvx_ctx *c)
+{
+    for (NvU32 cl = 0; cl < NV2080_CTRL_PERF_RATED_TDP_CLIENT_NUM_CLIENTS; ++cl) {
+        NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS p;
+        memset(&p, 0, sizeof p);
+        p.client = (NV2080_CTRL_PERF_RATED_TDP_CLIENT)cl;
+        NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL, &p);
+        nvx_emit(c, "V2.rtdp", "rated-tdp-get-control", st,
+                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "client %s(%u): action %s(%u) vPstate %u",
+                 rated_tdp_client_name(cl), cl,
+                 rated_tdp_action_name((NvU32)p.input), (NvU32)p.input,
+                 (NvU32)p.vPstateType);
+    }
+
+    /* Negative control: indices outside [0,NUM_CLIENTS) must be rejected by the
+     * RM, which proves the accepted calls above are validated rather than a
+     * blanket NV_OK. Still read-only. */
+    static const NvU32 bad_clients[] = {
+        NV2080_CTRL_PERF_RATED_TDP_CLIENT_NUM_CLIENTS, 0xffu,
+    };
+    for (unsigned bi = 0; bi < sizeof bad_clients / sizeof bad_clients[0]; ++bi) {
+        NvU32 bad = bad_clients[bi];
+        NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS p;
+        memset(&p, 0, sizeof p);
+        p.client = (NV2080_CTRL_PERF_RATED_TDP_CLIENT)bad;
+        NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL, &p);
+        nvx_emit(c, "V2.rtdp!", "rated-tdp-get-control", st,
+                 st != 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "invalid client index %u %s", bad,
+                 st != 0 ? "rejected as expected (lookup is validated)"
+                         : "ACCEPTED -> RM does not validate the client index");
+    }
+
+    /* Cross-check: the arbitrated output plus every client's input in one call. */
+    NV2080_CTRL_PERF_RATED_TDP_STATUS_PARAMS s;
+    memset(&s, 0, sizeof s);
+    NvU32 st = SUBCTL(c, NVX_RM_CMD_PERF_RATED_TDP_GET_STATUS, &s);
+    if (st == 0) {
+        char inputs[96];
+        int off = 0;
+        for (NvU32 i = 0; i < NV2080_CTRL_PERF_RATED_TDP_CLIENT_NUM_CLIENTS; ++i)
+            off += snprintf(inputs + off, sizeof inputs - (size_t)off, "%s%u",
+                            i ? "," : "", (NvU32)s.inputs[i]);
+        nvx_emit(c, "V2.rtds", "rated-tdp-status", st, NVX_V_OK,
+                 "output %s(%u) vPstate %u clientActiveMask 0x%x regkeyLimit %u inputs[%s]",
+                 rated_tdp_action_name((NvU32)s.output), (NvU32)s.output,
+                 (NvU32)s.outputVPstate, s.rm.clientActiveMask,
+                 (NvU32)s.rm.bRegkeyLimitRatedTdp, inputs);
+    } else {
+        nvx_emit(c, "V2.rtds", "rated-tdp-status", st, NVX_V_REJECTED,
+                 "derived cmd id 0x2080206d (message id only in SDK header) rejected");
+    }
+}
+
+int nvx_stage2_rated_tdp_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.rtdp", "rated-tdp-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_rated_tdp_reads(c);
+    return 0;
+}
+
 static void item_bios_sku(nvx_ctx *c)
 {
     NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS p;

@@ -63,6 +63,9 @@ int nvx_stage2(nvx_ctx *c);                    /* read-only battery        */
  * command IDs are campaign-sourced rather than SDK headers, so they stay out
  * of the default battery and only run when the operator asks for them. */
 int nvx_stage2_tierb_read(nvx_ctx *c);
+/* Explicit, read-only RATED_TDP GET probe: the one public perf-side read pair
+ * (NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL). Never sends its SET twin. */
+int nvx_stage2_rated_tdp_read(nvx_ctx *c);
 int nvx_stage3(nvx_ctx *c);                    /* gated writes             */
 void nvx_stage4(nvx_ctx *c, int seconds);      /* sampling loop            */
 int nvx_stage5(nvx_ctx *c);                    /* channel smoke (GPU exec) */
