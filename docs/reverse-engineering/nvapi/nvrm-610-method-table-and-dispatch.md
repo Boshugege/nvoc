@@ -33,10 +33,16 @@ NULL, &ctrlParamsSize)`, `src/libraries/nvoc/src/runtime.c` and the
 `generated/g_*_nvoc.c` names all match the public source tree one-for-one, and
 the extracted method table below matches the public generated tables exactly.
 
-Consequence: the client-visible control surface *is* the compiled
-`NVOC_EXPORTED_METHOD_DEF` set. There is no second, hidden command table in the
-public build — which is precisely why "which ids exist" can be answered by
-reading the array out of the binary instead of guessing.
+Consequence: every id in this table is answered by the host RM, and "which
+*public* ids exist" can be answered by reading the array out of the binary
+instead of guessing.
+
+**But this table is not the whole control surface** (corrected 2026-10-17). Any
+id carrying the legacy bit `0x8000` that is *not* in this table is forwarded to
+the **GSP firmware**, which has its own 889-row method table — 169 CLK and 151
+VOLT rows where this table has 1 and 0. Reading this array therefore answers
+"is this a host-implemented command", not "does this command exist on this
+machine". See `gsp-method-table-and-legacy-forwarding.md`.
 
 ## 2. The dispatch chain
 
@@ -206,35 +212,37 @@ NVRM, NVAccel, NVRMFB, NVRMAGDC, `libvulkan_nouveau.dylib`, `libvulkan.dylib`
 and `air-opt` were all scanned; no id of these families appears as a u32, as
 the LE half-word, or as ASCII.
 
-Put together with control.c:448-458, the size-dependent acceptance **cannot**
-be produced by `rmapiutilGetControlInfo()`: an id that is absent from the table
-skips that size comparison entirely. So something answers these two ids outside
-the NVOC export table. The candidate explanations are:
+**This section is superseded (2026-10-17).** The responder *is* the GSP
+firmware, reached by the host's legacy-non-privileged forwarding path. The
+reason none of it was visible before is that the firmware file lives at
+`/Users/Shared/nvfw/nvidia/610.57.04/gsp_tu10x.bin` — outside every path that
+had been searched — and the host's only test of these ids is the single legacy
+bit `0x8000` (`rmapi_deprecated.h:41`), not a table lookup, so the size
+comparison at `control.c:448-458` genuinely never runs for them. Full write-up,
+chain, table and corrected claims:
+`docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md`.
 
-* a macOS-specific handler injected by the NullMoth build (would have to key on
-  something other than the literal id, since no literal exists), or
-* a transport/glue path between `NVAccel`'s user client and the RM that is not
-  visible in the public OGKM source.
+Two of this section's negative anchors are also now *explained* rather than
+open: `0x2080FFFF -> 0x1b` is the privileged pair `0xC000` plus a non-root
+caller (a privilege answer, not a missing command), and `0x2080A0FF -> 0x56` is
+a successful forward to a GSP that has no such method. And `0x2080b201` turned
+out to keep answering while every genuinely GSP-forwarded id was failing with
+`0x62 NV_ERR_RESET_REQUIRED`, so that one id is **not** served by the GSP
+legacy path either.
 
-The GSP-forwarding hypothesis is *not* currently supported by evidence on this
-host: no GSP firmware file exists anywhere under `/Library/Extensions`,
-`/Library/NullMoth` or `/usr/local`, and no GSP boot/RPC message appears in the
-unified log for this driver. TU116 also runs the host-side RM without GSP. It is
-therefore written down as "not located", not as "the firmware must have it".
-
-**Next disambiguation steps** (none require writes):
+For the record, the earlier "disambiguation steps":
 
 1. ~~run the same id through a second user-client type~~ — **done, negative**
    (see §5): `--service nvrm` and `--service nvaccel` answer byte-identically,
    so the responder is the shared RM behind both user clients, not a separate
    NVAccel-side shim;
-2. check whether the 776 payload's head/records change when the *object* is a
-   different subdevice, to separate "cached per-object" from "synthesised";
-3. ask the NullMoth authors for their RM-extension list (information request
-   only; no AI-generated patch is to be submitted upstream).
+2. the *object* axis was checked too (`--reg-read`); the GSP forward is
+   per-device, not per-object;
+3. the firmware-standing question is settled by the GSP's own export table
+   (889 rows; 169 CLK + 151 VOLT), so no author request is needed for it.
 
-Until then, `0x20809061@776` is treated as a usable but **unattributed** clock
-read, and the private clock/VF/voltage controls stay write-gated.
+`0x20809061@776` is therefore re-attributed to the GSP, not left
+"unattributed"; the private clock/VF/voltage controls remain write-gated.
 
 ## 5. Live-table cross-check (`--reg-read`) and the user-client A/B
 
@@ -320,9 +328,15 @@ id answers `0x1f`.
 
 ```
 # on the test machine (read-only)
+# the *host* NVOC export table:
 python3 probe-macos-rm/tools/extract-nvrm-method-table.py \
     /Library/Extensions/NVRM.kext/Contents/MacOS/NVRM \
     "$OGKM" > outputs/method-table-nvrm-<ver>.tsv
+
+# the *GSP* export table (the one that actually answers the private ids):
+python3 probe-macos-rm/tools/extract-gsp-method-table.py \
+    /Users/Shared/nvfw/nvidia/610.57.04/gsp_tu10x.bin \
+    > outputs/gsp-table-<ver>.tsv
 
 python3 - <<'EOF'
 import struct
@@ -331,6 +345,13 @@ for i in (0x20809061, 0x2080B201, 0x2080901b):
     print(hex(i), b.count(struct.pack("<I", i)))
 EOF
 ```
+
+> **Caution (2026-10-17):** these private GETs are forwarded to the GSP and a
+> malformed one can wedge it — `0x2080901c@808` and `0x20809026@5332` with a
+> `0xA5` background both returned `0x65 NV_ERR_TIMEOUT`, after which every
+> legacy-forwarded id answered `0x62 NV_ERR_RESET_REQUIRED` for the rest of the
+> session. Recovery needs a driver reload or reboot. See
+> `gsp-method-table-and-legacy-forwarding.md` §6.
 
 Bundles cited here: `stage-clkdoc-20261017T074256Z`,
 `stage-clkdoc-20261017T074448Z`, `stage-clkobj-20261017T074744Z`,
