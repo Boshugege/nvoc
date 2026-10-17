@@ -980,3 +980,14 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **三、电压族"范围/原状态"证据已存在且同型号实测**：`VoltVoltDevicesGetInfo` 报**可控窗口**（min/step/max/default µV），注释给出 **R465 在 1650 SUPER 上的实测：300/6.25/1300/1000 mV**（"matching the rail clamp floor"）✔ ⇒ 但本机是 **R610**，**必须重测不得套用** ✔。已写入该族用户可见成因串（并澄清该族**并非读盲**：客户端侧有 volt-rails 读面；我们实发的 `0x20800a80` 实测 `0x56` ⇒ **驱动拒绝**而非缺失 ✔）。
 
 **验证范围**：core 改动＝该族成因串；fmt clean、clippy（core/cli/auto-optimizer，`-D warnings`）无 error、core tests 89+5+15 全绿 ✔。**设备访问 1 次**（anchor 轮询）、**无写入、未提权**、客户端未构建 ✔。
+
+### 本轮追加四十（2026-10-18，风扇族客户端分发链审计：arbiter 语义 + 恢复缺口的准确表述）
+
+**一、客户端接口清单（实际分发链）**：读＝`GetTachReading`（RPM）/`GetCoolerSettings`/`GetCoolerPolicyTable`/`ClientFanArbitersGetInfo`/`...GetStatus` ✔；写＝`SetCoolerLevels`/`SetCoolerPolicyTable`/**`RestoreCoolerSettings`**/**`RestoreCoolerPolicyTable`**/`ClientFanArbiterControl` ✔ ⇒ 客户端**有两个 restore 入口** ✔；副本**无** `src/cooler.rs`（挂在 `gpu.rs` 与 `sys/gpu/cooler.rs`）✔。
+
+**二、arbiter 三件套精确布局**：`..._ARBITER_INFO_V1`（40 B，flags `FAN_STOP=1`/`FAN_STOP_DEFAULT=2`）×32 + 36 = **1316** ✔；`..._ARBITER_STATUS_V1`（8 B，`fan_stop_active()`⇔`unknown1!=0`）×32 + 36 = **292** ✔；`..._ARBITER_CONTROL_V1 { arbiter_index, flags{FAN_STOP=1} }` ✔ ⇒ 客户端"控制风扇"主体是**仲裁请求**（同 RATED_TDP/热策略形态）**而非**占空比设定 ✗ ⇒ **读到 policy 表 ≠ 持有控制权** ✔。
+
+**三、缺口与恢复（准确表述）**：候选私有 `0x20808532@336` 在表 ✔、公开 `0x20800532` **不在表** ✗；该行**无表内恢复/写孪生** ✗，且 336 与 arbiter 各尺寸均不吻合 ⇒ 属 **cooler/policy 面** ✔，**精确对应哪个客户端结构尚未定位** ✗ ⇒ 风扇恢复只能**"先读原值再写回原值"**，**不得假设存在恢复命令** ✔（客户端那两个 `Restore*` 是 NVAPI 面，我们手上的 RM 私有行没有孪生 ✔）。
+**本族下一步（不变）**：健康会话下跑 `--fan-read`（两个 id）✔，取得 可读/可解释/范围/原状态 的第一手证据 ✔。
+
+**验证范围**：本轮**无 Rust 改动**（纯文档）⇒ 未重跑 cargo 门（上一轮同源齐套结果仍有效 ✔）；核对依据为副本源码逐段阅读与既有表格数据 ✔。**设备访问 1 次**（anchor 轮询）、**无写入、未提权**、客户端未构建 ✔。

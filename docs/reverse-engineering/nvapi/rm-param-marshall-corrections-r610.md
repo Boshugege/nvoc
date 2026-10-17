@@ -666,3 +666,28 @@ probe 里派生的 `0x2080206d`（RATED_TDP **status**）：SDK 未导出 CMD �
 1300 mV / 1000 mV, matching the rail clamp floor"* ✔。
 ⇒ goal 要求的"范围 / 原状态"证据**在同型号卡上已经有过一次** ✔（**R465** 时）；但本机驱动是 **R610** ⇒
 **必须重测、不得直接套用** ✔。该条已写入电压增强族的**用户可见成因串** ✔。
+
+## 12. 风扇/散热族的客户端分发链：分成"cooler 面"与"**arbiter（仲裁）面**"，且我们可用的私有行**没有恢复孪生**（2026-10-18）
+
+### 12.1 副本里风扇族的真实接口清单（这是"实际分发链"，不是头文件字面量）
+**读**：`NvAPI_GPU_GetTachReading`（转速/RPM 表 ✔）、`NvAPI_GPU_GetCoolerSettings` ✔、`NvAPI_GPU_GetCoolerPolicyTable` ✔、
+`NvAPI_GPU_ClientFanArbitersGetInfo` ✔、`NvAPI_GPU_ClientFanArbitersGetStatus` ✔。
+**写**：`NvAPI_GPU_SetCoolerLevels` ✔、`NvAPI_GPU_SetCoolerPolicyTable` ✔、
+**`NvAPI_GPU_RestoreCoolerSettings`** ✔、**`NvAPI_GPU_RestoreCoolerPolicyTable`** ✔、`NvAPI_GPU_ClientFanArbiterControl`（见下）✔。
+⇒ 客户端**明确提供两个 restore 入口** ✔（goal 要求的"恢复"在客户端侧是有名分的 ✔）。注：副本里**没有** `src/cooler.rs` ✔（cooler 面挂在 `gpu.rs` 与 `sys/gpu/cooler.rs`）。
+
+### 12.2 arbiter 三件套的精确布局（"取控制权"是一套**请求/仲裁**机制）
+`NV_GPU_CLIENT_FAN_ARBITER_INFO_V1 { unknown, flags{FAN_STOP=1, FAN_STOP_DEFAULT=2}, arbiter_index, padding[40 B] }` ✔、
+`NV_GPU_CLIENT_FAN_ARBITERS_INFO_V1` = 36 B 头 + 32×40 = **1316** ✔；
+`NV_GPU_CLIENT_FAN_ARBITER_STATUS_V1 { unknown0, unknown1 }`（`fan_stop_active()` ⇔ `unknown1 != 0`）✔、
+`..._ARBITERS_STATUS_V1` = 36 + 32×8 = **292** ✔；
+`NV_GPU_CLIENT_FAN_ARBITER_CONTROL_V1 { arbiter_index, flags{FAN_STOP=1} }` ✔。
+⇒ **客户端侧的风扇"控制"主体是"谁可以让风扇停"的仲裁请求**（与 RATED_TDP、热策略同形 ✔），
+**不是**直接的占空比/目标转速设定 ✗。⇒ **读到 policy 表 ≠ 持有控制权** ✔（与 §9.2 的 RATED_TDP 教训同构，勿混）。
+
+### 12.3 本族**缺口**：我们可用的私有行没有"恢复"孪生
+我们测得的候选是私有 `0x20808532@336`（在表 ✔）与其公开孪生 `0x20800532`（**不在表** ✗，见 §8/上轮记录）。
+核对"`|0x4000+1` 孪生"约定（§10.2）后：该行**没有**表内恢复/写孪生 ✗；而 arbiter 三件套的尺寸（40/1316/8/292）
+与 336 **都不吻合** ⇒ 该私有行属于 **cooler/policy 面** ✔，但它**精确对应哪个客户端结构尚未定位** ✗。
+⇒ 因此**风扇的恢复计划只能定为"先成功读到原值，再写回原值"** ✔——**不得假设存在一条恢复命令** ✔（这与客户端
+确有两个 `Restore*` 入口并不矛盾：那是 NVAPI 面，我们的 RM 私有行没有对应孪生 ✔）。
