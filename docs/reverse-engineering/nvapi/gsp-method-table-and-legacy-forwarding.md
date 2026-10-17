@@ -947,7 +947,7 @@ absent, which is a *different* statement from "the driver does not know it".
 | # | id | original record / claim | actual source | version it belongs to | full marshalling (measured) | reproducible read-only request | verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 1 | `0x20809019` | "ClockClient domain info" (§4 of the superseded note) | GSP table @**12336** | R610.57.04 TU116 GSP | in: zeroed block. out: `48` B head (`+0` low byte `0xff`, `+4=0x3ff`, `+8=0x335`) + `32 x 384` B records; `rec+0` u16 type stamp, `rec+4` single domain bit, `rec+44` two `i16` (`0x03e8fc18` = `-1000,+1000`) | `probe-macos-rm-idle --clkctl-hex` (lossless hex) | `NV_OK`, 10 filled records, types `{08,09,03}`. No current/offset field observed |
-| 2 | `0x2080901b` | "ClockClient GET_CONTROL / offset+range read" | GSP table @**2108** | same | in: `+4` = u32 domain mask (validated: an invalid mask gives `0x25 NV_ERR_INVALID_DATA`); out: `60` B head (14 writes: `+0` u8 `0xff`, `+8` u32 `0x01010000`, `+12` u16 `0`, `+16..+56`) + bit-sparse `64` B records at `+60+64*bit` (`u16` type stamp @`+0`, value dwords `+8..+44` and `+52`,`+56`; `+4`,`+48`,`+60` **never** written) | `--clkctl-read` (per-bit counter map) / `--clkctl-hex` (lossless) | `NV_OK`; types `08`/`09` records write 13 slots, other types 11; **every value dword reads 0** (stock). Current offset **not** obtained |
+| 2 | `0x2080901b` | "ClockClient GET_CONTROL / offset+range read" | GSP table @**2108** | same | in: `+4` = u32 domain mask (validated: an invalid mask gives `0x25 NV_ERR_INVALID_DATA`); out: `60` B head (14 writes: `+0` u8 `0xff`, `+8` u32 `0x01010000`, `+12` u16 `0`, `+16..+56`) + bit-sparse `64` B records at `+60+64*bit` (`u16` type stamp @`+0`, value dwords `+8..+44` and `+52`,`+56`; `+4`,`+48`,`+60` **never** written) | `--clkctl-read` (per-bit counter map) / `--clkctl-hex` (lossless) | `NV_OK`; the seven type `08`/`09` records write 13 slots each and the one type `03` record writes its stamp only (`106 = 14 + 7*13 + 1`, §18; the older "other types 11" is retracted there); **every value dword reads 0** (stock). Current offset **not** obtained |
 | 3 | `0x20809006` | "frequency measurement" | **not in GSP table** | — | 32 B / stamp `0x10020` form only | `--clkdoc-read` | every documented size and stamp -> `0x1f`; not usable here |
 | 4 | `0x20809061` / `0x20809062` | "V/F directory and status" | `9061` **is** a GSP row @**776**; `9062` is **not** in the table | the 582.41-numbered VFP pair does *not* map onto these sizes | `776 = 8 + 32*24`: 2 head masks (`0xFF`/`0x7FF`) + 11 filled per-domain records carrying a kHz-magnitude value | `--clkvf-read`, `--clkctl-hex` | `9061` readable and **live** (matches RUSD GPC/MCLK sample-for-sample); `9062` at every documented size -> `0x1f` |
 | 5 | `0x2080b213` | "voltage-rail control read" | GSP table @**1036** | `voltrails-family-full-layout-r610.md` | out: mask `0xFF` + `32 x 32` B records (all zero at stock) | `--tierb-read` (now walks the whole VOLT read half) | healthy: `NV_OK`; **wedged: `0x62`** |
@@ -1407,7 +1407,9 @@ will be until either
 > **Superseded in part by §15 (same day):** the counter-prefill instrument shows the
 > header is 60 B / 14 written dwords, the mask is at `+4`, and a record writes 13 dwords
 > (`+0`, `+8..+44`, `+52`, `+56`). The `106` count below is flagged in §15.4 as an open
-> accounting item. The *field-identity* conclusion (G1 still open) is unchanged.
+> accounting item and **resolved in §18**: it is `14 + 7*13 + 1`, and this
+> paragraph's "2 header dwords + 8 records x 13" is a miscount of its own
+> truncated printout. The *field-identity* conclusion (G1 still open) is unchanged.
 
 The instrument was fixed accordingly (commit `81ae055`): `--clkctl-hex`'s
 **first** case now runs `0x2080901b` with `mask@+4 = 0xFF` on an **0xA5
@@ -1598,7 +1600,10 @@ record's writes are:
 | `+4`, `+48`, `+60` | *not written* | stay at their seed |
 
 So twelve value dwords per record, and `2108 = 60 + 32*64` is the true
-geometry with a 60 B header (not the "2 header dwords" of §14.1).
+geometry with a 60 B header (not the "2 header dwords" of §14.1). The value
+block is **type-conditional and all-or-nothing** (§18): twelve value dwords
+for types `08`/`09`, none for type `03`. The table above is the type-`08`/`09`
+shape.
 
 ### 15.4 What this settles, and the one open accounting item
 
@@ -1612,6 +1617,14 @@ geometry with a 60 B header (not the "2 header dwords" of §14.1).
   *printer* was truncated at 40 lines (§14.1), so its counter is not
   trustworthy. The counter instrument (fixed build) is authoritative; re-run
   the `0xA5` case after the wedge clears to close this.
+  **Resolved in §18 (same day, static):** the surviving prefix is complete for
+  the header (14 dwords) and for the first two records (13 each = the 40 kept),
+  and `0x20809019`'s directory supplies the type of every remaining entry. The
+  exact identity `106 = 14 + 7*13 + 1` follows, where the single type-`03` entry
+  writes its stamp and no value dwords; `106` was never an anomaly. §14.1's
+  "2 header dwords + 8 x 13" and §10's "other types 11" are both retracted
+  there. The re-run remains worth doing as a *falsification test*, not as an
+  accounting errand.
 * **Unchanged: the field identity (G1) is still open.** §15.3 narrows the
   candidate slots to those twelve dwords but cannot name them: all twelve are
   zero at stock, and a zero-valued write set cannot self-identify. `rec+8`
@@ -1860,4 +1873,84 @@ pair, both sizes are equal, and the missing piece is still the *field identity*
 inside the 64 B record (§15.3). What it fixes is the surrounding map — the 63
 pairs are now enumerable from the table alone, and the false `0x2080852a` pair
 is retracted before it could be used to justify a write to a read-only control.
+
+## 18. The `0xA5` run's 106 is accounted for, and the "other types write 11" claim is retracted (2026-10-17, static; already-recorded bytes only)
+
+§15.4 left one open item: the `0xA5` battery reported
+`106/527 dwords changed` for `0x2080901b@2108` with `mask@+4 = 0xFF`, while the
+record model of §15.2/§15.3 predicts `14 + 8*13 = 118` for eight selected
+entries and `14 + 7*13 = 105` for seven. Neither is 106. Two documents then
+described the residue differently and inconsistently: §14.1 as
+"2 header dwords + 8 records x 13", §10 row 2 as "types `08`/`09` records write
+13 slots, other types 11". **Both are wrong, and the same already-recorded
+bytes settle the count exactly.**
+
+**The complete, non-truncated part of that print is authoritative on two
+points.** The surviving delta print keeps 40 of the 106 dwords and it is not a
+sample — it is a prefix: it runs from `+0` to `+180` and stops. In that prefix:
+
+* the 60 B header writes **14** dwords, not 2: `+0`, `+8`, `+12`, `+16`, `+20`,
+  `+24`, `+28`, `+32`, `+36`, `+40`, `+44`, `+48`, `+52`, `+56` (`+4` is not
+  written — it is the input mask). So §14.1's "2 header dwords" is a miscount of
+  its own printout.
+* record 0 (type stamp `08 08`) and record 1 (type stamp `09 09`) each write
+  **13** dwords — `+0`, `+8..+44`, `+52`, `+56`, with `+4`/`+48`/`+60` never
+  touched. That is 14 + 13 + 13 = **40**, exactly the number of dwords the print
+  kept.
+
+**The remaining 66 dwords belong to the six entries the printer cut off**, and
+they are handed to us with a type for each, because `0x20809019`'s lossless dump
+is a *directory* in the same entry order (§14.1/§14.3) and each of its records
+carries its own type stamp and domain bit:
+
+```
+directory (entry:domain_bit:type) =
+  0:1(bit 0):0x0808   1:2(bit 1):0x0909   2:16(bit 4):0x0808  3:4(bit 2):0x0909
+  4:8(bit 3):0x0909   5:1048576(bit 20):0x0909   6:524288(bit 19):0x0303
+  7:64(bit 6):0x0808  8:2097152(bit 21):0x0909   9:32(bit 5):0x0909
+```
+
+`mask 0xFF` selects entries 0..7, i.e. types
+`[08, 09, 08, 09, 09, 09, 03, 08]` — and entries 0 and 1 of that list are the
+two the print *did* show, with the types `08` and `09` it reported. The order is
+therefore confirmed by the print, not assumed from it.
+
+Now the arithmetic is forced. Entries 0 and 1 measure 13 written dwords for
+types `08` and `09`. Five of the six cut-off entries (2, 3, 4, 5, 7) carry those
+same two types, so if the write set is a function of the record type — the only
+thing that can distinguish them, since §15.3's layout is uniform — those five
+write 13 each: 65. Entry 6 is the **single type `03` record**, and
+`66 - 65 = 1`, i.e. the type-`03` entry writes **only its own type stamp and no
+value dwords at all**:
+
+```
+106 = 14 (header) + 7 x 13 (the seven type 08/09 entries) + 1 (the type 03 entry)
+```
+
+So the count is not anomalous; it is exact, and it is exact only under the
+type-conditional reading. The competing model — *"other types write 11"* —
+requires entries 2/3/4/5/7 to write 11 dwords each while entry 0 (type `08`)
+writes 13, i.e. two records of one type with different write sets. **Retracted.**
+
+What this buys, and what it does not:
+
+* It closes §15.4's accounting item with no new GPU request, and it removes the
+  last reason to doubt the `0xA5` counter.
+* It makes the *value block* type-conditional **all-or-nothing**: a type-`03`
+  entry has no value dwords, a type-`08`/`09` entry has twelve. It does **not**
+  narrow the twelve to a pair — the earlier hope that the type difference would
+  isolate an offset-shaped dword *pair* is dead, and with it the idea that the
+  field could be named from the write set alone. Field identity still needs
+  §15.3's two instruments: a non-zero value dword, or a gated single-step SET
+  with same-field read-back.
+* It gives the post-wedge lossless run (§14.1's fixed `--clkctl-hex` battery,
+  first case = `0xA5` + `mask@+4 = 0xFF`) a **falsifiable prediction** instead of
+  an illustration: header 14 dwords; entries 0, 1, 2, 3, 4, 5, 7 with 13 dwords
+  each; entry 6 with **1** dword (its stamp, expected `03 03` at byte
+  `60 + 6*64 = 444`); `+4`/`+48`/`+60` never written in any entry; total 106.
+  Any other split falsifies the type-conditional model — which is the point of
+  running it.
+
+**Safety status unchanged:** read-only. No SET, no privilege change, no driver /
+EFI / boot-args change, no reboot, no PR.
 
