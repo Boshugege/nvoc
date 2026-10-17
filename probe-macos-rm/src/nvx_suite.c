@@ -1956,6 +1956,20 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
      *   mask 0x3FF -> all ten    : the eight above plus +572 09, +636 09
      * A 0x25 answer would instead mean the value is out of range for this
      * field, which is a benign rejection (seen many times on this id).
+     *
+     * The first case is the same request on an 0xA5 background, which is the
+     * one form whose write set is observable end to end.  Its prediction, read
+     * off the 2026-10-17 offsetsweep run (which reported "106/527 dwords
+     * changed, first @0 last @564" but could only print 40 of them):
+     *   - 106 of 527 dwords differ from the seed  (2 header + 8 records * 13)
+     *   - the last differing dword is entry 7's rec+56 = 60 + 7*64 + 56 = 564
+     *   - per selected entry i: rec+0 becomes a5a508 08 / a5a509 09 (the two
+     *     type bytes only, +2/+3 stay untouched) and rec+8..+44, rec+52,
+     *     rec+56 become 00000000
+     *   - rec+4, rec+48 and rec+60 stay a5a5a5a5 for every entry
+     * If the hex dump of the bg=A5 case shows anything else -- in particular a
+     * non-zero value dword -- that dword is a live field of this handler and
+     * the first such one is the current-offset candidate G1 has been missing.
      */
     static const struct {
         const char *name;
@@ -1963,23 +1977,35 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
         unsigned size;
         unsigned mask_off;   /* ~0u = no mask field */
         NvU32 mask;
+        /* Every dword is preset to this before the mask is seeded; 0 = the
+         * zero background every other case uses.  Exactly one case uses a
+         * non-zero background: 0x2080901b with the one mask value that was
+         * measured to answer NV_OK under 0xA5 (2026-10-17 offsetsweep).
+         * That combination is what makes this dump a *lossless record of the
+         * handler's write set*: the handler writes 13 dwords per selected
+         * record and 12 of them are zero at stock, so on a zero background
+         * "wrote zero" and "never touched" are indistinguishable -- on 0xA5
+         * the untouched dwords stay a5a5a5a5 and the written zeros show up as
+         * 00000000.  Only 0x2080901b has this licence: 0x20809026 latched the
+         * session-wide wedge when it was fed 0xA5, so it is refused outright. */
+        NvU32 prefill;
     } cases[] = {
-        { "domains-get-control 0x2080901B @2108 in@4=0xFF", 0x2080901bu, 2108u,
-          4u, 0x000000ffu },
+        { "domains-get-control 0x2080901B @2108 in@4=0xFF bg=A5", 0x2080901bu, 2108u,
+          4u, 0x000000ffu, 0xa5a5a5a5u },
         { "domains-get-control 0x2080901B @2108 in@4=0x3FF", 0x2080901bu, 2108u,
-          4u, 0x000003ffu },
+          4u, 0x000003ffu, 0u },
         { "domains-get-control 0x2080901B @2108 in@4=0x1", 0x2080901bu, 2108u,
-          4u, 0x00000001u },
+          4u, 0x00000001u, 0u },
         { "domains-get-control 0x2080901B @2108 in@4=0",    0x2080901bu, 2108u,
-          4u, 0x00000000u },
-        { "freq-ctrl-info   0x20809025 @7188",  0x20809025u, 7188u,  ~0u, 0u },
-        { "domains-get-info 0x20809019 @12336", 0x20809019u, 12336u, ~0u, 0u },
+          4u, 0x00000000u, 0u },
+        { "freq-ctrl-info   0x20809025 @7188",  0x20809025u, 7188u,  ~0u, 0u, 0u },
+        { "domains-get-info 0x20809019 @12336", 0x20809019u, 12336u, ~0u, 0u, 0u },
         /* 524 = 12 + 8*64: the same 64 B record family with an 8-record table.
          * It answered NV_OK at exactly this size before the wedge (the earlier
          * "rejected" reading was a size artifact: 524 is the GSP's value, not
          * 10x68 or 32x68).  Zero background, full dump. */
-        { "vfpoints-get       0x208090A2 @524",  0x208090a2u, 524u,   ~0u, 0u },
-        { "gc-1d             0x2080901D @32680", 0x2080901du, 32680u, ~0u, 0u },
+        { "vfpoints-get       0x208090A2 @524",  0x208090a2u, 524u,   ~0u, 0u, 0u },
+        { "gc-1d             0x2080901D @32680", 0x2080901du, 32680u, ~0u, 0u, 0u },
     };
 
     if (!c->hSubdevice) {
@@ -2002,13 +2028,19 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
             continue;
         }
 
-        unsigned char *buf = calloc(1, size);
-        if (!buf) {
+        unsigned char *buf = malloc(size), *seed = malloc(size);
+        if (!buf || !seed) {
             nvx_emit(c, "V2.clkctl", name, 0, NVX_V_HARD, "buffer alloc failed");
+            free(buf); free(seed);
             continue;
         }
+        memset(buf, 0, size);
+        if (cases[i].prefill)
+            for (unsigned d = 0; d < size / 4; ++d)
+                memcpy(buf + 4 * d, &cases[i].prefill, 4);
         if (cases[i].mask_off != ~0u)
             memcpy(buf + cases[i].mask_off, &cases[i].mask, 4);
+        memcpy(seed, buf, size);
 
         NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
                                   cases[i].cmd, buf, size);
@@ -2016,7 +2048,7 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
             nvx_emit(c, "V2.clkctl", name, st, NVX_V_REJECTED,
                      "cmd 0x%08x size %u -> 0x%08x (%s)", cases[i].cmd, size,
                      st, nvx_status_name(st));
-            free(buf);
+            free(buf); free(seed);
             if (nvx_status_is_wedge_stop(st)) {
                 nvx_emit(c, "V2.clkctl", name, st, NVX_V_HARD,
                          "STOP: aborting the remaining hex dumps");
@@ -2025,9 +2057,22 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
             continue;
         }
 
+        /* dword-level diff against the seed: this counts the handler's writes
+         * even when it writes zero, which the hex dump alone cannot do on a
+         * zero background.  It is the lossless replacement for the 0xA5
+         * offsetsweep's truncated delta printer (106 declared / 40 kept). */
+        unsigned changed = 0, first = 0, last = 0;
+        for (unsigned o = 0; o + 4 <= size; o += 4) {
+            if (memcmp(buf + o, seed + o, 4) == 0) continue;
+            ++changed;
+            if (!first) first = o;
+            last = o;
+        }
         nvx_emit(c, "V2.clkctl", name, st, NVX_V_OK,
-                 "cmd 0x%08x size %u -> NV_OK, %u-byte hex follows",
-                 cases[i].cmd, size, size);
+                 "cmd 0x%08x size %u bg=0x%08x -> NV_OK, %u/%u dwords differ "
+                 "from the seed (first @%u last @%u), %u-byte hex follows",
+                 cases[i].cmd, size, cases[i].prefill, changed, size / 4,
+                 first, last, size);
         for (unsigned o = 0; o < size; o += 16) {
             unsigned n = size - o < 16 ? size - o : 16;
             char t[128];
@@ -2038,7 +2083,7 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
             t[tn] = 0;
             nvx_emit(c, "V2.clkctl", name, st, NVX_V_OK, "%s", t);
         }
-        free(buf);
+        free(buf); free(seed);
     }
     return 0;
 }

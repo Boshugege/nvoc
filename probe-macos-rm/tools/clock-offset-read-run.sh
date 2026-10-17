@@ -9,7 +9,13 @@
 #                     AUTHORITATIVE record of their contents: 0x2080901b with
 #                     its mask seeded at +4 (0xFF, 0x3FF, 0x1, then 0x0 --
 #                     see the PREDICTIONS block in nvx_suite.c, which this
-#                     run is meant to falsify or confirm), 0x20809025,
+#                     run is meant to falsify or confirm).  The first of
+#                     those four runs on an 0xA5 background: that is the only
+#                     form whose write set is observable, because the handler
+#                     writes 13 dwords per record and 12 of them are zero at
+#                     stock.  It is the same request that already answered
+#                     NV_OK pre-wedge, and it replaces the delta printout that
+#                     lost 66 of its 106 changed dwords.  0x20809025,
 #                     0x20809019, and 0x2080901d last (it was only ever read
 #                     with a 0xA5 background, and a timeout on it must not cost
 #                     the other blocks).  The 0xA5 sweep's own delta printout
