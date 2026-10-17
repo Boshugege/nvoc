@@ -17,7 +17,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         Ok(())
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons. Performance writes stay gated: the clock SET twin (0x2080D01C) is identified, but no write is issued until the current value, the bounded step and the restore path are verified on the device.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons. Performance writes stay gated twice over: the clock SET twin (0x2080D01C) carries the legacy privileged bits (`0x2080901B | 0x4000`), so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the current value, the bounded step and the restore path are verified on the device.",
             command.name()
         )))
     }

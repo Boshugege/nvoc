@@ -61,6 +61,15 @@ VERIFIED = {
     0x2080B213: "recorded payload: 12 B head + 32x32 B",
 }
 
+# Record dwords that are really a signed 16-bit PAIR (measured pattern, not a
+# name): 0x20809019's rec+44 reads 0x03e8fc18 / 0x0bb8fc18 on two domains, i.e.
+# (-1000,+1000) and (-1000,+3000) as two i16s, while the same slots read as a
+# nonsensical 65600536 / 196672536 as one i32.  Printed as a second column so
+# the raw dword stays visible.  Unit and field meaning are NOT established.
+PAIRS = {
+    0x20809019: {44: "i16 pair"},
+}
+
 # Same RM struct as another id (the GET/SET twin shares paramSize, §5.2).
 INHERITS = {0x2080D01C: 0x2080901B}
 
@@ -166,6 +175,12 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
                 label = f"+{off}({name})="
             shown = f"{value}" if not name else f"{signed}"
             words.append(f"{label}0x{value:08x}/{shown}")
+        if mid in PAIRS:
+            for off, label in sorted(PAIRS[mid].items()):
+                if off + 4 > len(record):
+                    continue
+                lo, hi = struct.unpack_from("<hh", record, off)
+                words.append(f"<+{off} {label} = [{lo}, {hi}]>")
         print(f"  rec{index:<2} @+{base}: " + " ".join(words), file=out)
     if not populated:
         print("  (no populated record)", file=out)
@@ -201,6 +216,19 @@ def selftest() -> int:
     for needle in ("max_vf_khz", "1638400", "offset_floor_khz", "-18750",
                    "offset_ceiling_khz", "18750", "rec2"):
         assert needle in report, needle
+    # 0x20809019 rec+44 is a signed i16 pair on the live payloads (-1000/+1000
+    # and -1000/+3000); the pair column must render it as such, not as i32.
+    buf19 = bytearray(GEOMETRY[0x20809019][0])
+    base19 = GEOMETRY[0x20809019][1]
+    struct.pack_into("<HH", buf19, base19, 0x0808, 0x0001)
+    struct.pack_into("<I", buf19, base19 + 4, 0x1)
+    struct.pack_into("<i", buf19, base19 + 44, -1000)
+    struct.pack_into("<H", buf19, base19 + 46, 1000)
+    sink = io.StringIO()
+    assert decode(0x20809019, GEOMETRY[0x20809019][0], bytes(buf19), sink) == 0
+    report19 = sink.getvalue()
+    assert "i16 pair = [-1000, 1000]" in report19, report19
+    assert "65600536" in report19, report19
     assert decode(0x20809025, 2108, bytes(buf), sink) == 2, "size guard"
     assert decode(0x20801234, 4, b"\0" * 4, sink) == 2, "unknown id guard"
     print("selftest ok: geometry + round-trip + field decode")

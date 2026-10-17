@@ -555,6 +555,16 @@ The `rec+4` values are single bits of a 22-bit domain mask (bits 0,1,4,2,3,20,
 "domain type" on this part. Whether the `rec+40/+44` kHz-scale words are limits
 or current values is **not** established here and must not be assumed.
 
+One measured shape is worth recording, because it is the *second* place in this
+family where a per-domain limit pair lives: `rec+44` reads `0x03e8fc18` on
+domain bit `0x1` and `0x0bb8fc18` on bit `0x10`, which as one `i32` is the
+nonsensical `65600536` / `196672536` but as two **`i16` halves** is
+`(-1000, +1000)` and `(-1000, +3000)`. Two of ten records carry it, both with
+the same floor, so "a pair" is the better reading -- but the unit, and whether
+it is an offset range, a step range or something else, are **not** closed by
+this. `tools/decode-clk-containers.py` prints that slot both ways (raw dword and
+`i16 pair`) so nobody has to choose before the evidence does.
+
 ### 5.2 GET -> SET pairing inside the legacy CLK block (a table fact)
 
 The GSP export table lists both directions. Inside the clock/voltage block the

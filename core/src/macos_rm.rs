@@ -86,11 +86,13 @@ pub struct DeviceStatus {
 pub struct SettingsCapabilities {
     /// The backend can report the driver's current configuration.
     pub settings_read: bool,
-    /// The backend can change configuration. Still false on macOS: the GSP
-    /// method table does contain the GET/SET twins (0x2080901B pairs with
-    /// 0x2080D01C), but a write stays gated until the current value, a bounded
-    /// step and the restore path are verified on the device. See
-    /// [`DeviceSettings::notes`].
+    /// The backend can change configuration. Still false on macOS, for two
+    /// independent reasons: the GSP method table does contain the GET/SET twins
+    /// (0x2080901B pairs with 0x2080D01C) but every private write id carries the
+    /// legacy privileged bits, so an unprivileged client is refused with
+    /// `0x1b` before the GSP is reached; and even behind that gate a write
+    /// stays gated until the current value, a bounded step and the restore path
+    /// are verified on the device. See [`DeviceSettings::notes`].
     pub settings_write: bool,
     /// The backend can put a saved configuration back. Only meaningful once
     /// `settings_write` is true.
