@@ -107,13 +107,14 @@ pub struct SettingsCapabilities {
 /// exactly the 92 write-half ids and nothing else), not a missing control.
 pub const WRITE_NEEDS_PRIVILEGE_REASON: &str = "needs a write, and a private SET is refused below root on this host: the write half carries the legacy privileged bits (0x2080D01C = 0x2080901B | 0x4000), so no SET has been issued (see notes)";
 
-/// Fan control, the one family whose published surface really is absent: the
-/// SDK's own `ctrl2080fan.h` is a FINN-generated file with no definitions, and
-/// the whole control-header tree mentions "cooler" zero times. That is a fact
-/// about the published headers, not about the driver, so the private thermal
-/// read half -- 31 read-half ids, not one of them read yet -- keeps this family
-/// short of "the driver has no such control".
-pub const FAN_CONTROL_UNREADABLE_REASON: &str = "no fan entity in the published controls (ctrl2080fan.h is an empty generated stub; the control headers never say \"cooler\"), and the private thermal read half (31 read-half ids) has not been read yet, so this is unlocated rather than absent (see notes)";
+/// Fan control, the family whose published surface really is absent: the SDK's
+/// own `ctrl2080fan.h` is a FINN-generated file with no definitions, and no
+/// `NV2080_CTRL_CMD_*FAN*`/`*COOLER*` macro exists anywhere in the control-header
+/// tree. That is a fact about the published headers, not about the driver -- and
+/// since this round there is a *named* candidate instead of an unknown one, taken
+/// from the in-tree NVAPI copy rather than from a scan. It has also been issued
+/// once: see the reason string and the notes for what came back.
+pub const FAN_CONTROL_UNREADABLE_REASON: &str = "no fan value is published yet, but this family now has a named candidate rather than an unknown one: the RM SDK declares no fan control at all (its only fan artifact is a 33-line FINN stub with no declarations, and no NV2080_CTRL_CMD_*FAN/COOLER* macro exists in the tree), so the id was taken from the in-tree NVAPI copy, which names the fan-policy command it wraps as RM 0x20800532 reached through escape 0x07000038 and filling a 232-byte internal fanPolicyInfo table (dword 0 = policy mask, byte +4 = active policy index); on this host only the private twin 0x20808532 is in the method table (paramSize 336, read half), and it has now been issued once -- it returned 0x62 NV_ERR_RESET_REQUIRED, the same wall every GSP-forwarded control hits while the reset is still pending, so the call is dispatchable and the wedge is the only obstacle standing between this candidate and a reading, while the documented public id answered 0x56 NV_ERR_NOT_SUPPORTED, which is also what this host says for public ids the chip genuinely lacks, so only a healthy session can settle whether the public half carries it; the candidate is prepared as probe --fan-read (336 B on an 0xA5 background, so an unwritten field keeps 0xA5 and a written zero stays distinguishable) and the remaining 0x85 read ids stay unread, so nothing about fan rpm, its range or its restore path is claimed yet (see notes)";
 
 /// The VF family is the opposite case: its reads exist, are non-privileged, and
 /// have simply never been issued, because the current priority is the offset

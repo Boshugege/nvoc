@@ -1098,6 +1098,100 @@ static void item_thermal_reads(nvx_ctx *c)
     }
 }
 
+/* Fan-policy read (--fan-read): the fan family's only *named* candidate.
+ *
+ * The RM SDK declares no fan control at all. The whole SDK tree's single fan
+ * artifact is ctrl2080fan.h, a FINN-generated stub that declares nothing, and no
+ * NV2080_CTRL_CMD_*FAN/COOLER* macro exists anywhere in it. So neither SUBCTL()
+ * nor a header struct is available here, and the id has to come from somewhere
+ * else: the in-tree nvapi-rs copy names the command behind its own fan-policy
+ * GetInfo -- RM 0x20800532 through escape 0x07000038, filling a 232-byte
+ * internal fanPolicyInfo table whose dword 0 is a policy mask (at most 16 bits,
+ * indices >= 0x10 rejected by that handler) and whose byte +4 is the active
+ * policy index.
+ *
+ * On this host the method table carries only the private twin 0x20808532
+ * (paramSize 336); the documented public id is *not* in the table. Both are
+ * therefore asked, so that "the table omits it" and "the driver refuses it"
+ * stay distinguishable instead of being assumed.
+ *
+ * Read-only: 0x20808532 has bit 0x8000 but not 0xC000, i.e. it is in the read
+ * half; the check below refuses anything that is not, rather than trusting the
+ * family. (The shared SET-id list is defined further down this file, so this
+ * function tests the documented read-half bits itself.)
+ *
+ * The block starts filled with 0xA5, so a field the handler never wrote keeps
+ * 0xA5 and "written as zero" stays distinguishable from "not written". Nothing
+ * interprets the layout beyond the documented head: the RM block is 336 bytes
+ * and the documented table is 232, so where that table sits is not known yet.
+ */
+#define NVX_FAN_CMD_PRIVATE 0x20808532u
+#define NVX_FAN_CMD_PUBLIC  0x20800532u
+#define NVX_FAN_BYTES       336u
+
+static void item_fan_read(nvx_ctx *c, NvU32 cmd, const char *name)
+{
+    static const unsigned char bg = 0xA5;
+    unsigned char *buf = malloc(NVX_FAN_BYTES);
+    if (!buf) {
+        nvx_emit(c, "V2.fan", name, 0, NVX_V_HARD, "buffer alloc failed");
+        return;
+    }
+    if ((cmd & 0xC000u) == 0xC000u) {
+        nvx_emit(c, "V2.fan", name, 0, NVX_V_HARD,
+                 "REFUSED: 0x%08x is in the write half, not sent", cmd);
+        free(buf);
+        return;
+    }
+    memset(buf, bg, NVX_FAN_BYTES);
+    NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                              cmd, buf, NVX_FAN_BYTES);
+    if (st != 0) {
+        nvx_emit(c, "V2.fan", name, st, NVX_V_REJECTED,
+                 "cmd 0x%08x size %u -> %s%s", cmd, NVX_FAN_BYTES,
+                 nvx_status_name(st),
+                 (st == 0x62u || st == 0x65u)
+                     ? " (the wedge codes: stop, do not sweep)" : "");
+        free(buf);
+        return;
+    }
+
+    unsigned nz = 0, zeros = 0, untouched = 0, first_nz = 0, last_nz = 0;
+    for (unsigned o = 0; o < NVX_FAN_BYTES; ++o) {
+        if (buf[o] == bg) { ++untouched; continue; }
+        if (!buf[o]) { ++zeros; continue; }
+        ++nz;
+        if (!first_nz) first_nz = o;
+        last_nz = o;
+    }
+    NvU32 head[4];
+    for (unsigned i = 0; i < 4; ++i) memcpy(&head[i], buf + 4 * i, 4);
+    nvx_emit(c, "V2.fan", name, 0, NVX_V_OK,
+             "cmd 0x%08x size %u: non-zero %u B (first @%u last @%u), "
+             "written-zero %u B, untouched 0x%02x %u B; head %08x %08x %08x %08x",
+             cmd, NVX_FAN_BYTES, nz, first_nz, last_nz, zeros, bg, untouched,
+             (unsigned)head[0], (unsigned)head[1],
+             (unsigned)head[2], (unsigned)head[3]);
+    nvx_emit(c, "V2.fan", name, 0, NVX_V_OK,
+             "if the documented fanPolicyInfo table starts at +0: policy mask "
+             "0x%08x (%s), active policy index %u",
+             (unsigned)head[0],
+             (head[0] <= 0xffffu) ? "within the documented 16 bits"
+                                  : "wider than documented",
+             (unsigned)(buf[4]));
+}
+
+int nvx_stage2_fan_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.fan", "fan-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_fan_read(c, NVX_FAN_CMD_PRIVATE, "fan-private-0x20808532");
+    item_fan_read(c, NVX_FAN_CMD_PUBLIC, "fan-public-0x20800532");
+    return 0;
+}
+
 int nvx_stage2_thermal_read(nvx_ctx *c)
 {
     if (!c->hSubdevice) {

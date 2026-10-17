@@ -148,6 +148,10 @@ static void usage(void)
         "                   only, no scan\n"
         "  --thermal-read   read-only THERMAL_SYSTEM_EXECUTE_V2 GET batch\n"
         "                   (sensor count/readings/ranges; public opcodes)\n"
+        "  --fan-read       read-only fan-policy GET: the private 0x20808532 and\n"
+        "                   the documented public 0x20800532, both at 336 B on an\n"
+        "                   0xA5 background (the SDK declares no fan control, so\n"
+        "                   the id comes from the in-tree NVAPI copy)\n"
         "  --service S      pin the user client: nvrm | nvaccel | auto (default\n"
         "                   auto = NVAccel first, NVRM fallback); read-only, picks\n"
         "                   which kext answers the same control id\n"
@@ -224,6 +228,7 @@ int main(int argc, char **argv)
     unsigned clkoff_bit = 0, clkoff_off = 0;
     int clkoff_delta = 0;
     int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
+    int fan_read = 0;
     int anchor_read = 0;
     int clklevel_read = 0, clkdom_read = 0, clkctl_read = 0, clkctl_hex = 0;
     int clkctl_offsweep = 0, clkvf_read = 0;
@@ -256,6 +261,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--rated-tdp-read")) rated_tdp_read = 1;
         else if (!strcmp(argv[i], "--anchor-read")) anchor_read = 1;
         else if (!strcmp(argv[i], "--thermal-read")) thermal_read = 1;
+        else if (!strcmp(argv[i], "--fan-read")) fan_read = 1;
         else if (!strcmp(argv[i], "--pm-read")) pm_read = 1;
         else if (!strcmp(argv[i], "--perf-read")) perf_read = 1;
         else if (!strcmp(argv[i], "--clklevel-read")) clklevel_read = 1;
@@ -396,6 +402,11 @@ int main(int argc, char **argv)
     if (thermal_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_thermal_read(&g_ctx) != 0) rc = 1;
+    }
+
+    if (fan_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_fan_read(&g_ctx) != 0) rc = 1;
     }
 
     if (pm_read) {
