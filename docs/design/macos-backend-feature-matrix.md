@@ -679,3 +679,23 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **新增硬件测试**（`core/tests/macos_rm_readonly.rs`，`#[ignore]`，重启后**第一个该跑**的用例）：断言活体应答的**形状**（掩码非零、记录非空、条目按索引升序）并**打印数值**——数值来自抓取而非断言，常量漂移无法藏在断言里。
 
 **验证范围**：`fmt --all --check` rc=0；`clippy -p nvoc-core --all-targets -- -D warnings` rc=0；`cargo test -p nvoc-core --all-targets` = 86 lib（含新增「掩码为 0 则无记录」用例）+ 5 fixture + 15 non-GPU 全过 / 0 失败；硬件二进制新增门控用例后 7 ignored（原 6）。**行为确认需活的 GSP**，故推迟到重启后（wedge 仍以 `0x62` 拒绝会话本身）。分类：**已实现、待实测**（拒绝路径已实测）。**未发出**：任何性能 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。
+
+### 本轮追加十六（2026-10-17，风扇/功耗/温度三族独立只读审计 + 「实测零」范围收缩）
+
+**独立审计**：新增 [macos-fan-power-thermal-audit.md](macos-fan-power-thermal-audit.md)，按 goal 要求把三族**分开**给「可读 / 可解释 / 范围 / 原状态 / 恢复」，每条标注证据等级（**探针实测** / **后端实测** / **头文件事实**），使"偏移通道受阻"不能用来宣布传感器族不可用。摘要：
+
+| 族 | 结论 | 分类 |
+| --- | --- | --- |
+| 温度（GPU） | 两条独立读面均实测可用（公开在树 `THERMAL_SYSTEM_EXECUTE_V2` 0x20800513 paramSize 1432、1 target(type 1=GPU)/1 sensor、range `[0,127]`、reading 47；RUSD `temperature_c` 44.46–51.90 °C，两路一致） | 读：已实现且实测；写：待授权 |
+| 温度（显存/板/电源） | **实测缺失**（`UNPUBLISHED_ON_THIS_GPU` 6 项，带原因，不造值） | 不适用本卡 |
+| 功耗：enforced limit + 实时功耗 | 实测（`limit 100000` mW = 100 W 恰为额定 TDP；idle tgp 11.3–11.5 W） | 读：已实现且实测 |
+| 功耗：min/rated/max 窗口 | `GET_EDPP_LIMIT_INFO` 0x20800AFD **实测 `0x56`**；四个内部 PM GET 全 `0x56` ⇒ 内部写候选整块不可达 | 驱动明确拒绝 |
+| 功耗：RATED_TDP 仲裁 | 实测 5 client 全 `DEFAULT(0)`、越界 client 0x1f（查找经校验）；派生 STATUS id `0x56`（**id 仍属推导，未确认**） | 实现待实测（SET 门控未发） |
+| 风扇转速 | **实测可读且转过**（一次记录 1654 rpm，同批温度最低 44.46 °C；其余记录 0 rpm @ 48.65–51.90 °C ⇒ 测速表可用、无源空闲真实） | 读：已实现且实测 |
+| 风扇控制（目标值） | `ctrl2080fan.h` 定义 **0 个** `NV2080_CTRL_CMD_*`（`ctrl2080volt/clkavfs/pmumon.h` 同）⇒ 公开面无法控，写面在 GSP boardobj/cooler 族 | 调查未定位（范围明确） |
+
+**方法学收获（写进文档）**：把记录**重新读一遍**而不是读探针自己的总结，纠正了两条陈述——风扇**转过**（1654 rpm）而非只有 0；`average_power_mw` 读到带符号 `-1` 而非"字段缺失"。这正是 goal 里"不能用二手描述代替原始证据"的一条实例。
+
+**「实测零」范围收缩**（`core/src/macos_rm.rs`）：偏移族原因文本改为**只在实测掩码覆盖范围内**断言零——掩码是调用方输入（处理器不回写）、记录运行填 `0xFF`、只覆盖 10 条目录的前 8 条，故索引 8/9 **未测**；更宽掩码与 `0x0` 掩码已在既有 runbook 计划内（`0x0` 支可直接证实上一轮的掩码缺陷结论）。
+
+**验证范围**：`fmt --all --check` rc=0；`clippy -p nvoc-core --all-targets -- -D warnings` rc=0；`cargo test -p nvoc-core --all-targets` = **86 + 5 + 15 全过 / 0 失败**（硬件事门控 7+36+8 ignored）。**产品路径实测**：重建 `nvoc-cli` 后，楔形机上 `get-settings --macos-rm` 打出的正是新原因文本，域列表仍 `null`（会话本身被 `0x62` 拒绝）。**未发出**：任何性能 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。
