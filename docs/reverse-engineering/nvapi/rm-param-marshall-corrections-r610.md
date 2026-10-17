@@ -1177,3 +1177,25 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - 测试机（macOS，`OGKM=` 带上）：`cargo build -p nvoc-core -p nvoc-cli` 通过 ✔ ⇒ macOS 门控代码与 **CLI 自身 macOS 路径**均编译 ✔；`nvapi-sys` 的 `unused variable: id` 警告为**既有** ✗、与本轮无关 ✔。
 - 覆盖前核对 ✔：三个改动文件在测试机上的 sha256 与 `c3f24e1` 提交态**逐一相同** ✔ ⇒ 未覆盖新工作 ✔。
 - **设备侧：本轮未读** ✗ —— 无重启，uptime `1 day, 3:48`（同一 boot ✔）；因此 `clock_offsets` 状态 = **已实现待实测** ✔。未执行任何写入 ✔，写入门槛保持关闭 ✔。
+
+## 33. 人读输出验证：`clock_offsets` 能显示，但暴露出一处**真实的错渲染**（2026-10-18）
+
+**选择依据** ✔：第 32 轮把"CLI 人读格式器是否显示 `clock_offsets`"记为**尚未确认** ✗。本轮先读代码确认 `format_get_settings_output` 是**按键泛化**的 ✔（对 `Value::Array` 走"标题＋子块"✔）⇒ 该问题可用**测试**而非设备答复 ✔。
+
+### 33.1 用测试提问，结果发现缺陷 ✔
+新增用例渲染一份 get-settings 形状的载荷（含 `clock_offsets` 两条记录 ✔）并断言字段与数值出现在人读输出里 ✔。**首次运行即失败** ✗，实际渲染：
+```
+  Clock Offsets
+    Domain Bit: 0.001 MHz
+    Frequency kHz: 1530 MHz
+```
+⇒ 根因定位到 `cli/src/output.rs` 的 `format_contextual_scalar` ✔：它对**上下文键**含 `clock`/`frequency` 的**所有**数值叶子做 kHz→MHz 缩放 ✗ ⇒ 对旁边的频率是对的 ✔，对**位索引**是错的 ✗（`domain_bit: 1` → `0.001 MHz` ✗）。
+### 33.2 修复（最小、带语义理由）✔
+新增一条**目标化豁免**：叶子名以 `_bit` 结尾者按原样数字渲染 ✔（"位永远不是频率" ✔）。该规则与文件既有的定向豁免风格一致（`value_key == "lanes"`、per-rail 瓦数、非 domain 的电压 ✔）。
+**回归证据** ✔：`cargo test -p nvoc-cli` **82 passed / 0 failed** ✔，其余 81 例未变 ✔ ⇒ 既有已验收输出所依赖的缩放未被扰动 ✔；修复后渲染为 `Domain Bit: 1` ✔。
+### 33.3 保留的已知渲染怪癖（记录，不改）✔
+同上下文里 `offset_khz: -1` 渲染为 `-0.001 MHz` ✗：**数值正确**（偏移本就是频率差 ✔）但丢掉了字段名承诺的 kHz ✗ ⇒ 为保持本轮改动最小**未改** ✔，记为待决 ✔。
+### 33.4 实际验证范围 ✔
+客户端：`cargo fmt --all -- --check` 干净 ✔；`cargo test -p nvoc-cli` 82 passed ✔；`cargo test -p nvoc-core --all-targets` 94 passed ✔；`clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 干净 ✔。测试机（`OGKM=`）：同步该文件后 `cargo build -p nvoc-cli` 通过 ✔（sha256 两侧一致 ✔）。
+**设备访问**：本轮仅 wedge 轮询一次 ✔ —— verdict `0x00000062 NV_ERR_RESET_REQUIRED` ✔（探针原文：forward ALIVE 但 GSP 处于 reset-required；`0x2080b201` 仍 NV_OK，而所有拒绝都被折叠成 `0x62` ✔），uptime `1 day, 3:53`，同一 boot ⇒ **未重启、未写入、未做任何性能操作** ✔。
+**状态**：第 32 轮遗留的"人读输出未确认"⇒ **已确认（有测试）** ✔；`clock_offsets` 在设备侧仍为 **已实现待实测** ✔。

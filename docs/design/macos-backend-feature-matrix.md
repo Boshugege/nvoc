@@ -1232,3 +1232,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (4) **保留的决定** ✔：`unavailable` 中 `core_clock_offset`/`memory_clock_offset` **故意保留**（读已实现但**尚未设备实测** ✗；这两族仍开放的是旧的 `0x2080901B` 槽位身份与"无任何 SET"）⇒ 原因字符串已改写为只陈述这两点，等实测后再决定是否移除键 ✔。
 (5) **验证范围** ✔：客户端 fmt/clippy（`--workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings`）/`cargo test -p nvoc-core --all-targets` **94 passed**（新增一例用**捕获载荷**断言 bit 1 = 1 530 000/−1、bit 0x10 = 6 000 984/−126，并断言 `Refused(0x62)` ⇒ `None`）/`cargo check -p pynvoc` ✔；测试机 `cargo build -p nvoc-core -p nvoc-cli`（`OGKM=`）通过 ⇒ macOS 门控代码与 CLI macOS 路径均编译 ✔；覆盖前三个文件 sha256 与 `c3f24e1` 相同 ✔。
 (6) **状态**：`clock_offsets` = **已实现待实测** ✔；**设备侧本轮未读** ✗（无重启，uptime `1 day, 3:48`，同一 boot）⇒ 无新增设备访问 ✔；未执行任何写入 ✔，写入门槛保持关闭 ✔。
+
+### 本轮追加六十七（2026-10-18，**人读输出验证**＋一处错渲染修复）
+
+(1) **选择依据** ✔：追加六十六 把人读格式器记为**尚未确认** ✗。先读代码确认 `format_get_settings_output` 按键泛化（`Value::Array` 走"标题＋子块"）⇒ 可用**测试**答复 ✔。
+(2) **测试暴露真实缺陷** ✗：新用例（渲染含 `clock_offsets` 的 get-settings 载荷）首次运行失败，实际输出 `Domain Bit: 0.001 MHz` ✗ ⇒ 根因 `cli/src/output.rs` `format_contextual_scalar` 对上下文含 `clock`/`frequency` 的**所有**数值叶子做 kHz→MHz 缩放 ⇒ 对频率正确、对**位索引**错误 ✔。
+(3) **修复** ✔：新增目标化豁免——叶子名以 `_bit` 结尾按原样数字渲染（"位永远不是频率"），风格同文件既有定向豁免（`lanes`、per-rail 瓦数、非 domain 电压）✔。
+(4) **回归证据** ✔：`cargo test -p nvoc-cli` **82 passed / 0 failed**（其余 81 例未变）⇒ 既有已验收输出依赖的缩放未受扰动 ✔；`cargo test -p nvoc-core --all-targets` 94 passed ✔；fmt/clippy（`--exclude cli-stressor-cuda-rs --all-targets -- -D warnings`）干净 ✔；测试机同步后 `cargo build -p nvoc-cli` 通过、sha256 一致 ✔。
+(5) **保留的怪癖** ✔：同上下文 `offset_khz: -1` → `-0.001 MHz`（数值正确、丢失 kHz 约定）⇒ 为最小改动未改，记为待决 ✔。
+(6) **状态**：人读输出 = **已确认（有测试）** ✔；`clock_offsets` 设备侧仍 **已实现待实测** ✔。本轮设备访问**仅一次 wedge 轮询**（verdict `0x62`，uptime `1 day, 3:53`，同一 boot）⇒ 未重启、未写入、无性能操作 ✔。
