@@ -169,9 +169,15 @@ a wrong size is refused *with the mask seeded as well*, which is what makes the
 two fields separable.
 
 **The selection mask sits at head +4, and it is an input.** Measured on an `0xA5`
-background so a skipped field stays visible: seeding `0xFF` at +4 answers `NV_OK`
-and writes 106 dwords (`first @0 last @564`), i.e. the handler reads the mask and
-never writes it back -- it is the only head dword that is not rewritten. Seeding
+background: seeding `0xFF` at +4 answers `NV_OK` and writes 106 dwords
+(`first @0 last @564`), and +4 is the only head dword left out of that
+changed-dword set. That last observation is weaker than it looks -- the seed
+overwrote the `0xA5` with `0xFF`, so a handler that *echoes* the seed and a
+handler that leaves the field alone produce the same diff, and the recorded
+Windows-side layout below says the driver does echo it. So: the field is read
+(behaviour depends on it) and it is not modified in a way this run can see; the
+two are separated only by a seed the driver would not return unchanged.
+Seeding
 `0xFF` into +0, +8, +12, +16, +20, +24, +28, +32 or +36 instead answers
 `0x25 NV_ERR_INVALID_DATA`; seeding 0 answers `NV_OK` and writes nothing, which
 is the trap: "no offset applied" and "no record requested" are the same reply.
@@ -199,3 +205,46 @@ reporting "1 non-zero B" on a case the driver *rejected* -- so a rejected row's
 count says nothing about the driver. Combined with the +8 seed, that is how the
 old note "mask 0 / 3 non-zero bytes, +0 +8" came to look like evidence that the
 driver returns nothing, when in fact nothing had been selected.
+
+### 5.1 The caller-side coordinate system, and what the directory table is for
+
+The NVAPI struct for this family is `NV_GPU_CLOCK_CLIENT_CLK_DOMAINS_CONTROL_V1`
+(2404 B, magic `0x10964` = version 1 | size 2404 -- the exact size the RM
+refuses). Its layout is recorded in `nvapi-rs/sys/src/gpu/clock.rs` from IDA plus
+a live dump on an Ada 4060 Laptop: mask at absolute +8, then 32 **bit-sparse**
+records at absolute `+100 + 72*bit` -- a record for domain bit N at `+100+72*N` --
+with a type byte at record+0 and named fields at record+44 (`offset_kHz`, i32),
++48 (`range_min`), +52 (`range_max`), +56 (`applied`), +60 (one more).
+
+| | NVAPI caller struct | RM block (measured here) |
+| --- | --- | --- |
+| selection field | mask at +8; the Windows-side note says the driver **echoes the seed**, not the real controllable set | mask at +4, read (see above); echo unresolved |
+| record base | +100 | +60 |
+| record stride | 72 | 64 |
+| record fields | type u8 @+0; +44 / +48 / +52 / +56 / +60 | stamp u16 @+0; value dwords @+8..+44, +52, +56; +4 / +48 / +60 never written |
+| record addressing | by **domain bit** (`+100+72*bit`) | by **directory index** (`0xFF` selects indices 0..7) |
+
+So these are two tables of the same shape (mask + 32 slots) in different
+coordinates, and the caller record is **not** a field-by-field copy of the RM
+record. The positional overlap is partial and is best treated as a coincidence
+until something differential confirms it: the RM writes record+44, +52 and +56,
+which are positionally the caller's `offset_kHz`, `range_max` and `applied`
+slots, but it also writes ten dwords from +8 to +44 that the caller layout does
+not name, and it does not write the caller's +48 (`range_min`) or +60. What that
+buys is a *named candidate set* for three of the twelve slots -- with the caveat
+that the caller's `range_min` slot has no RM counterpart in the written set, so a
+straight name transfer is already contradicted once.
+
+**The two addressings differ, and that is what the directory is for.**
+Hypothesis, not fact: the caller addresses records by domain bit, the RM selects
+them by directory index, and the directory block carries, per entry, both the
+index (its position) and the domain bit (`1<<id`) plus the type stamp -- so it is
+the table a marshalling layer needs to translate a named domain into the record
+the control block expects. Evidence: the directory's `domain_bit` values are
+powers of two covering bit positions 0-6 and 19-21, the same two clusters as
+`NV_GPU_CLOCK_DOMAIN_ID`; the control's stamps match directory entries by index;
+and the 106-dword arithmetic above fixes index addressing for the control side.
+Falsification path: read the control block with a single-index mask (`0x1`, the
+probe runbook's third case) -- index addressing predicts records for exactly one
+entry, i.e. 14 + 13 dwords for a value-carrying entry, while bit addressing for
+that same mask would select the entry stamped bit 0.

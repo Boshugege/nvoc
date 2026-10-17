@@ -598,11 +598,16 @@ static const struct {
     {0x2080901bu, 2108u},  /* domain control: the current values */
 };
 
-/* Byte offset of the control block's record-selection mask. The handler does not
- * fill this field: it *reads* it and writes back only the records the mask
- * selects, leaving the caller's value in place. A zeroed buffer therefore asks
- * for nothing and a zero status can still come back with no record at all, which
- * is exactly the shape that would make "the offset is zero" unfalsifiable.
+/* Byte offset of the control block's record-selection mask. The handler *reads*
+ * this field: the seed sweep shows 0xFF here filling records while 0xFF in a
+ * neighbouring dword is rejected, so the value decides what comes back. Whether
+ * the handler also echoes the seed is not settled by that sweep -- the seed
+ * replaced the 0xA5 background, so "left alone" and "echoed" look alike, and the
+ * field is missing from the changed-dword set either way -- and it does not
+ * matter for the read path, because the caller always seeds it. A zeroed buffer
+ * therefore asks for nothing and a zero status can still come back with no
+ * record at all, which is exactly the shape that would make "the offset is zero"
+ * unfalsifiable.
  * 0xFF is the value the probe measured: it selects the eight entries at
  * directory indices 0..7 and returns 106 written dwords (14 header + 7x13 value
  * dwords + 1 stamp-only), while seeding any other offset with 0xFF returns

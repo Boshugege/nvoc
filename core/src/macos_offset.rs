@@ -48,12 +48,20 @@ const OFFSET_CONTROL_RECORD_BYTES: usize = 64;
 const OFFSET_CONTROL_RECORDS: usize = 32;
 /// Dword index of the selection mask inside the control header.
 ///
-/// This is an *input*: the handler reads it, writes only the records whose bit
-/// is set, and does not write the field back. Two consequences. First, the value
+/// This is an *input*: the handler reads it and writes only the records whose bit
+/// is set, which the seed sweep proves by behaviour (`0xFF` in this field fills
+/// records, `0xFF` in a neighbouring dword is rejected). Whether the handler also
+/// *echoes* the seed back is not settled by that sweep: the seed replaced the
+/// `0xA5` background, so "left alone" and "echoed" look identical, and the field
+/// is correspondingly absent from the changed-dword set either way. The recorded
+/// Windows-side layout (see the marshalling correction table) says the driver
+/// echoes the seed rather than the real controllable set, which is compatible
+/// with the measurement; the probe's other seeds (`0x3FF`, `0x1`) are what would
+/// separate the two, since an echo would return them while a driver-filled field
+/// would not. Either way, the value is load-bearing: seeding `0xFF` here is what
 /// is load-bearing rather than informational -- seeding `0xFF` here is what
-/// makes the handler answer `NV_OK` with records in it, while seeding `0xFF` at
-/// the neighbouring dwords yields `NV_ERR_INVALID_DATA` (measured by the probe's
-/// seed sweep). Second, a zeroed block asks for nothing, so a caller that wants
+/// makes the handler answer `NV_OK` with records in it, while a zeroed block asks
+/// for nothing, so a caller that wants
 /// the current values must seed this field before the call; the native read path
 /// does (`NVOC_RM_OFFSET_CONTROL_MASK` in `core/native/macos_rm.c`).
 ///
