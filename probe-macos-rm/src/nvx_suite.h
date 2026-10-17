@@ -81,6 +81,8 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
 int nvx_stage2_thermal_read(nvx_ctx *c);
 /* Explicit, read-only fan-policy GET: the fan family's only named candidate. */
 int nvx_stage2_fan_read(nvx_ctx *c);
+/* Explicit, read-only HWFS/cooler-plane GET: the one named, in-table id. */
+int nvx_stage2_hwfs_read(nvx_ctx *c);
 /* Explicit, read-only internal PM/PFM GET probes (PM1, V/P-state, boost). */
 int nvx_stage2_pm_read(nvx_ctx *c);
 /* Explicit, read-only perf/pmgr read-surface census: the remaining public

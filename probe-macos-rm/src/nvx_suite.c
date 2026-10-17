@@ -1250,6 +1250,88 @@ int nvx_stage2_fan_read(nvx_ctx *c)
     return 0;
 }
 
+/* HWFS / cooler-plane read (--hwfs-read): the cooler-arbiter family's only id
+ * that is both *named* in in-tree material and *present* in the method table.
+ *
+ * Provenance, all in-tree rather than scanned: the nvapi-rs copy annotates
+ * GET RM 0x20808540 (escape 0x07000190) with an unmasked 52-byte plane and
+ * records sel=2 -> {out=10, 0x7FFFFFFF, 64, 256} as measured on TU116 (462.96)
+ * and on a 4060 (R610); the method table has exactly one row, 0x20808540, with
+ * paramSize 24 in the read half, and a declared write twin 0x2080c541@24 that
+ * this read does not touch.
+ *
+ * Two layers, two sizes: 52 is the NVAPI caller's plane, 24 is what the GSP row
+ * declares, so the RM-side call goes out at 24. A wrong paramSize is the one
+ * failure that looks like "no such command" (0x1f / 0x25), which is why the
+ * declared row beats the copy's number here.
+ *
+ * The census (tools/audit-live-attempts.py) lists this id under "in the table,
+ * never in a returned status" -- it has never been issued on this host -- so the
+ * point of the read is to turn a booked candidate into an artifact. It is asked
+ * on an 0xA5 background, the same reason as the fan read: a field the handler
+ * never wrote keeps 0xA5, so "written as zero" stays distinguishable.
+ */
+#define NVX_HWFS_CMD   0x20808540u
+#define NVX_HWFS_BYTES 24u
+
+static void item_hwfs_read(nvx_ctx *c)
+{
+    static const unsigned char bg = 0xA5;
+    const char *name = "hwfs-private-0x20808540";
+    unsigned char *buf = malloc(NVX_HWFS_BYTES);
+    if (!buf) {
+        nvx_emit(c, "V2.hwfs", name, 0, NVX_V_HARD, "buffer alloc failed");
+        return;
+    }
+    if ((NVX_HWFS_CMD & 0xC000u) == 0xC000u) {
+        nvx_emit(c, "V2.hwfs", name, 0, NVX_V_HARD,
+                 "REFUSED: 0x%08x is in the write half, not sent", NVX_HWFS_CMD);
+        free(buf);
+        return;
+    }
+    memset(buf, bg, NVX_HWFS_BYTES);
+    NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                              NVX_HWFS_CMD, buf, NVX_HWFS_BYTES);
+    if (st != 0) {
+        nvx_emit(c, "V2.hwfs", name, st, NVX_V_REJECTED,
+                 "cmd 0x%08x size %u (the declared row's paramSize; the NVAPI "
+                 "copy's plane is 52 B) -> %s%s", NVX_HWFS_CMD, NVX_HWFS_BYTES,
+                 nvx_status_name(st),
+                 (st == 0x62u || st == 0x65u)
+                     ? " (the wedge codes: stop, do not sweep)" : "");
+        free(buf);
+        return;
+    }
+
+    unsigned nz = 0, zeros = 0, untouched = 0, first_nz = 0, last_nz = 0;
+    for (unsigned o = 0; o < NVX_HWFS_BYTES; ++o) {
+        if (buf[o] == bg) { ++untouched; continue; }
+        if (!buf[o]) { ++zeros; continue; }
+        ++nz;
+        if (!first_nz) first_nz = o;
+        last_nz = o;
+    }
+    NvU32 head[6];
+    for (unsigned i = 0; i < 6; ++i) memcpy(&head[i], buf + 4 * i, 4);
+    nvx_emit(c, "V2.hwfs", name, 0, NVX_V_OK,
+             "cmd 0x%08x size %u: non-zero %u B (first @%u last @%u), "
+             "written-zero %u B, untouched 0x%02x %u B; dwords %08x %08x %08x "
+             "%08x %08x %08x", NVX_HWFS_CMD, NVX_HWFS_BYTES, nz, first_nz,
+             last_nz, zeros, bg, untouched, (unsigned)head[0], (unsigned)head[1],
+             (unsigned)head[2], (unsigned)head[3], (unsigned)head[4],
+             (unsigned)head[5]);
+}
+
+int nvx_stage2_hwfs_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.hwfs", "hwfs-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_hwfs_read(c);
+    return 0;
+}
+
 int nvx_stage2_thermal_read(nvx_ctx *c)
 {
     if (!c->hSubdevice) {

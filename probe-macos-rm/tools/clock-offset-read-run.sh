@@ -108,6 +108,11 @@ run_one clkctl-read  --clkctl-read
 # census tool picks the id up from there.
 run_one fan-read    --fan-read
 
+# Same reasoning for the cooler plane: 0x20808540 is the family's only named and
+# in-table id and the census lists it as never dispatched.  24 B is the paramSize
+# its method-table row declares.
+run_one hwfs-read   --hwfs-read
+
 if command -v python3 >/dev/null 2>&1; then
     python3 "$root/tools/decode-clk-containers.py" "$bundle/clkctl-hex.txt" \
         > "$bundle/decode.txt" 2>&1 || true
