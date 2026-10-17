@@ -82,6 +82,34 @@ static int parse_rated_tdp_set(const char *spec, NvU32 *client, NvU32 *action)
             parse_rated_tdp_action(colon + 1, action) == 0) ? 0 : -1;
 }
 
+/* `--clk-offset-set BIT:OFF:DELTA` -- BIT is the domain-bit index (bit i
+ * selects record i of the 0x2080901b/0x2080d01c block), OFF must be one of
+ * the twelve measured value dwords, DELTA is kHz and capped at one minimal
+ * step.  The offset is deliberately NOT defaulted: gate G1 (which dword is
+ * the offset) is still open, so the operator has to name it. */
+static int parse_clk_offset_set(const char *spec, unsigned *bit,
+                                unsigned *off, int *delta)
+{
+    char buf[64];
+    if (strlen(spec) >= sizeof buf) return -1;
+    strcpy(buf, spec);
+    char *c1 = strchr(buf, ':');
+    if (!c1) return -1;
+    *c1 = 0;
+    char *c2 = strchr(c1 + 1, ':');
+    if (!c2) return -1;
+    *c2 = 0;
+    char *end;
+    long b = strtol(buf, &end, 0);
+    if (*end || b < 0 || b > 31) return -1;
+    long o = strtol(c1 + 1, &end, 0);
+    if (*end || o < 0 || o > 2108) return -1;
+    long d = strtol(c2 + 1, &end, 0);
+    if (*end || d < -1000 || d > 1000) return -1;
+    *bit = (unsigned)b; *off = (unsigned)o; *delta = (int)d;
+    return 0;
+}
+
 static void on_signal(int sig)
 {
     (void)sig;
@@ -165,6 +193,15 @@ static void usage(void)
         "                   (paramSize, stamp, seed) triple, no size sweep\n"
         "                   census (paramSize oracle scan; SET twins never sent)\n"
         "  --rated-tdp-set C:A   gated WRITE: set RATED_TDP client C to action A\n"
+        "  --clk-offset-set BIT:OFF:DELTA\n"
+        "                   gated WRITE: move ONE clock-domain value dword one\n"
+        "                   minimal step (needs --write). BIT selects record BIT\n"
+        "                   (mask bit i -> record i); OFF must be one of the\n"
+        "                   twelve measured dwords 8,12,16,20,24,28,32,36,40,\n"
+        "                   44,52,56 -- gate G1 (field identity) is open, so the\n"
+        "                   offset is never guessed; |DELTA| <= 1000 kHz.\n"
+        "                   Snapshot -> SET -> same-field readback -> restore ->\n"
+        "                   byte-exact verify, all printed as V3.5a..e\n"
         "                   (needs --write; pre-record + readback + restore)\n"
         "                   C=RM|WAR|GLOBAL|OS|PROFILE or 0-4, A=DEFAULT|EXCEED|\n"
         "                   LIMIT|LOCK|FLOOR or 0-4\n"
@@ -183,6 +220,9 @@ int main(int argc, char **argv)
     const char *jsonl_path = NULL;
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
+    int clk_offset_set = 0;
+    unsigned clkoff_bit = 0, clkoff_off = 0;
+    int clkoff_delta = 0;
     int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
     int anchor_read = 0;
     int clklevel_read = 0, clkdom_read = 0, clkctl_read = 0, clkctl_hex = 0;
@@ -239,6 +279,15 @@ int main(int argc, char **argv)
             }
             rated_tdp_set = 1;
         }
+        else if (!strcmp(argv[i], "--clk-offset-set") && i + 1 < argc) {
+            if (parse_clk_offset_set(argv[++i], &clkoff_bit, &clkoff_off,
+                                     &clkoff_delta) != 0) {
+                fprintf(stderr, "invalid --clk-offset-set spec "
+                                "(want BIT:OFF:DELTA, |DELTA| <= 1000 kHz)\n");
+                return 2;
+            }
+            clk_offset_set = 1;
+        }
         else if (!strcmp(argv[i], "--service") && i + 1 < argc) {
             const char *v = argv[++i];
             if (!strcmp(v, "nvrm")) nvx_service_pref = 1;
@@ -256,6 +305,11 @@ int main(int argc, char **argv)
     }
     if (rated_tdp_set && !want_write) {
         fprintf(stderr, "--rated-tdp-set is a performance write and also requires "
+                        "--write (it is refused before opening the driver)\n");
+        return 2;
+    }
+    if (clk_offset_set && !want_write) {
+        fprintf(stderr, "--clk-offset-set is a clock write and also requires "
                         "--write (it is refused before opening the driver)\n");
         return 2;
     }
@@ -403,6 +457,12 @@ int main(int argc, char **argv)
     if (rated_tdp_set) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage3_rated_tdp_set(&g_ctx, rtdp_client, rtdp_action) != 0) rc = 1;
+    }
+
+    if (clk_offset_set) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage3_clk_offset_set(&g_ctx, clkoff_bit, clkoff_off,
+                                      clkoff_delta) != 0) rc = 1;
     }
 
     if (sample_sec > 0 && !strchr(stages, '4')) {

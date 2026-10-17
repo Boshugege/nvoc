@@ -181,3 +181,25 @@ host 侧 `kern_perf_boost.c` **没有** clear/teardown 分支 ⇒ 释放完全�
 ⇒ §7.3-③「同记录其它 value dword 与快照逐字节相同」可用 `+8…+44`+`+52`+`+56` 作为集合；
 §7.2 的 G1 候选顺序不变（`rec+8` 首选、`rec+16` 次选），但**候选面已收窄到那 12 个 dword**。
 `0xA5` 那次的 `106` 与 `14 + 8×13 = 118` 不符，该构建计数器不可信，解锁后重测（见文档 §15.4）。
+
+### 7.8 §7.3 的执行载体已在树内（2026-10-17，**未执行**）
+
+`probe-macos-rm --write --clk-offset-set BIT:OFF:DELTA` 现在就是 §7.3 的载体（`V3.5a..e`），
+与 RATED_TDP 的 `V3.4a..c` 同一风格。硬性设计（都是「缺一即拒绝」）：
+
+| 门槛 | 行为 |
+| --- | --- |
+| 没有 `--write` | 打开驱动**之前**拒绝，rc=2 |
+| idle-only 构建 | 打开驱动**之前**拒绝，rc=2 |
+| `OFF` 不在那 12 个已测 value dword 内 | 拒绝并说明「G1 未定，本工具不猜」 |
+| `OFF` 未显式给出 | 无默认值，必须由操作者指名 |
+| `\|DELTA\| > 1000 kHz` 或 `= 0` | 拒绝（本工具**不是**扫描器） |
+| pre-record GET 失败 | **不写**（无法保证恢复） |
+
+`V3.5e` 的「成功」= SET `NV_OK` ∧ 同字段回读 == 原值±DELTA ∧ 该记录其它 value dword 与快照逐字节相同
+∧ restore 后整块 2108 B 与快照逐字节相同。**实时频率变化不作为判据**（NVK 自己会发 PERF_BOOST，§7.6）。
+恢复状态与 boost/RATED_TDP 三套 latch 互相独立，`atexit`/SIGINT 各自回写自己的快照。
+
+本轮验证范围：`LINT=1 build.sh` rc=0、`build.sh` rc=0、三条拒绝路径实测 rc=2（都发生在打开驱动之前）、
+`decode-clk-containers.py --selftest` ok、`sh -n tools/clock-offset-read-run.sh` ok。
+**本方案仍未授权执行任何 SET，G0/G1/G5 未满足。**

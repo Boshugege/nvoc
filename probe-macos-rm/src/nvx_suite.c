@@ -3415,6 +3415,14 @@ static NvU32 g_rtdp_client;
 static NvU32 g_rtdp_orig_action;
 static NvU32 g_rtdp_orig_vpstate;
 
+/* Clock-domain offset restore state, kept separate again.  Armed only after a
+ * successful pre-record GET, so an interrupted run returns the exact 2108 B
+ * block the handler read -- never a reconstruction. */
+static unsigned char g_clkoff_snapshot[2108];
+static unsigned g_clkoff_domain_bit;
+static nvx_ctx *g_clkoff_ctx;
+static int g_clkoff_armed;
+
 static void boost_clear(nvx_ctx *c)
 {
     NV2080_CTRL_PERF_BOOST_PARAMS bp;
@@ -3447,6 +3455,22 @@ static void rated_tdp_restore(nvx_ctx *c)
            st, st2, (st2 == 0 && g.input == g_rtdp_orig_action) ? " (verified)" : "");
 }
 
+/* Clock-domain offset restore: re-send the byte-exact pre-write snapshot
+ * through the SET id.  Kept separate from the boost and RATED_TDP latches so
+ * none of the three can trigger another's restore. */
+static void clkoff_restore(nvx_ctx *c)
+{
+    if (!g_clkoff_armed || !c || !c->hSubdevice) return;
+    unsigned char block[2108];
+    NvU32 mask = 1u << g_clkoff_domain_bit;
+    memcpy(block, g_clkoff_snapshot, sizeof block);
+    memcpy(block + 4, &mask, 4);
+    NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                              0x2080d01cu, block, sizeof block);
+    printf("[..] restoring 0x2080d01c domain bit %u from snapshot: SET 0x%x (%s)\n",
+           g_clkoff_domain_bit, st, nvx_status_name(st));
+}
+
 void nvx_restore_run(void)
 {
     if (g_boost_ctx && g_boost_ctx->hSubdevice) {
@@ -3458,6 +3482,11 @@ void nvx_restore_run(void)
         rated_tdp_restore(g_rtdp_ctx);
         g_rtdp_armed = 0;
         g_rtdp_ctx = NULL;
+    }
+    if (g_clkoff_armed && g_clkoff_ctx && g_clkoff_ctx->hSubdevice) {
+        clkoff_restore(g_clkoff_ctx);
+        g_clkoff_armed = 0;
+        g_clkoff_ctx = NULL;
     }
 }
 
@@ -3639,6 +3668,191 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
     g_rtdp_armed = 0;
     g_rtdp_ctx = NULL;
     return st == 0 ? 0 : 1;
+}
+
+/* ------------------------------------------------------------------ *
+ * Gated clock-domain offset SET (0x2080d01c) -- stage 7.5, NOT the same *
+ * thing as RATED_TDP, and refused unless every gate below is met.      *
+ * ------------------------------------------------------------------ */
+
+/* Geometry measured 2026-10-17 with the counter-prefill instrument
+ * (docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md
+ * section 15):
+ *   2108 B = 60 B header + 32 * 64 B records
+ *   +4 is the INPUT domain mask: bit i selects record i
+ *   a selected record i at 60 + 64*i gets 13 dwords written:
+ *     +0 (u16 type stamp), +8 +12 +16 +20 +24 +28 +32 +36 +40 +44 +52 +56
+ *   those twelve are the VALUE dwords, and all twelve are zero at stock on a
+ *   non-zero background -- which is exactly why the field identity (gate G1)
+ *   is still OPEN and why this harness will not guess: the operator must name
+ *   the field offset, and it must be one of the twelve measured slots.
+ */
+#define NVX_CLKOFF_CMD_GET   0x2080901bu
+#define NVX_CLKOFF_CMD_SET   0x2080d01cu
+#define NVX_CLKOFF_SIZE      2108u
+#define NVX_CLKOFF_HDR       60u
+#define NVX_CLKOFF_STRIDE    64u
+#define NVX_CLKOFF_MASK_OFF  4u
+#define NVX_CLKOFF_STEP_MAX  1000   /* kHz: one minimal step (proposal G4) */
+
+static const unsigned nvx_clkoff_value_offs[] = {
+    8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 52u, 56u
+};
+
+static int nvx_clkoff_field_ok(unsigned off)
+{
+    for (unsigned i = 0; i < sizeof nvx_clkoff_value_offs /
+                            sizeof nvx_clkoff_value_offs[0]; ++i)
+        if (off == nvx_clkoff_value_offs[i]) return 1;
+    return 0;
+}
+
+static void nvx_poke_u32(unsigned char *b, unsigned off, NvU32 v)
+{
+    memcpy(b + off, &v, 4);
+}
+
+static NvU32 nvx_peek_u32(const unsigned char *b, unsigned off)
+{
+    NvU32 v; memcpy(&v, b + off, 4); return v;
+}
+
+static NvU32 nvx_clkoff_get(nvx_ctx *c, unsigned bit, unsigned char *buf)
+{
+    memset(buf, 0, NVX_CLKOFF_SIZE);
+    nvx_poke_u32(buf, NVX_CLKOFF_MASK_OFF, 1u << bit);
+    return nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                          NVX_CLKOFF_CMD_GET, buf, NVX_CLKOFF_SIZE);
+}
+
+static NvU32 nvx_clkoff_send_set(nvx_ctx *c, unsigned bit, unsigned char *buf)
+{
+    nvx_poke_u32(buf, NVX_CLKOFF_MASK_OFF, 1u << bit);
+    return nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                          NVX_CLKOFF_CMD_SET, buf, NVX_CLKOFF_SIZE);
+}
+
+/* Reached only via `--write --clk-offset-set BIT:OFF:DELTA`.  Mandatory and
+ * ordered, exactly like V3.4: pre-record -> arm restore -> SET -> same-field
+ * readback -> restore -> verify.  Success requires ALL of: SET == NV_OK,
+ * the named dword reads back exactly orig + DELTA, every other value dword of
+ * that record is byte-identical to the snapshot, and the restored block is
+ * byte-identical to the snapshot.  RUSD/real-time kHz is NOT a criterion --
+ * NVK itself issues PERF_BOOST (see docs/.../nvk-perf-boost-internal.md), so a
+ * live frequency rise can come from the driver, not from this write. */
+int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
+                              unsigned field_off, int delta_khz)
+{
+    if (NVX_IDLE_ONLY) {
+        nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_GATED,
+                 "idle-only build: performance writes disabled");
+        return -1;
+    }
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    if (domain_bit >= 32u) {
+        nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_SKIP,
+                 "domain bit %u out of range [0,32)", domain_bit);
+        return -1;
+    }
+    if (!nvx_clkoff_field_ok(field_off)) {
+        nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_SKIP,
+                 "field +%u is not one of the twelve measured value dwords "
+                 "(8,12,16,20,24,28,32,36,40,44,52,56); gate G1 (field identity) "
+                 "is OPEN, so this harness refuses to guess -- name the offset",
+                 field_off);
+        return -1;
+    }
+    if (delta_khz == 0 || delta_khz > NVX_CLKOFF_STEP_MAX ||
+        delta_khz < -NVX_CLKOFF_STEP_MAX) {
+        nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_SKIP,
+                 "delta %d kHz out of the single-step window +-%d kHz "
+                 "(this harness is not a sweep tool)", delta_khz,
+                 NVX_CLKOFF_STEP_MAX);
+        return -1;
+    }
+
+    const unsigned rec = NVX_CLKOFF_HDR + NVX_CLKOFF_STRIDE * domain_bit;
+
+    /* 1. pre-record: refuse to write without a byte-exact snapshot. */
+    unsigned char snapshot[NVX_CLKOFF_SIZE];
+    NvU32 st = nvx_clkoff_get(c, domain_bit, snapshot);
+    if (st != 0) {
+        nvx_emit(c, "V3.5a", "clk-offset-pre-record", st, NVX_V_REJECTED,
+                 "GET before SET failed; refusing to write (restore not guaranteed)");
+        return -1;
+    }
+    NvU32 orig = nvx_peek_u32(snapshot, rec + field_off);
+    NvU32 stamp = nvx_peek_u32(snapshot, rec);
+    nvx_emit(c, "V3.5a", "clk-offset-pre-record", st, NVX_V_OK,
+             "domain bit %u -> record @%u stamp 0x%08x; field +%u current 0x%08x "
+             "(%d); snapshot taken", domain_bit, rec, stamp, field_off,
+             orig, (int)orig);
+
+    /* 2. arm the dedicated restore before mutating anything. */
+    memcpy(g_clkoff_snapshot, snapshot, NVX_CLKOFF_SIZE);
+    g_clkoff_ctx = c;
+    g_clkoff_domain_bit = domain_bit;
+    g_clkoff_armed = 1;
+
+    /* 3. SET: the snapshot with exactly one dword moved, one step. */
+    unsigned char block[NVX_CLKOFF_SIZE];
+    memcpy(block, snapshot, NVX_CLKOFF_SIZE);
+    nvx_poke_u32(block, rec + field_off, (NvU32)((int)orig + delta_khz));
+    st = nvx_clkoff_send_set(c, domain_bit, block);
+    nvx_emit(c, "V3.5b", "clk-offset-set", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             "domain bit %u field +%u -> 0x%08x (rc 0x%x %s)", domain_bit,
+             field_off, (NvU32)((int)orig + delta_khz), st, nvx_status_name(st));
+
+    /* 4. same-field readback + "every other value dword unchanged". */
+    unsigned char after[NVX_CLKOFF_SIZE];
+    NvU32 st2 = nvx_clkoff_get(c, domain_bit, after);
+    int same_field = 0, others_same = 1;
+    if (st2 == 0) {
+        same_field = (nvx_peek_u32(after, rec + field_off) ==
+                      (NvU32)((int)orig + delta_khz));
+        for (unsigned i = 0; i < sizeof nvx_clkoff_value_offs /
+                                sizeof nvx_clkoff_value_offs[0]; ++i) {
+            unsigned off = nvx_clkoff_value_offs[i];
+            if (off == field_off) continue;
+            if (nvx_peek_u32(after, rec + off) != nvx_peek_u32(snapshot, rec + off))
+                others_same = 0;
+        }
+    }
+    nvx_emit(c, "V3.5c", "clk-offset-readback", st2,
+             (st2 == 0 && same_field && others_same) ? NVX_V_OK : NVX_V_REJECTED,
+             "after SET: field +%u = 0x%08x (%d), want 0x%08x (%d); other value "
+             "dwords identical: %s; GET 0x%x", field_off,
+             st2 == 0 ? nvx_peek_u32(after, rec + field_off) : 0xffffffffu,
+             st2 == 0 ? (int)nvx_peek_u32(after, rec + field_off) : -1,
+             (NvU32)((int)orig + delta_khz), (int)orig + delta_khz,
+             others_same ? "yes" : "NO", st2);
+
+    /* 5. restore from the snapshot, then prove the block came back exactly. */
+    clkoff_restore(c);
+    g_clkoff_armed = 0;
+    g_clkoff_ctx = NULL;
+
+    unsigned char restored[NVX_CLKOFF_SIZE];
+    NvU32 st3 = nvx_clkoff_get(c, domain_bit, restored);
+    int identical = (st3 == 0 && memcmp(restored, snapshot, NVX_CLKOFF_SIZE) == 0);
+    nvx_emit(c, "V3.5d", "clk-offset-restore", st3,
+             identical ? NVX_V_OK : NVX_V_REJECTED,
+             "restored block byte-identical to snapshot: %s (GET 0x%x, "
+             "%s)", identical ? "yes" : "NO", st3,
+             identical ? "all 2108 B" : "MISMATCH -- investigate before retrying");
+
+    nvx_emit(c, "V3.5e", "clk-offset-verdict", 0,
+             (st == 0 && st2 == 0 && same_field && others_same && identical)
+                 ? NVX_V_OK : NVX_V_REJECTED,
+             "SET 0x%x, readback 0x%x, same-field %s, others-unchanged %s, "
+             "restore %s -- a live-frequency change is NOT evidence either way",
+             st, st2, same_field ? "yes" : "no", others_same ? "yes" : "no",
+             identical ? "verified" : "FAILED");
+    return (st == 0 && st2 == 0 && same_field && others_same && identical) ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------ */

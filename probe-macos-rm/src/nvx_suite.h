@@ -71,6 +71,12 @@ int nvx_stage2_rated_tdp_read(nvx_ctx *c);
  * and restore-on-exit. Only reachable as `--write --rated-tdp-set C:A`; it is
  * never sent by the default battery, by `--rated-tdp-read`, or by stage 3. */
 int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action);
+/* Gated clock-domain offset SET (0x2080d01c): single domain, explicit field
+ * offset from the twelve measured value dwords, one minimal step, snapshot ->
+ * SET -> same-field readback -> restore -> byte-exact verify.  Never part of
+ * any stage battery and never run implicitly. */
+int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
+                              unsigned field_off, int delta_khz);
 /* Explicit, read-only Thermal System V2 GET batch (public opcode interface). */
 int nvx_stage2_thermal_read(nvx_ctx *c);
 /* Explicit, read-only internal PM/PFM GET probes (PM1, V/P-state, boost). */
