@@ -508,3 +508,19 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
   影响：**运行期频率升高可能来自这条 boost 而非 offset 写入**，因此偏移实验的成功判据里
   RUSD 实时 kHz 明确**不作依据**（`probe-macos-rm/WRITE-VERIFICATION-PLAN.md` §7.3-⑤/§7.6）。
   详见 `docs/reverse-engineering/nvapi/nvk-perf-boost-internal.md`。**本轮无任何 GPU 写入**。
+
+- **`0x2080901b` 写入集重测（新，2026-10-17，静态重读已录字节）**：用**计数器背景**
+  （`dword i = i+1`，任何写入都可见，不像 `0x00`/`0xA5` 会漏或假）确定几何：
+  ① **域掩码在 `+4`**，bit *i* 选记录 *i*（`+4=2` 只写 record 1，其类型戳在 **byte 124**；
+  `+4=0` 一条记录都不写）——此前 "mask@+8" 电池把掩码放错字段，这正是它总回 "3 non-zero bytes" 的原因；
+  ② 头 = **60 B，写 14 个 dword**（`+0` = u8 `0xFF`、`+8` = `0x01010000`、`+12…+56` = 0），
+  且**只有在选中 ≥1 条记录时才写**；③ 记录 *i* 在 `60 + 64*i`，写 **13 个 dword**
+  （`+0` u16 类型戳、`+8…+44`、`+52`、`+56`），**`+4`/`+48`/`+60` 从不写**；
+  ④ **stock 下 12 个 value dword 在非零背景上全为 0** ⇒ 「当前偏移 = 0」现在是**测出来的**，
+  不是在零背景 dump 上推断的。⑤ 未决：`0xA5` 那次报的 `106` 与 `14 + 8×13 = 118` 对不上，
+  该文件出自「打印被截断」的同一构建，其计数器不可信，**等 wedge 解除后重测**。
+  ⑥ **缺失层（有证据）**：OGKM 610.57.04 全树对 `2080901b`/`clkDomainIdx`/`CLK_DOMAINS_GET_CONTROL`/
+  `CLK_CLK_DOMAIN_INDEX` 均 **0 命中**，macOS host kext 同样 0 命中，GSP 镜像里仅有的 `clkDomainIdx`
+  字串属 **PMGR 电源策略**断言 —— 因此缺的是**闭源 GSP CLK 控制实现体**（经运行时对象 vtable 分派），
+  不是协议/尺寸/戳，也不是权限。详见 `docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md` §15。
+  **本轮无任何 GPU 请求、无 SET、未提权、未改驱动/EFI/boot-args、未重启。**

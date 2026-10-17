@@ -1391,6 +1391,11 @@ will be until either
 2. a single-domain minimal-step SET is followed by a same-field read-back and a
    restore, which requires G0 (root, §11.4) and G5 (non-wedged GSP, §6).
 
+> **Superseded in part by §15 (same day):** the counter-prefill instrument shows the
+> header is 60 B / 14 written dwords, the mask is at `+4`, and a record writes 13 dwords
+> (`+0`, `+8..+44`, `+52`, `+56`). The `106` count below is flagged in §15.4 as an open
+> accounting item. The *field-identity* conclusion (G1 still open) is unchanged.
+
 The instrument was fixed accordingly (commit `81ae055`): `--clkctl-hex`'s
 **first** case now runs `0x2080901b` with `mask@+4 = 0xFF` on an **0xA5
 background** — the one combination already measured `NV_OK` before the wedge —
@@ -1522,3 +1527,109 @@ read battery. The lossless dump of that block is therefore worth one explicit
 check when it lands: compare `rec+0` (the type-stamp bytes) across candidate
 record starts and see which stride makes them repeat — 128 (255 records) or
 1020 (32 records). No tool geometry was changed on the strength of this.
+
+## 15. `0x2080901b`'s write set, measured with a counter prefill (2026-10-17, static re-read of recorded bytes)
+
+This section supersedes the *accounting* in §14.1. It uses a strictly better
+instrument that was already on disk: `--clkctl-hex`/`--clkctl-read` can prefill
+the block with a **counter** (`dword i = i+1`) before the call. A counter
+prefill makes every write observable — no written dword can coincidentally
+match its seed — where both `0x00` and `0xA5` backgrounds can hide or fake a
+change. Source files (already recorded, no new GPU request, GSP still wedged):
+
+* `outputs/stage-gsp-clkctl-20261017T092536Z/clkctl-read-first.txt`
+* `outputs/stage-gsp-clkctl-20261017T092536Z/clkctl-read-mask-sweep-lite.txt`
+* `outputs/stage-clkctl-readrun-20261017T094936Z/`
+
+### 15.1 The domain mask is at `+4`, and bit *i* selects record *i*
+
+Three cases from the same battery decide this:
+
+| input | records written | written dwords |
+| --- | --- | --- |
+| `mask@+8=0xFF`, so `+4 = 0` | **none** | `W offsets: +0 +8` (`U=525 W=2 Z=0`) |
+| counter prefill, `mask@+8=0xFF` ⇒ `+4 = 2` | **record 1 only** (stamp at byte 124) | `W offsets: +0 +8 +124` (`U=500 W=3 Z=24`) |
+| `0xA5` prefill, `mask@+4=0xFF` (§14.1) | 8 records | `106/527` changed, `last @564` |
+
+`+4 = 2 = 1<<1` wrote record **1** and nothing else; `+4 = 0` wrote no record;
+`+4 = 0xFF` wrote eight. So `+4` is the domain selector and bit *i* addresses
+record *i*. The earlier "`mask@+8`" battery was planting the mask in the wrong
+field, which is why it kept answering "3 non-zero bytes, first @10" and never
+selected a record — that string is produced by the two header writers alone.
+
+### 15.2 The header is 60 B and writes 14 dwords — but only if a record is selected
+
+From the counter case (`+4 = 2`), the writes are exactly:
+
+* `+0` = **u8 `0xFF`** (only byte 0 changes: `a5a5a5a5 -> a5a5a5ff` on `0xA5`),
+* `+8` = **u32 `0x01010000`**,
+* `+12`, `+16`, `+20`, `+24`, `+28`, `+32`, `+36`, `+40`, `+44`, `+48`, `+52`, `+56` = **`0`**.
+
+`+4` is input-only: it is never written back (the counter at that dword stayed
+`2`). When `+4 = 0` the twelve zero-writes and the `+0`/`+8` pair are *not*
+observed at all (`W = {+0,+8}` comes from the `+0` byte write only in the cases
+where the seed already differed; with `mask@+8` the header zero-fields were
+`U`), so header population is coupled to "at least one record selected".
+
+### 15.3 A selected record writes 13 dwords; `+4`, `+48`, `+60` are never touched
+
+Record *i* lives at `60 + 64*i` (record 1's type stamp sits at byte 124 =
+`60 + 64`; record 7's last field is byte 564 = `60 + 7*64 + 56`). A selected
+record's writes are:
+
+| within-record offset | value | note |
+| --- | --- | --- |
+| `+0` | u16 type stamp | `08 08` (type 8) / `09 09` (type 9) — bytes 0,1 only |
+| `+8`, `+12`, `+16`, `+20`, `+24`, `+28`, `+32`, `+36`, `+40`, `+44` | `0` | the ten "value" dwords |
+| `+52`, `+56` | `0` | two more value dwords |
+| `+4`, `+48`, `+60` | *not written* | stay at their seed |
+
+So twelve value dwords per record, and `2108 = 60 + 32*64` is the true
+geometry with a 60 B header (not the "2 header dwords" of §14.1).
+
+### 15.4 What this settles, and the one open accounting item
+
+* **Settled (measured): `+4` is the mask, `60 + 64*i` the records, 13 written
+  dwords per record, 12 of them values, all zero at stock on a *non-zero*
+  background.** "Current offset = 0" is therefore *measured with an instrument
+  that cannot miss a write*, not inferred from a zero dump.
+* **Open: the `0xA5` run's `106`.** §15.2/§15.3 predict
+  `14 + 8*13 = 118` for eight selected records, and `14 + 7*13 = 105` for
+  seven. `106` fits neither, and the `0xA5` file came from the same build whose
+  *printer* was truncated at 40 lines (§14.1), so its counter is not
+  trustworthy. The counter instrument (fixed build) is authoritative; re-run
+  the `0xA5` case after the wedge clears to close this.
+* **Unchanged: the field identity (G1) is still open.** §15.3 narrows the
+  candidate slots to those twelve dwords but cannot name them: all twelve are
+  zero at stock, and a zero-valued write set cannot self-identify. `rec+8`
+  remains the chosen candidate for `offset_kHz` on the two independent
+  coordinates arguments in §4.3, and it is the field the first gated SET would
+  touch — one record, one domain, one minimal step.
+
+### 15.5 Which layer is missing, with evidence
+
+The record layout is not recoverable from the published source, and that is a
+*result*, not an omission:
+
+* `open-gpu-kernel-modules-610.57.04`: **0** occurrences of `2080901b`,
+  `2080d01c`, `CLK_DOMAINS_GET_CONTROL`, `clkDomainIdx`, or
+  `NV2080_CTRL_CLK_CLK_DOMAIN_INDEX*`. The only clock-domain identifiers in
+  the tree belong to `NV2080_CTRL_CMD_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES`
+  (`ctrl2080clk.h`), a different command.
+* the loaded macOS host kext `NVRM.610.57.04`: same, **0** occurrences, and it
+  carries only `subdeviceCtrlCmdClkPmumonClkDomainsGetSamples`.
+* the GSP image `gsp_tu10x.bin`: the only `clkDomainIdx` /
+  `NV2080_CTRL_CLK_CLK_DOMAIN_INDEX_INVALID` strings sit inside **PMGR
+  power-policy** assertions (`pSingle1x->softFloor.perfCfControllerClkIdx`,
+  `pPhysicalSingle2x->ignoreClkDomainIdx`, …) — a neighbouring subsystem, not
+  the CLK control.
+* static store-template searches over `.text` for the record's write set are
+  exhausted (§4.5): the body is a runtime object's vtable slot (§4.1/§14.2),
+  so there is no literal or call edge to follow.
+
+⇒ the missing piece is the **closed GSP CLK-control implementation body**. It
+is not a protocol question (the container, mask, geometry and both direction
+sizes are known), not a precondition question (the SET's five gates are
+enumerated in §4.4) and not a permissions question (§11.4). Only that body can
+say which of the twelve dwords is `offset_kHz` — or a gated single-step SET
+plus same-field read-back can.
