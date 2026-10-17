@@ -14,6 +14,7 @@ use nvoc_core::{
     DeviceStatus, Error, GpuTarget, QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus, run,
 };
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -109,6 +110,33 @@ fn load_summary(samples: &[DeviceStatus]) -> Value {
     })
 }
 
+/// Throttle evidence for the stock load: the union of the reason masks the
+/// driver published while the stressor ran, and the names of every reason that
+/// was asserted at least once.
+///
+/// The Vulkan load only proves excitation, so the report has to say *why* the
+/// clocks moved — or that nothing throttled. An empty `active_reasons` means
+/// "the driver asserted no reason", never "the field was not read": the number
+/// of samples that actually carried a mask is reported alongside.
+fn throttle_summary(samples: &[DeviceStatus]) -> Value {
+    let mut mask_any: Option<u32> = None;
+    let mut active: BTreeSet<&str> = BTreeSet::new();
+    let mut samples_with_mask = 0usize;
+    for sample in samples {
+        let Some(mask) = sample.throttle_reason_mask else {
+            continue;
+        };
+        samples_with_mask += 1;
+        mask_any = Some(mask_any.unwrap_or(0) | mask);
+        active.extend(sample.throttle_reasons.iter().map(String::as_str));
+    }
+    json!({
+        "samples_with_mask": samples_with_mask,
+        "mask_any": mask_any,
+        "active_reasons": active.into_iter().collect::<Vec<_>>(),
+    })
+}
+
 /// Keep the stressor's rolling FPS footer for the report without dumping the
 /// whole log; the last few `[VKGFX-H]` lines carry the final rates.
 fn fps_tail(stdout: &[u8]) -> Vec<String> {
@@ -194,6 +222,14 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
     let elapsed = started.elapsed().as_secs_f64();
     let post = run(gpu, QueryMacosRmStatus)?.output;
 
+    // Attach the throttle evidence to the under-load block: `load_summary`
+    // reports how fast/far the load moved the GPU, `throttle_summary` reports
+    // whether the driver capped it and why.
+    let mut under_load_report = load_summary(&under_load);
+    if let Some(object) = under_load_report.as_object_mut() {
+        object.insert("throttle".into(), throttle_summary(&under_load));
+    }
+
     // Correctness: the rendering load only proves excitation; this verifier is
     // the only bit-exact evidence (see stress-macos/README.md).
     let verifier = match &opts.metal_check {
@@ -242,7 +278,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         "write_gate": "read-only: no verified macOS offset/VF write path on this \
             driver (see get-settings notes); no candidate was applied",
         "pre": pre,
-        "under_load": load_summary(&under_load),
+        "under_load": under_load_report,
         "post": post,
         "stressor": {
             "exit_code": output.status.code(),
@@ -299,6 +335,35 @@ mod tests {
         assert_eq!(v["max"], json!(60.0));
         assert_eq!(v["mean"], json!(50.0));
         assert_eq!(v["n"], json!(2));
+    }
+
+    #[test]
+    fn throttle_summary_unions_masks_and_reasons() {
+        let a = DeviceStatus {
+            throttle_reason_mask: Some(0b101),
+            throttle_reasons: vec!["gpu_idle".into(), "sw_power_cap".into()],
+            ..Default::default()
+        };
+        let b = DeviceStatus {
+            throttle_reason_mask: Some(0b10),
+            throttle_reasons: vec!["app_clock_setting".into()],
+            ..Default::default()
+        };
+        let summary = throttle_summary(&[a, b]);
+        assert_eq!(summary["samples_with_mask"], json!(2));
+        assert_eq!(summary["mask_any"], json!(0b111));
+        assert_eq!(
+            summary["active_reasons"],
+            json!(["app_clock_setting", "gpu_idle", "sw_power_cap"])
+        );
+    }
+
+    #[test]
+    fn throttle_summary_reports_no_mask_as_null_not_empty_union() {
+        let summary = throttle_summary(&[DeviceStatus::default()]);
+        assert_eq!(summary["samples_with_mask"], json!(0));
+        assert_eq!(summary["mask_any"], Value::Null);
+        assert_eq!(summary["active_reasons"], json!([]));
     }
 
     #[test]
