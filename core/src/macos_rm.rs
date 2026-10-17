@@ -29,7 +29,7 @@ pub struct DeviceInfo {
     pub unavailable: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DeviceStatus {
     pub pstate: Option<u32>,
     /// Actual (effective) clock of each public domain the driver reports.

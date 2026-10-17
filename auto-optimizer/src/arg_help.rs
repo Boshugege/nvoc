@@ -37,6 +37,96 @@ pub fn get_arguments() -> Command {
         .subcommand(vfp_autoscan_command(true))
         .subcommand(optimize_command())
         .subcommand(vfp_reset_command())
+        .subcommand(macos_eval_command())
+}
+
+fn macos_eval_command() -> Command {
+    Command::new("macos-eval")
+        .about(
+            "macOS-only stock evaluation: bounded Vulkan load + native RM telemetry + \
+             Metal correctness verifier. Read-only; performs no writes.",
+        )
+        .after_help(
+            "Runs the original cli-stressor-cuda-rs --vulkan-only load for --duration \
+             while sampling the NullMoth RM telemetry, then runs the stress-macos \
+             Metal verifier (when --metal-check points at it). No candidate is \
+             applied: there is no verified macOS offset/VF write path yet, so this \
+             is the preflight + load + verify step only.",
+        )
+        .arg(
+            Arg::new("duration")
+                .long("duration")
+                .value_name("SECS")
+                .num_args(1)
+                .value_parser(clap::value_parser!(f64))
+                .default_value("30")
+                .help("Bounded stock load duration in seconds"),
+        )
+        .arg(
+            Arg::new("interval")
+                .long("interval")
+                .value_name("SECS")
+                .num_args(1)
+                .value_parser(clap::value_parser!(f64))
+                .default_value("2")
+                .help("Telemetry sample interval in seconds"),
+        )
+        .arg(
+            Arg::new("vulkan-stressor")
+                .long("vulkan-stressor")
+                .value_name("PATH")
+                .num_args(1)
+                .default_value("cli-stressor-cuda-rs")
+                .help("Path to the original Vulkan stressor binary to reuse"),
+        )
+        .arg(
+            Arg::new("metal-check")
+                .long("metal-check")
+                .value_name("PATH")
+                .num_args(1)
+                .default_value("")
+                .help("Path to stress-macos/metal_check; empty skips the verifier"),
+        )
+        .arg(
+            Arg::new("out")
+                .long("out")
+                .value_name("PATH")
+                .num_args(1)
+                .default_value("")
+                .help("Optional path to also write the JSON report to"),
+        )
+        .arg(
+            Arg::new("vulkan-width")
+                .long("vulkan-width")
+                .value_name("PX")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u32))
+                .help("Override the stressor render width (default: tool default)"),
+        )
+        .arg(
+            Arg::new("vulkan-height")
+                .long("vulkan-height")
+                .value_name("PX")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u32))
+                .help("Override the stressor render height"),
+        )
+        .arg(
+            Arg::new("vulkan-shells")
+                .long("vulkan-shells")
+                .value_name("N")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u32))
+                .help("Override the stressor shell count"),
+        )
+        .arg(
+            Arg::new("vulkan-iters")
+                .long("vulkan-iters")
+                .value_name("N")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u32))
+                .help("Override the stressor iteration count"),
+        )
 }
 
 fn optimize_command() -> Command {

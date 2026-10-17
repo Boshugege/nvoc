@@ -6,6 +6,7 @@
 mod arg_help;
 mod autoscan_config;
 mod cleanup;
+mod macos_eval;
 #[cfg(debug_assertions)]
 mod manual_override;
 mod oc_profile_function;
@@ -19,6 +20,7 @@ mod scan_support;
 mod stressor_process;
 
 use anyhow::Result;
+use clap::ArgMatches;
 use cleanup::{AutoscanExit, cleanup_autoscan_exit};
 use nvoc_core::{
     BackendSet, ConvertEnum, GpuSelector, GpuTarget, ResetPublicVftableOffset, VfpResetDomain,
@@ -80,6 +82,8 @@ enum TargetRequirement {
     None,
     NvapiAny,
     NvapiSingle,
+    /// Native NullMoth RM (macOS); discovered without NVAPI/NVML.
+    MacosRm,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +95,7 @@ struct CommandRequirements {
 fn command_requirements(command: &str) -> Option<CommandRequirements> {
     let target = match command {
         "export-vfp-log" => TargetRequirement::None,
+        "macos-eval" => TargetRequirement::MacosRm,
         "export-vfp" | "import-vfp" | "fix-vfp-result" => TargetRequirement::NvapiSingle,
         "reset-vfp" | "autoscan-vfp" | "autoscan-vfp-legacy" | "optimize" => {
             TargetRequirement::NvapiAny
@@ -103,6 +108,13 @@ fn command_requirements(command: &str) -> Option<CommandRequirements> {
     );
 
     Some(CommandRequirements { target, elevation })
+}
+
+fn gpu_selector(matches: &ArgMatches) -> GpuSelector {
+    match matches.get_many::<String>("gpu") {
+        Some(values) => GpuSelector::from_specs(values.cloned()),
+        None => GpuSelector::all(),
+    }
 }
 
 fn main_result() -> Result<i32, Box<dyn std::error::Error>> {
@@ -124,6 +136,20 @@ fn main_result() -> Result<i32, Box<dyn std::error::Error>> {
         return Ok(0);
     }
 
+    if requirements.target == TargetRequirement::MacosRm {
+        let inventory = discover_targets(BackendSet::MacosRm)?;
+        let selector = gpu_selector(&matches);
+        let targets_all = inventory.targets();
+        let selected = select_targets(&targets_all, &selector).unwrap_or_default();
+        return match matches.subcommand() {
+            Some(("macos-eval", matches)) => {
+                macos_eval::run_macos_eval(&selected, matches)?;
+                Ok(0)
+            }
+            _ => unreachable!("macOS command requirements did not match dispatch"),
+        };
+    }
+
     let inventory = discover_targets(BackendSet::Both)
         .or_else(|both_err| {
             eprintln!("Warning: combined GPU discovery failed: {}", both_err);
@@ -134,10 +160,7 @@ fn main_result() -> Result<i32, Box<dyn std::error::Error>> {
             discover_targets(BackendSet::Nvml)
         })?;
 
-    let selector = match matches.get_many::<String>("gpu") {
-        Some(values) => GpuSelector::from_specs(values.cloned()),
-        None => GpuSelector::all(),
-    };
+    let selector = gpu_selector(&matches);
 
     let targets_all = inventory.targets();
     let selected_targets = select_targets(&targets_all, &selector).unwrap_or_default();
