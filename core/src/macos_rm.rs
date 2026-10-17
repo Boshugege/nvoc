@@ -111,9 +111,31 @@ const SETTINGS_UNREADABLE_REASON: &str =
 /// on a background that cannot miss a write, the domain-control GET writes its
 /// value dwords and they are all zero, so no offset is applied. What is still
 /// open is *which* of those twelve dwords is the offset (the slot identity
-/// needed to write one), so the family stays unwritable and, until the public
-/// backend carries the block at all, unreadable through this session.
-const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 (0x2080901B writes its value dwords as zero at stock on an 0xA5 background, so no offset is applied), range readable from 0x20809025 (+-18750 kHz); the dword that carries the offset within each record is not yet pinned and this session does not carry the block, so no SET is issued (see notes)";
+/// needed to write one), so the family stays unwritable. The session does carry
+/// the block now, so the *window* is reported as measured data in
+/// [`DeviceSettings::clock_offset_limits_khz`]; only the offset itself stays out
+/// of the numbers, because saying "0" would assert a slot identity this backend
+/// does not have.
+const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 (0x2080901B writes its value dwords as zero at stock on an 0xA5 background, so no offset is applied); the window the driver enforces is reported as measured data in clock_offset_limits_khz; which of the twelve value dwords carries the offset is not yet pinned, so the offset itself is not reported as a number and no SET is issued (see notes)";
+
+/// The offset window the driver reports for a clock domain, in kHz.
+///
+/// Only present while the range block was read *and* every readable record of
+/// it agreed. The records are not yet attributed to named domains (their tags
+/// count `0x01030101/0x01040101/0x01050101` while the directory enumerates
+/// domain *bits*), so a disagreement would force a claim this backend cannot
+/// make -- and the window is reported as absent rather than picked.
+///
+/// This is a limit, not a setting: what the driver currently *applies* lives in
+/// the control block, whose value dwords read zero at stock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ClockOffsetLimits {
+    pub min_khz: i32,
+    pub max_khz: i32,
+    /// How many range records the window was read from, so an aggregate cannot
+    /// be mistaken for a single domain's.
+    pub records: usize,
+}
 
 /// Read-only projection of the driver-visible configuration.
 ///
@@ -133,6 +155,10 @@ pub struct DeviceSettings {
     pub board_id: Option<u32>,
     pub chip_sku: Option<String>,
     pub project: Option<String>,
+    /// The offset window the driver reports, in kHz, measured from the device's
+    /// range block. `None` when that block was refused, malformed, empty or its
+    /// records disagreed; the offset channel note says which.
+    pub clock_offset_limits_khz: Option<ClockOffsetLimits>,
     /// Configuration families this backend cannot read (or write) yet, keyed by
     /// the family name, with the cause.
     pub unavailable: BTreeMap<String, String>,
@@ -176,6 +202,9 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
         board_id: info.board_id,
         chip_sku: info.chip_sku.clone(),
         project: info.project.clone(),
+        // Filled in by `apply_offset_channel` from a live read; the pure
+        // projection leaves it absent rather than guessing a window.
+        clock_offset_limits_khz: None,
         unavailable,
         capabilities: SettingsCapabilities {
             settings_read: true,
@@ -190,6 +219,81 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
     }
+}
+
+/// How one offset block ended, in the vocabulary the evidence note uses. Kept
+/// as a function rather than a closure so it can stay generic over the block.
+fn block_outcome<T>(block: &str, read: &macos_offset::OffsetBlockRead<T>) -> String {
+    use macos_offset::OffsetBlockRead::{Malformed, Parsed, Refused};
+    match read {
+        Parsed(_) => format!("{block} NV_OK"),
+        Refused(status) => format!("{block} refused {status:#010x}"),
+        Malformed(err) => format!("{block} malformed ({err})"),
+    }
+}
+
+/// Folds one reading of the private clock-offset channel into the settings
+/// projection.
+///
+/// Two rules drive this, both from the integration plan:
+///
+/// * **A refusal is not a value.** The window is set only from a parsed range
+///   block; a refused or malformed block leaves the field `None` and states the
+///   RM status, so a wedge cannot appear as "the limit is 0 kHz".
+/// * **No claim about a domain the records have not earned.** The range records
+///   are not attributed to named domains, so the window is reported only while
+///   every readable record agrees, and it carries how many records it came from.
+///
+/// The outcome of all three blocks is recorded in one note, the way the rest of
+/// this projection reports evidence, so a caller reading `None` can see whether
+/// the block was never requested, refused, or did not look like a range block.
+fn apply_offset_channel(
+    settings: &mut DeviceSettings,
+    channel: &macos_offset::OffsetChannelSnapshot,
+) {
+    use macos_offset::OffsetBlockRead::{Malformed, Parsed, Refused};
+
+    let mut outcomes = vec![
+        block_outcome("directory 0x20809019:", &channel.directory),
+        block_outcome("range 0x20809025:", &channel.range),
+        block_outcome("control 0x2080901B:", &channel.control),
+    ];
+
+    match &channel.range {
+        Parsed(range) if range.records.is_empty() => {
+            outcomes.push("no range record was selected, so no window is reported".into());
+        }
+        Parsed(range) => {
+            let first = &range.records[0];
+            let all_agree = range
+                .records
+                .iter()
+                .all(|r| r.min_khz == first.min_khz && r.max_khz == first.max_khz);
+            if all_agree {
+                settings.clock_offset_limits_khz = Some(ClockOffsetLimits {
+                    min_khz: first.min_khz,
+                    max_khz: first.max_khz,
+                    records: range.records.len(),
+                });
+            } else {
+                // Named-domain attribution is what would let these be reported
+                // separately; until it exists, picking one would be a claim.
+                outcomes.push(format!(
+                    "the {} range records disagree (first {}..{} kHz), so no single window is reported",
+                    range.records.len(),
+                    first.min_khz,
+                    first.max_khz
+                ));
+            }
+        }
+        Refused(_) | Malformed(_) => {
+            outcomes.push("no window is reported for this reason".into());
+        }
+    }
+
+    settings
+        .notes
+        .push(format!("offset channel: {}", outcomes.join(", ")));
 }
 
 #[derive(Debug, Clone)]
@@ -223,7 +327,18 @@ impl Device {
         let snapshot = self.refreshed_snapshot()?;
         let info = device_from_snapshot(&snapshot).info;
         let status = status_from_snapshot(&snapshot);
-        Ok(settings_from(&info, &status))
+        let mut settings = settings_from(&info, &status);
+        // The offset channel is only reachable through a session, and it is the
+        // one part of this read the GSP can refuse on its own (a wedge answers
+        // 0x62 per block). Neither may fail the settings read: both land in the
+        // notes as evidence instead of turning into a value.
+        match MacosRmSession::open().and_then(|mut session| session.read_offset_channel()) {
+            Ok(channel) => apply_offset_channel(&mut settings, &channel),
+            Err(error) => settings
+                .notes
+                .push(format!("offset channel: not read ({error})")),
+        }
+        Ok(settings)
     }
 
     /// One fresh snapshot, with the identity re-checked against this handle.
@@ -1934,6 +2049,145 @@ mod tests {
                 .any(|note| note.contains("0x2080B201"))
         );
         assert!(settings.notes.iter().any(|note| note.contains("0x1f")));
+    }
+
+    /// The driver's own bytes, as captured by the probe: the same fixtures the
+    /// parser test uses, so the numbers below are measured rather than restated.
+    const OFFSET_RANGE_FIXTURE: &[u8] = include_bytes!("../tests/data/macos-offset-range.bin");
+
+    fn offset_snapshot(
+        range: macos_offset::OffsetBlockRead<macos_offset::OffsetRange>,
+    ) -> macos_offset::OffsetChannelSnapshot {
+        // Only the range block is varied: the other two are carried so the note
+        // can report their statuses, which is the point of reporting them.
+        macos_offset::OffsetChannelSnapshot {
+            directory: macos_offset::OffsetBlockRead::Refused(0x62),
+            range,
+            control: macos_offset::OffsetBlockRead::Parsed(
+                macos_offset::parse_control(&[0u8; macos_offset::OFFSET_CONTROL_BYTES])
+                    .expect("a zeroed block is a well-formed control block"),
+            ),
+        }
+    }
+
+    /// A projection with no window, as `settings_from` leaves it before any
+    /// channel read, so the tests start from the state a caller sees when the
+    /// block was never requested.
+    fn bare_settings() -> DeviceSettings {
+        DeviceSettings {
+            pstate: None,
+            power_limit_mw: None,
+            power_limit_requested_mw: None,
+            pcie_link_gen: None,
+            memory_total_bytes: None,
+            memory_used_bytes: None,
+            board_id: None,
+            chip_sku: None,
+            project: None,
+            clock_offset_limits_khz: None,
+            unavailable: BTreeMap::new(),
+            capabilities: SettingsCapabilities {
+                settings_read: true,
+                settings_write: false,
+                settings_restore: false,
+            },
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_offset_window_is_the_devices_not_a_constant() {
+        let mut settings = bare_settings();
+        let range = macos_offset::parse_range(OFFSET_RANGE_FIXTURE).expect("committed fixture");
+        apply_offset_channel(
+            &mut settings,
+            &offset_snapshot(macos_offset::OffsetBlockRead::Parsed(range)),
+        );
+        // The recorded block: three records, all -18750..+18750 kHz.
+        assert_eq!(
+            settings.clock_offset_limits_khz,
+            Some(ClockOffsetLimits {
+                min_khz: -18_750,
+                max_khz: 18_750,
+                records: 3,
+            })
+        );
+        let note = settings.notes.join("\n");
+        assert!(note.contains("range 0x20809025: NV_OK"), "{note}");
+        assert!(note.contains("control 0x2080901B: NV_OK"), "{note}");
+        // The same reading states why the *offset* is still not a number: the
+        // window is a limit, and reporting it must not quietly promote the
+        // offset families out of `unavailable`.
+        assert!(!settings.notes.is_empty());
+    }
+
+    #[test]
+    fn a_refused_range_block_is_never_a_zero_window() {
+        let mut settings = bare_settings();
+        apply_offset_channel(
+            &mut settings,
+            &offset_snapshot(macos_offset::OffsetBlockRead::Refused(0x62)),
+        );
+        assert_eq!(settings.clock_offset_limits_khz, None);
+        let note = settings.notes.join("\n");
+        assert!(
+            note.contains("refused 0x0000_0062") || note.contains("refused 0x00000062"),
+            "{note}"
+        );
+        assert!(note.contains("no window is reported"), "{note}");
+    }
+
+    #[test]
+    fn records_that_disagree_do_not_become_one_window() {
+        let mut settings = bare_settings();
+        // Two records with different ceilings: reporting either as "the" window
+        // would attribute it to a domain the backend has not identified.
+        let range = macos_offset::OffsetRange {
+            head: Vec::new(),
+            records: vec![
+                macos_offset::OffsetRangeRecord {
+                    index: 0,
+                    tag: 0x0103_0101,
+                    max_vf_khz: 1_638_400,
+                    min_khz: -18_750,
+                    max_khz: 18_750,
+                },
+                macos_offset::OffsetRangeRecord {
+                    index: 1,
+                    tag: 0x0104_0101,
+                    max_vf_khz: 1_638_400,
+                    min_khz: -18_750,
+                    max_khz: 12_000,
+                },
+            ],
+        };
+        apply_offset_channel(
+            &mut settings,
+            &offset_snapshot(macos_offset::OffsetBlockRead::Parsed(range)),
+        );
+        assert_eq!(settings.clock_offset_limits_khz, None);
+        let note = settings.notes.join("\n");
+        assert!(note.contains("disagree"), "{note}");
+
+        // And an empty selection is its own reason, not a zero-width window.
+        let empty = macos_offset::OffsetRange {
+            head: Vec::new(),
+            records: Vec::new(),
+        };
+        let mut settings = bare_settings();
+        apply_offset_channel(
+            &mut settings,
+            &offset_snapshot(macos_offset::OffsetBlockRead::Parsed(empty)),
+        );
+        assert_eq!(settings.clock_offset_limits_khz, None);
+        assert!(
+            settings
+                .notes
+                .join("\n")
+                .contains("no range record was selected"),
+            "{:?}",
+            settings.notes
+        );
     }
 
     /// A raw sample in which every section is readable and carries the same

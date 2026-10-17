@@ -1451,6 +1451,22 @@ fn settings_macos_rm_to_map(
     if let Some(value) = &settings.project {
         map.insert("project".into(), text(value));
     }
+    // The measured offset window. Absent rather than zeroed when the driver
+    // refused the range block, so a UI can tell "unknown" from "0 kHz".
+    if let Some(limits) = &settings.clock_offset_limits_khz {
+        map.insert(
+            "clock_offset_min_khz".into(),
+            i64_value(limits.min_khz as i64),
+        );
+        map.insert(
+            "clock_offset_max_khz".into(),
+            i64_value(limits.max_khz as i64),
+        );
+        map.insert(
+            "clock_offset_limits_records".into(),
+            u64_value(limits.records as u64),
+        );
+    }
     let caps = settings.capabilities;
     map.insert(
         "capabilities".into(),
@@ -5839,6 +5855,13 @@ mod tests {
             board_id: Some(376),
             chip_sku: Some("250".to_string()),
             project: Some("G166".to_string()),
+            // The measured half: the window the driver reports, alongside the
+            // families it does not report at all.
+            clock_offset_limits_khz: Some(nvoc_core::ClockOffsetLimits {
+                min_khz: -18_750,
+                max_khz: 18_750,
+                records: 3,
+            }),
             unavailable: std::collections::BTreeMap::from([(
                 "core_clock_offset".to_string(),
                 "no readable RM control for this family on this driver (see notes)".to_string(),
@@ -5862,6 +5885,11 @@ mod tests {
         assert!(!map.contains_key("mem_clock_current"));
         assert!(!map.contains_key("voltage_boost_current"));
         assert!(map["unavailable"].get("core_clock_offset").is_some());
+        // The window is a measurement, so it is a number -- while the offset
+        // itself stays absent, because its slot is not pinned yet.
+        assert_eq!(map["clock_offset_min_khz"], i64_value(-18_750));
+        assert_eq!(map["clock_offset_max_khz"], i64_value(18_750));
+        assert_eq!(map["clock_offset_limits_records"], u64_value(3));
         assert_eq!(map["notes"].as_array().map(Vec::len), Some(1));
     }
 
