@@ -75,6 +75,33 @@ VERIFIED = {
     0x2080B213: "recorded payload: 12 B head + 32x32 B",
 }
 
+# 0x2080901D sits in GEOMETRY but NOT in VERIFIED, so its (40, 1020) split is
+# arithmetic only -- and the arithmetic has four solutions, not one: 40+32*1020,
+# 168+32*1016, 296+32*1012 and 424+32*1008 all equal 32680.  The 2026-10-17
+# 0xA5 run supplies the first *measured* structure for this id: its changed-dword
+# list repeats 128 bytes apart between the group at +36..+56 and the group at
+# +164..+184 (three dwords byte-identical, two differing in a single byte), which
+# is what a per-domain record table looks like.  Two consequences worth keeping
+# straight:
+#   * a 128-byte period cannot tile any of the four arithmetic splits (1012-1020
+#     bytes is 7x128 + 116..124), so a 128 B stride would be evidence the
+#     arithmetic alone could not produce;
+#   * both observed groups are consecutive under (header 36, stride 128), while
+#     under (40, 1020) the first group lands in the head and the second at
+#     rec0+124.
+# The discriminating observation is therefore the *third* group, and it is
+# pre-registered here: a full payload with an 0xA5 background decides it.
+MEASURED_REPETITION = {
+    0x2080901D: {
+        "artifact": "stage-gsp-clkctl-20261017T092536Z/clkctl-offsweep-run1-A5.txt",
+        "group_starts": (36, 164),
+        "observed_stride": 128,
+        "prediction_if_stride_128": "a third group at +292",
+        "prediction_if_head_1020": "the next group starts at +1060 (40 + 1020)",
+        "pending": "a full 0x2080901d payload with an 0xA5 background",
+    },
+}
+
 # Record dwords that are really a signed 16-bit PAIR (measured pattern, not a
 # name): 0x20809019's rec+44 reads 0x03e8fc18 / 0x0bb8fc18 on two domains, i.e.
 # (-1000,+1000) and (-1000,+3000) as two i16s, while the same slots read as a
@@ -588,6 +615,20 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
 
 def selftest() -> int:
     check_geometry()
+    # The 0x2080901d candidate above claims a measured 128-byte period over a
+    # 32680-byte payload.  Assert the two facts that make it checkable at all:
+    # the arithmetic split has four solutions (so it cannot be evidence by
+    # itself), and none of them admits a 128-byte period.
+    solutions = [
+        (head, (32680 - head) // 32)
+        for head in range(0, 2048)
+        if (32680 - head) % 32 == 0 and (32680 - head) // 32 in (1008, 1012, 1016, 1020)
+    ]
+    assert sorted(solutions) == [(40, 1020), (168, 1016), (296, 1012), (424, 1008)], solutions
+    for head, stride in solutions:
+        assert stride % 128 != 0, (head, stride)
+    rep = MEASURED_REPETITION[0x2080901D]
+    assert rep["group_starts"][1] - rep["group_starts"][0] == rep["observed_stride"]
     # Synthetic 0x20809025 payload: mask 0x7, three NAFLL-style records with the
     # values this TU116 actually returned (1638400 kHz, -18750/+18750 kHz).
     header, stride = GEOMETRY[0x20809025][1:]
