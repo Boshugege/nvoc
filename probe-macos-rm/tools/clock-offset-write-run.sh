@@ -29,9 +29,21 @@
 #   <delta> kHz, one minimal step, capped at +-1000 by the probe
 #
 # Refuses to write unless: exactly one candidate is given (this is not a sweep
-# tool), the driver's own anchor read answers NV_OK (never write into a wedge,
-# where every reply collapses to 0x62 and a rejection would be unreadable), and
-# the full profile builds (the idle build cannot send a stage-3 write at all).
+# tool), the process is root (see below), the driver's own anchor read answers
+# NV_OK (never write into a wedge, where every reply collapses to 0x62 and a
+# rejection would be unreadable), and the full profile builds (the idle build
+# cannot send a stage-3 write at all).
+#
+# Root is not politeness -- it is the precondition the write is refused on. The
+# host forwarder rejects a control id whose bits carry (cmd & 0xC000) == 0xC000
+# unless the calling client is at RS_PRIV_LEVEL_USER_ROOT, and on the corrected
+# 1118-row table that test selects exactly the 92 write-half ids and nothing
+# else: the write half and the privileged half are the same set. 0x2080d01c
+# carries 0xC000, which is why an unprivileged client is refused with 0x1b
+# before the GSP ever sees the request -- so without root the run would report a
+# driver refusal that is really a process-privilege one. 0x2080901b carries
+# 0x8000 and is not privileged, which is exactly why every read on this driver
+# has worked as the login user.
 #
 # A live frequency change is NOT a criterion either way: NVK issues its own
 # PERF_BOOST, so the verdict is the read-back and the restore, nothing else.
@@ -56,6 +68,22 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
 out_root=${OUT_ROOT:-$HOME/Desktop/macOS-nvoc-develop/outputs}
 ogkm=${OGKM:-$HOME/Desktop/macOS-nvoc-develop/reference/open-gpu-kernel-modules-610.57.04}
+
+# 0. the privilege precondition, checked before anything else so that a refusal
+#    here is never mistaken for the driver refusing the id.
+if [ "$(id -u)" -ne 0 ]; then
+    if sudo -n true 2>/dev/null; then
+        echo "not root; re-executing under sudo -n (passwordless) -- the write" >&2
+        echo "half is privileged, so an unprivileged SET would return 0x1b" >&2
+        exec sudo -n OGKM="$ogkm" OUT_ROOT="$out_root" "$0" "$@"
+    fi
+    echo "not root, and sudo needs a password -- refusing to attempt the write." >&2
+    echo "  The host forwarder rejects (cmd & 0xC000) == 0xC000 below root, and" >&2
+    echo "  0x2080d01c carries those bits: an unprivileged SET comes back 0x1b" >&2
+    echo "  before the GSP sees it, which would look like the driver refusing." >&2
+    echo "  Rerun as: sudo OUT_ROOT=$out_root $0 $cand" >&2
+    exit 4
+fi
 
 # 1. the write vehicle: the full profile, never the idle one.
 if [ ! -x "$root/probe-macos-rm" ]; then
