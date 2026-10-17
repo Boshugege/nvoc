@@ -1434,7 +1434,24 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 ### 43.2 `0x2080a06e` 的身份：不再"尚未定位" ✔
 - 接口字节 `0xa0 = 0x20 | 0x80`（PERF 族的 legacy non-privileged 别名，见 §42）✔，消息 id `0x6e` 与公开 `0x2080206e` **相同**，而公开 id 在 SDK 中被命名为 `NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL`（`ctrl2080perf.h:399`）⇒ **`0x2080a06e` 就是同一 RATED_TDP get-control 的 legacy 别名** ✔ ✔。
 - 佐证 ✔：实测 12 B ＝ `sizeof(NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS) = 12` ✔（但 `NV2080_CTRL_PERF_GET_VID_ENG_PERFMON_SAMPLE_PARAMS` 亦为 12 ✗ ⇒ 单凭尺寸不能命名 ✔）。
-- ⚠️ 其写半边 `0x2080e06f` 实测 **8 B**，与 SDK 的 `NV2080_CTRL_PERF_RATED_TDP_SET_CONTROL_PARAMS = 12` **不一致** ✗ ⇒ **写半边必须按它自己的行解析**，不得假设与读半边同构 ✔（与 §40 该孪生对的注记一致 ✔）。
+- ⚠️ 其写半边 `0x2080e06f` 表内声明 **8 B**（`nvoc-analysis/tables/gsp-1118.tsv`，由 `probe-macos-rm/tools/extract-gsp-method-table.py` 从驱动导出），与 SDK 的 `NV2080_CTRL_PERF_RATED_TDP_SET_CONTROL_PARAMS = 12` **不一致** ✗ ⇒ **写半边必须按它自己的行解析**，不得假设与读半边同构 ✔（与 §40 该孪生对的注记一致 ✔）。
+### 43.2b 尺寸门＝表内 paramSize：五条独立对照 ✔
+
+把「驱动接受多大参数块」与 1118 行导出表的 `paramSize` 列逐条并排，五条全中（**两条来自本机捕获的扫描行，
+两条来自探针 banner，一条是偏移 GET 的 2108**）：
+
+| id | 表内 paramSize（`nvoc-analysis/tables/gsp-1118.tsv`） | 实测接受尺寸（产物） |
+| --- | --- | --- |
+| `0x2080b201` | 2444 | `stage3-paramsizes-20261017T044129Z/tierb-size-resolution.txt:3`（`size-1 (2443) -> 0x1f, size (2444) -> NV_OK`）✔ |
+| `0x2080b202` | 3232 | 同文件 `:57`（`size 3232 -> 0x00000000`）✔ |
+| `0x208090a2` | 524 | `tierb-size-resolution.txt:21` 的 banner `@ 524` ✔ |
+| `0x2080901b` | 2108 | `clock-offset-read-run.sh` 的 2108 读 ✔ |
+| `0x2080d01c` | 2108 | 写半孪生（`flags 0x44`），与读半同尺寸 ✔ |
+
+**为什么值得记**：它把「参数块尺寸由 RM 侧声明并校验」从推断升级为**可执行判据**——表内 paramSize 就是该 id 的
+正向尺寸，差一档即 `0x1f`（`0x2080b201` 的 2443 与 `0x2080b202` 的 3212 就是两条阴性对照）。同族的
+`0x20809022` 表内 623112 ⇒ 想读 VFP 曲线就得给出 623112 字节的参数块，这解释了「短块一律 `0x1f`」的现象。
+
 ### 43.3 按尺寸可命名的候选行 ✔
 - `0x20801037`（CLK，6024）与 `sizeof(NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS) = 6024` 相同 ⇒ **候选命名**：PMU 监控的时钟域采样 ✔（记为候选，因同尺寸非唯一 ✔）。
 - `0x2080852e`（THERMAL，1432）与 execute-v2 同尺寸，且其孪生 `0x2080c52f` **不在**那 6 个可写行里 ⇒ 读侧同类 ✔（候选 ✔）。
@@ -1585,7 +1602,7 @@ goal 原文与交接 §4.1 都提到"旧工具静默丢了 229 行"；我此前�
 - **掩码位置**：RM 块 `mask@+4`（**不是** NVAPI 调用者层的 `+8`）；`HEAD=14` 是**唯一拟合常数**，行级 type 规则（13/13/…/1）可独立核对（§44）。
 - **写集合可被机器裁决**：`decode-clk-containers.py` 的 `write_set_check()` 对真 0xA5 dump 逐行 MATCH/MISMATCH，且**拒绝零背景块**（零背景下"写了 0"与"未触碰"不可区分）（§44.2）。
 - **偏移记录身份**：只在**同快照内**"发布频率 = 该名字对应的实时时钟"且**精确唯一**时命名；实时频率只用于**身份**，**不参与"写是否生效"**——成功判据只能是写入后**同字段回读**（§47.4）。
-- **`0x2080a06e` 身份已定**：PERF 族 legacy 别名，即同一 RATED_TDP get-control；其 **SET 孪生 `0x2080e06f` 实测 8 B ≠ SDK 的 12 B** ⇒ **写半边必须按它自己的行解析**，不得假设与读半边同构（§43.2–43.3）。
+- **`0x2080a06e` 身份已定**：PERF 族 legacy 别名，即同一 RATED_TDP get-control；其 **SET 孪生 `0x2080e06f` 表内声明 8 B ≠ SDK 的 12 B** ⇒ **写半边必须按它自己的行解析**，不得假设与读半边同构（§43.2–43.3）。
 - **缺席不等于不存在**：`0x2080901b`/`0x2080d01c`/`0x2080a06e` 在生成派发表里**完全不存在**，而该表只覆盖公开半区的子集（§40.2）；`ctrl2080fan.h` 是 **33 行空壳**（0 个 `#define`、0 个 `typedef`）⇒ 风扇族的材料是驱动自身代码与生成表，不是 SDK 头文件（§43.4）。
 
 ### 48.3 仍未定位（不许被"跑不出来"顶替，也不许被写死为"只能固件逆向"）
