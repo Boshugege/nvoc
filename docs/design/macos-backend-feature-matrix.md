@@ -496,3 +496,15 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
   写入仍门控；客户端不部署、不自动重启、不操作 PR。
 
 - **RM 封送纠错表（新，2026-10-17）**：分清 base 口径后，「76 B stride 却出现 >76 字段」的矛盾解决——记录里的 `0x3C/0x40/0x44/0x48/0x68/0x6C/0x77` 是 **escape 容器绝对偏移**（容器头 14 dword = `0x38`，`buf[13]`=RM cmd），减去 `0x38` 后全部落进 76 B 记录内；本机实测 2444 = **12 B 头 + 32×76**，与 5 个记录字段逐一对上（mask `|=1<<bit`、type=2、`959`、`1`、rail class=1），两个 µV 读数保持记录中的 36 B 间距。`(version<<16|size)` magic 属 **NVAPI 层**，RM 参数块里没有 magic（dword0 是输出 mask，seed 0xFFFFFFFF 也回 0xFF）。同表另证 `0x2080B201` **不是精确尺寸**而是 **≥2444**（2448/2480/2500/500008 均 `NV_OK`，2440 及以下 `0x1f`），**device 对象也答 `NV_OK`**、client 答 `0x56` ⇒ 不经 NVOC 精确尺寸闸门，与活表查无此 id 互相印证。详见 `docs/reverse-engineering/nvapi/rm-param-marshall-corrections-r610.md`。
+
+- **底层驱动自发 PERF_BOOST（新，2026-10-17，静态 + 日志交叉）**：`libvulkan_nouveau.dylib`
+  （sha256 `cfa7e20f…9d19a51c7`）里 `0x2080200a` 只有两处，均为 **NVK 自己发**，不是 agent：
+  ① `_nvkmd_nvrm_enum_pdev`（设备创建）发 `flags=0x12`（`BOOST_TO_MAX｜CUDA_YES`）+ `duration=INFINITE`；
+  ② `_nvkmd_nvrm_pdev_destroy`（设备销毁）发 `flags=0`（`CMD_CLEAR`）+ `duration=0`。
+  两处同一个门 `nvrm610_on("BOOST")`（env `NVRM_610_BOOST` → `/Library/GPUBundles/nvmtl/nvrm610.conf`
+  的 `BOOST=` → 默认 **ON**；本机实测 ON）。`outputs/` 里 **50 条**
+  `nvrm: b81 PERF_BOOST flags 0x12 INFINITE rc 0x0` 证明它确实成功下发；host 侧
+  `kern_perf_boost.c` 对非 GB10Y **没有** clear 分支 ⇒ 释放完全依赖客户端的 `CMD_CLEAR`。
+  影响：**运行期频率升高可能来自这条 boost 而非 offset 写入**，因此偏移实验的成功判据里
+  RUSD 实时 kHz 明确**不作依据**（`probe-macos-rm/WRITE-VERIFICATION-PLAN.md` §7.3-⑤/§7.6）。
+  详见 `docs/reverse-engineering/nvapi/nvk-perf-boost-internal.md`。**本轮无任何 GPU 写入**。

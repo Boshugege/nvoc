@@ -150,3 +150,25 @@ cd probe-macos-rm && ./probe-macos-rm-idle --anchor-read
 `0x2080122a@20 = 0x1f`（host 尺寸门照旧）。同一次里 stage-2 的 `fb-*`/`perf-*`/`rusd` 也全 `0x62`
 （`NV00DE alloc rejected`），而 `bios-sku-info`/`bus-get-pci-info` 仍 `NV_OK` ⇒ **wedge 仍然是「GSP 派发面整体不可用、
 host 应答面正常」**，与 §6/§12 的描述一致。轮询继续按此判据，不自行重启。
+
+### 7.6 底层驱动自带的 PERF_BOOST（与 agent 写入分开记账）
+
+`/Library/GPUBundles/nvmtl/libvulkan_nouveau.dylib` 里只有两处 `0x2080200a`，均为 NVK 自发：
+
+| 时机 | 函数 | flags | duration |
+| --- | --- | --- | --- |
+| 设备创建 | `_nvkmd_nvrm_enum_pdev`（`0x12d24b`） | `0x12` = `BOOST_TO_MAX｜CUDA_YES` | `0xffffffff` = INFINITE |
+| 设备销毁 | `_nvkmd_nvrm_pdev_destroy`（`0x12d4f2`） | `0` = `CMD_CLEAR` | `0` |
+
+两处同一个门 `nvrm610_on("BOOST")`（env `NVRM_610_BOOST` → `/Library/GPUBundles/nvmtl/nvrm610.conf`
+的 `BOOST=` 行 → 默认 **ON**；本机实测为 ON）。`outputs/` 里有 50 条
+`nvrm: b81 PERF_BOOST flags 0x12 INFINITE rc 0x0`，即 boost 确已成功下发。
+host 侧 `kern_perf_boost.c` **没有** clear/teardown 分支 ⇒ 释放完全依赖 §3.2 那条客户端 clear。
+详见 `docs/reverse-engineering/nvapi/nvk-perf-boost-internal.md`。
+
+对 §7.2/§7.3 的影响（已并入门槛）：
+
+- 运行期频率升高**可能来自 NVK 的 BOOST_TO_MAX，而不是本次 offset 写入**；因此 §7.3-⑤ 的
+  「RUSD 实时 kHz 不作判据」是硬要求，不能放宽。
+- 只要实验窗口内创建过 NVK 设备，就必须在记录里写明该 boost 存在，禁止用
+  「底层没有性能请求」来解释频率变化。

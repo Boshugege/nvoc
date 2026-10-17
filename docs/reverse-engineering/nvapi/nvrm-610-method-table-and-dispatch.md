@@ -141,6 +141,11 @@ The control-relevant subset (exact sizes as registered — no size guessing):
 | THERMAL (05) | 0x20800513 | 1432 | `subdeviceCtrlCmdThermalSystemExecuteV2` |
 | CLK (10) | 0x20801037 | 6024 | `subdeviceCtrlCmdClkPmumonClkDomainsGetSamples` |
 | PERF (20) | 0x2080200a | 8 | `KPerfBoost` |
+
+> `KPerfBoost` is the one host-registered PERF write the local NVK stack actually exercises:
+> `libvulkan_nouveau.dylib` sends it twice (device create: `BOOST_TO_MAX|CUDA_YES` + `INFINITE`;
+> device destroy: `CMD_CLEAR`), both gated on `nvrm610_on("BOOST")` and both `NV_ESC_RM_CONTROL`.
+> See `nvk-perf-boost-internal.md`. This is a driver-internal request, **not** an agent SET.
 | PERF (20) | 0x2080200b | 780 | `PerfGetLevelInfo_V2` |
 | PERF (20) | 0x2080205a / 0x2080205b | 4 | `PerfGetPowerstate` / `PerfSetPowerstate` |
 | PERF (20) | 0x20802068 | 4 | `PerfGetCurrentPstate` |
