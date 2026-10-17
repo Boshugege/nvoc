@@ -51,6 +51,11 @@ int nvx_stage2_rated_tdp_read(nvx_ctx *c) {
 int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action) {
     (void)c; (void)client; (void)action; abort();
 }
+int nvx_stage2_thermal_read(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE thermal");
+    return 0;
+}
 int nvx_stage3(nvx_ctx *c) { (void)c; abort(); }
 int nvx_stage5(nvx_ctx *c) { (void)c; abort(); }
 int nvx_close(int fd) { printf("FAKE close %d\n", fd); return 0; }
@@ -175,6 +180,15 @@ class IdleCli(unittest.TestCase):
         asked = self.run_cli("--stages", "0", "--rated-tdp-read")
         self.assertEqual(asked.returncode, 0, asked.stderr)
         self.assertEqual(asked.stdout.count("FAKE ratedtdp"), 1)
+
+    def test_thermal_reads_are_explicit_opt_in(self):
+        plain = self.run_cli("--stages", "012")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertNotIn("FAKE thermal", plain.stdout)
+
+        asked = self.run_cli("--stages", "0", "--thermal-read")
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        self.assertEqual(asked.stdout.count("FAKE thermal"), 1)
 
     def test_rated_tdp_set_is_gated_like_other_writes(self):
         log = self.directory / "must-not-exist.jsonl"

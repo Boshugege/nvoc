@@ -66,6 +66,7 @@ OGKM=/path/to/ogkm python3 tests/test_idle_cli.py
 ```bash
 ./probe-macos-rm-idle --stages 0 --tierb-read      # campaign 来源的 legacy rails/VfPoints GET
 ./probe-macos-rm-idle --stages 0 --rated-tdp-read   # PERF_RATED_TDP_GET_CONTROL 全 client 扫描 + 越界反证
+./probe-macos-rm-idle --stages 0 --thermal-read     # THERMAL_SYSTEM_EXECUTE_V2 只读批（传感器读数/范围）
 ```
 
 **写入（门控）**：RATED_TDP 仲裁 SET 已实现为 V3.4，但**不随任何 stage 组运行**，必须显式同时给出

@@ -29,6 +29,7 @@
 #include "ctrl/ctrl2080/ctrl2080fb.h"
 #include "ctrl/ctrl2080/ctrl2080clk.h"
 #include "ctrl/ctrl2080/ctrl2080perf.h"
+#include "ctrl/ctrl2080/ctrl2080thermal.h"
 #include "ctrl/ctrl2080/ctrl2080gpumon.h"
 #include "ctrl/ctrl2080/ctrl2080internal.h"
 #include "ctrl/ctrl2080/ctrl2080bios.h"
@@ -724,6 +725,137 @@ int nvx_stage2_rated_tdp_read(nvx_ctx *c)
         return -1;
     }
     item_rated_tdp_reads(c);
+    return 0;
+}
+
+/* Thermal System V2 read probe (--thermal-read).
+ *
+ * NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2 (0x20800513) is a public, in-tree
+ * opcode-batched interface (ctrl2080thermal.h) whose read opcodes are
+ * documented to return NV_OK: TARGETS_AVAILABLE, SENSORS_AVAILABLE,
+ * SENSOR_READING, SENSOR_READING_RANGE, SENSOR_TARGET, SENSOR_PROVIDER. If the
+ * RM implements it on this kext this is a *header-defined* temperature/sensor
+ * read face with per-sensor range (stage 3 min/max) — unlike the Tier-B GETs
+ * whose IDs are campaign-sourced. All opcodes here are GET; nothing is written.
+ * The batch runs with EXECUTE_FLAGS_IGNORE_FAIL so one unsupported opcode does
+ * not hide the rest; each instruction's own NV_STATUS is reported. */
+static void item_thermal_reads(nvx_ctx *c)
+{
+    static NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS p;
+
+    /* Provide the API handshake fields the header requires. */
+    memset(&p, 0, sizeof p);
+    p.clientAPIVersion = THERMAL_SYSTEM_API_VER;
+    p.clientAPIRevision = THERMAL_SYSTEM_API_REV;
+    p.clientInstructionSizeOf = (NvU32)sizeof(NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION);
+    p.executeFlags = NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_FLAGS_IGNORE_FAIL;
+
+    /* Pass 1: ask how many targets and sensors exist. */
+    p.instructionListSize = 2;
+    p.instructionList[0].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_TARGETS_AVAILABLE_OPCODE;
+    p.instructionList[1].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSORS_AVAILABLE_OPCODE;
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2, &p);
+    nvx_emit(c, "V2.thm", "thermal-targets-sensors", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             "EXECUTE_V2 (0x20800513) paramSize %u: %s",
+             (NvU32)sizeof p,
+             st == 0 ? "batch accepted" : nvx_status_name(st));
+    if (st != 0) {
+        /* Try the non-privileged twin before giving up. */
+        memset(&p, 0, sizeof p);
+        p.clientAPIVersion = THERMAL_SYSTEM_API_VER;
+        p.clientAPIRevision = THERMAL_SYSTEM_API_REV;
+        p.clientInstructionSizeOf = (NvU32)sizeof(NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION);
+        p.executeFlags = NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_FLAGS_IGNORE_FAIL;
+        p.instructionListSize = 2;
+        p.instructionList[0].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_TARGETS_AVAILABLE_OPCODE;
+        p.instructionList[1].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSORS_AVAILABLE_OPCODE;
+        NvU32 st2 = SUBCTL(c, NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2_PHYSICAL, &p);
+        nvx_emit(c, "V2.thm", "thermal-targets-sensors(physical)", st2,
+                 st2 == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "EXECUTE_V2_PHYSICAL (0x20808513): %s (%s)",
+                 st2 == 0 ? "batch accepted" : "refused", nvx_status_name(st2));
+        if (st2 != 0) return;
+    }
+
+    NvU32 targets = p.instructionList[0].operands.getInfoTargetsAvailable.availableTargets;
+    NvU32 sensors = p.instructionList[1].operands.getInfoSensorsAvailable.availableSensors;
+    nvx_emit(c, "V2.thm", "thermal-counts", 0, NVX_V_OK,
+             "%u target(s), %u sensor(s)", targets, sensors);
+    if (sensors == 0) return;
+
+    /* Pass 2: per-sensor reading + range (cap at 8 so we stay under the
+     * instruction-list limit and report compactly). */
+    const NvU32 n = sensors > 8 ? 8 : sensors;
+    for (NvU32 i = 0; i < n; ++i) {
+        memset(&p, 0, sizeof p);
+        p.clientAPIVersion = THERMAL_SYSTEM_API_VER;
+        p.clientAPIRevision = THERMAL_SYSTEM_API_REV;
+        p.clientInstructionSizeOf = (NvU32)sizeof(NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION);
+        p.executeFlags = NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_FLAGS_IGNORE_FAIL;
+        p.instructionListSize = 4;
+        p.instructionList[0].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_STATUS_SENSOR_READING_OPCODE;
+        p.instructionList[0].operands.getStatusSensorReading.sensorIndex = i;
+        p.instructionList[1].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSOR_READING_RANGE_OPCODE;
+        p.instructionList[1].operands.getInfoSensorReadingRange.sensorIndex = i;
+        p.instructionList[2].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSOR_TARGET_OPCODE;
+        p.instructionList[2].operands.getInfoSensorTarget.sensorIndex = i;
+        p.instructionList[3].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_SENSOR_PROVIDER_OPCODE;
+        p.instructionList[3].operands.getInfoSensorProvider.sensorIndex = i;
+        NvU32 st2 = SUBCTL(c, NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2, &p);
+        if (st2 != 0) {
+            nvx_emit(c, "V2.thm", "thermal-sensor", st2, NVX_V_REJECTED,
+                     "sensor %u batch rejected", i);
+            continue;
+        }
+        NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION *rd = &p.instructionList[0];
+        NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION *rg = &p.instructionList[1];
+        NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION *tg = &p.instructionList[2];
+        NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION *pv = &p.instructionList[3];
+        nvx_emit(c, "V2.thm", "thermal-sensor", rd->result,
+                 (rd->executed && rd->result == 0) ? NVX_V_OK : NVX_V_REJECTED,
+                 "sensor %u reading %d | range [%d,%d] | target %u provider %u "
+                 "(exec %u/%u/%u/%u, rc 0x%x/0x%x/0x%x/0x%x)",
+                 i,
+                 rd->operands.getStatusSensorReading.value,
+                 rg->operands.getInfoSensorReadingRange.minimum,
+                 rg->operands.getInfoSensorReadingRange.maximum,
+                 tg->operands.getInfoSensorTarget.targetIndex,
+                 pv->operands.getInfoSensorProvider.providerIndex,
+                 rd->executed, rg->executed, tg->executed, pv->executed,
+                 rd->result, rg->result, tg->result, pv->result);
+    }
+
+    /* Pass 3: classify target 0 and provider 0 (types come from the header
+     * enum: TARGET_GPU/MEMORY/POWER_SUPPLY/BOARD...). */
+    memset(&p, 0, sizeof p);
+    p.clientAPIVersion = THERMAL_SYSTEM_API_VER;
+    p.clientAPIRevision = THERMAL_SYSTEM_API_REV;
+    p.clientInstructionSizeOf = (NvU32)sizeof(NV2080_CTRL_THERMAL_SYSTEM_INSTRUCTION);
+    p.executeFlags = NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_FLAGS_IGNORE_FAIL;
+    p.instructionListSize = 2;
+    p.instructionList[0].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_TARGET_TYPE_OPCODE;
+    p.instructionList[1].opcode = NV2080_CTRL_THERMAL_SYSTEM_GET_INFO_PROVIDER_TYPE_OPCODE;
+    NvU32 st3 = SUBCTL(c, NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2, &p);
+    if (st3 == 0) {
+        nvx_emit(c, "V2.thm", "thermal-classify", 0, NVX_V_OK,
+                 "target 0 type %u (1=GPU 2=MEMORY 4=POWER_SUPPLY 8=BOARD) "
+                 "provider 0 type %u",
+                 p.instructionList[0].operands.getInfoTargetType.type,
+                 p.instructionList[1].operands.getInfoProviderType.type);
+    } else {
+        nvx_emit(c, "V2.thm", "thermal-classify", st3, NVX_V_REJECTED,
+                 "target/provider type batch rejected");
+    }
+}
+
+int nvx_stage2_thermal_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.thm", "thermal-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_thermal_reads(c);
     return 0;
 }
 

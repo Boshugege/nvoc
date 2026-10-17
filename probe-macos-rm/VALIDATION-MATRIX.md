@@ -52,8 +52,11 @@
 | V2.14 | `BUS_GET_PCI_INFO` 0x20801801 | ctrl2080bus.h（A-tree） | deviceId/subsys/rev 应与 PCI 枚举一致 |
 | V2.15 | `PERF_GET_LEVEL_INFO_V2` 0x2080200B | ctrl2080perf.h（A-tree，32 域×{cur/default/min/max}） | **驱动不提供频率域表**：容量 0 → `NV_OK` 但返回 0 条；容量 ≥1 → `NV_ERR_INVALID_ARGUMENT`。首版探针预置 `perfGetClkInfoListSize=32`，把它记成了无条件拒绝，同样属误判。另有 `PERF_GET_CURRENT_PSTATE`(V2.8)/`PERF_GET_POWERSTATE`(V2.3)/`PERF_RATED_TDP_GET_CONTROL`(V2.4) 实测可用 |
 | V2.16 | `I2C_READ_BUFFER` 0x20800601（零参数探针） | ctrl2080i2c.h（A-tree） | FINN I2C 族分派可达性；返回良构 NV_ERR_* ⇒ GSP I2C 在（风扇/传感器路线活），IRQL/权限类拒绝则记录 |
+| V2.17 | `THERMAL_SYSTEM_EXECUTE_V2` **0x20800513**（`--thermal-read`；非特权孪生 0x20808513） | ctrl2080thermal.h:135（**A-tree**，opcode 批接口，paramSize 1432） | 只读 GET 批：TARGETS/SENSORS_AVAILABLE、SENSOR_READING、SENSOR_READING_RANGE、SENSOR_TARGET、SENSOR_PROVIDER、TARGET_TYPE、PROVIDER_TYPE。实测：`NV_OK`，1 target(type 1=GPU)/1 sensor，读数 45–47 °C、**range [0,127]**，与 RUSD `temperature_c` 一致（`stage-thermal-read-20261017T061320Z`） |
 
-> 阶段 2 无温度控制命令的原因：r610 开源树**不含** legacy `THERMAL_GET_INFO` 头，其 ID 未在本战役内核级核实——温度读数首选 RUSD 页（T3-6），命令式温度读数列为后续 IDA 任务（见"后续探针"）。
+> 温度读数：RUSD 页（T3-6）与 **V2.17 `THERMAL_SYSTEM_EXECUTE_V2`** 两条路都可读。
+> 更正：此前"r610 开源树不含温度命令头"的说法不准确——树内**有** `ctrl2080thermal.h`，其 `NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2`(0x20800513) 提供公开**读** opcode（见 V2.17）；
+> 只是该头没有 legacy 的 `THERMAL_GET_INFO`，且公开 opcode 集中不含温度墙**写**。
 
 ## 阶段 3 — 写入测试（`--write` 门控，M1 核心）
 
