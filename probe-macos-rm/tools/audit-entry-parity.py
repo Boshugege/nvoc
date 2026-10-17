@@ -38,6 +38,10 @@ from pathlib import Path
 # the status column is, so only this phrase gates.
 BLANKET = "未实现：macOS RM 在访问驱动前拒绝"
 
+# The word the matrix uses for "this backend does it". Only used for the
+# informational mirror check above, never for a verdict.
+IMPLEMENTED = "已实现"
+
 # `Command::GetInfo` inside the `matches!` of the refusal path.
 VARIANT_RE = re.compile(r"Command::([A-Za-z0-9]+)")
 # The command string a variant is dispatched as, from the command table.
@@ -150,6 +154,25 @@ def verdicts(cli_src: str, cli_lib: str, matrix: str) -> list[tuple[bool, str]]:
             True,
             "informational: allowed but absent from the table: " + ", ".join(absent),
         ))
+    # The mirror direction, also informational. A row can claim work is
+    # implemented while the entry refuses the command -- which is the same defect
+    # from the other side -- but "implemented" is prose here, so this cannot gate.
+    # It is still worth printing: today it names one row, and that row is right
+    # for a reason a reader can check (`cli/src/lib.rs` short-circuits
+    # `get-vbios -i <file>` before the backend is chosen, so the offline parse
+    # never reaches the refusal at all). A new name appearing here is a question
+    # to answer, not a failure.
+    claims = [
+        (number, command)
+        for number, command, status in rows
+        if command not in allowed and IMPLEMENTED in status
+    ]
+    if claims:
+        out.append((
+            True,
+            "informational: rows claiming implemented while the entry refuses the command: "
+            + ", ".join(f"matrix:{number} {command}" for number, command in claims),
+        ))
     return out
 
 
@@ -218,6 +241,25 @@ def selftest() -> int:
     # An allow-list that cannot be read at all is a failure, not a pass.
     assert verdicts("pub(super) fn validate() {}", lib, clean)[0][0] is False
 
+    # The mirror check reports but does not fail: `get-vbios` claims a partial
+    # implementation while the entry does not allow it.
+    mirror = [
+        why
+        for ok, why in verdicts(
+            cli,
+            lib,
+            clean
+            + "| `get-vbios` | Offline ROM | 部分：`-i/--input` 离线解析已实现 |\n",
+        )
+        if "claims claiming implemented" in why or "claiming implemented" in why
+    ]
+    assert len(mirror) == 1 and "get-vbios" in mirror[0], mirror
+    assert all(
+        ok
+        for ok, why in verdicts(cli, lib, "# nothing\n")
+        if "claiming implemented" in why
+    )
+
     # A table with no command rows cannot certify anything.
     assert any(
         "no command rows" in why
@@ -226,7 +268,8 @@ def selftest() -> int:
     )
 
     print(
-        "selftest ok: allow-list, message agreement, blanket-refusal rows, empty inputs"
+        "selftest ok: allow-list, message agreement, blanket-refusal rows, "
+        "mirror rows, empty inputs"
     )
     return 0
 
