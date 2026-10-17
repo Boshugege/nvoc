@@ -1333,3 +1333,17 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (3) **按尺寸的候选命名** ✔：`0x20801037`(CLK,6024)＝`CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS` 同尺寸 ⇒ 候选 ✔；`0x2080852e`(THERMAL,1432) 与 execute-v2 同尺寸且其孪生不在可写 6 行内 ⇒ 读侧同类候选 ✔；`0x20808513` 由头文件直接命名 ✔。
 (4) **精确边界** ✗：`ctrl2080thermal.h`／`ctrl2080clk.h` 各只有 1 个 `_PARAMS` 类型 ⇒ 38 行 THERMAL 只有 1 行可由开放头文件命名；偏移通道 2108 结构在开放头文件无对应类型（形状已知 `60+32×64` ✔）。`ctrl2080fan.h` ＝ **33 行空壳**（0 define／0 struct）⇒ **风扇族在开放 SDK 无声明**，其仓库内材料是驱动 fan 代码与生成派发表 ✔。生成派发表 641 行里 5 个公开 THERMAL id 仅 `0x20800513` 出现 ⇒ 只覆盖公开半区子集，缺席不等于不存在 ✔。
 (5) **各族状态（独立判定）** ✔：温度读取＝`0x20808513` 已实测 NV_OK（可读／可解释 ✔），范围／原状态／恢复**待一次干净只读跑**；热族其余 37 行 6 行有写孪生 ✔，其余**尚未定位** ✔；风扇族候选 `0x20808540@24`（可写孪生 `0x2080c541@24` ✔），含义**尚未定位** ✔；功耗族 RATED_TDP 别名身份已定 ✔，写仍门控（`SETTINGS_WRITE_SUPPORTED=false`）⇒ **未写入任何值** ✔。
+
+### 本轮追加七十八（2026-10-18，`0x2080901b` 写集合由散文改为可执行断言：真 0xA5 dump 从此可被自动裁决）
+
+(1) **本轮不动 GPU，是缺口驱动的代码改动** ✔：偏移通道写面仍受阻（wedge 未清＋权限门 ✔），但**真正缺的证据**是"0xA5 背景下 handler 到底写了哪些 record-relative 槽位"——SET 该打哪个槽就靠它 ✔。此前 `106/527 changed, last @564` 是实测，而 `27／132` 与 `last @116／@692` 只是探针注释与本矩阵的复述 ✗ ⇒ **没有任何代码在检查它** ✗。本轮把该模型写进仓库内工具并断言，见 `docs/reverse-engineering/nvapi/rm-param-marshall-corrections-r610.md` §44 ✔。
+
+(2) **改动内容（`probe-macos-rm/tools/decode-clk-containers.py`，仓库内 ✔）**：新增 `RECORDED_ROWS`（实机十行含 type）、`WRITE_SET_HEAD=14`、`WRITE_SET_PER_TYPE={0x08:13,0x09:13,0x03:1}`、`RECORDED_WRITE_SET={0x1:(27,116),0xFF:(106,564),0x3FF:(132,692)}`；`write_set_model()` 按目录行与 type 规则给出计数与末偏移；`a5_block()` 把模型写成字节；`write_set_check()` 对真字节**逐行裁决**（每行实际写入的相对槽位 vs 该 type 规则、字节隐含 head 数 vs 14、末改变偏移 vs 最后一个 value 行的 rec+56）；`decode()` 对 `0x2080901b` 自动追加该行；`--selftest` 断言三者全部 MATCH ✔。
+
+(3) **可证伪性与诚实边界** ✔：`HEAD=14` 是**唯一拟合常数**（由那次 106 反推 ✔），可独立核对的是每行 type 规则 ✔；**零背景块被明确拒绝**（"no dword still holds 0xa5a5a5a5"），不把"零背景"误读成短写集合 ✗；**无规则的 type 直接 withhold 算术**（返回 `(None,None)`），不当 0 ✔；stamp **只写低两字节**，故 A5 下 rec+0 记为 `a5a50808` ✔。
+
+(4) **验证范围（如实）** ✔：本机 `py_compile` 通过；`--selftest` 通过（`geometry + round-trip + field decode + write-set model`）；对 2026-10-17 已录 `clkctl-hex.txt` 复跑，目录十字矩阵三处仍全 MATCH、`rows:` 与 `seed 0xff reaches rows 0..7, beyond it: row 8 id 21; row 9 id 5` 不变 ⇒ **无回归** ✔；新代码无 >88 列行 ✔（本机无 ruff ✔，CI 侧检查 ✔）。**测试机本轮未发任何 GPU 请求** ✔：门控重试第 24 次（2026-10-18 机器 11:47→12:11，每分钟一次 anchor 读）**全部 `0x00000062`**，`/tmp/offsweep-r65c.txt` 未生成 ✗ ⇒ 电池未跑；机器 uptime 1 天 4:42 **未重启** ✔（不自动重启 ✔）。
+
+(5) **对下一次健康窗口的意义** ✔：`tools/clock-offset-read-run.sh` 的 `--clkctl-hex` 电池**已含**该 id 的 A5 case（源码 case 表首例 ✔，且 runbook 走 `run_one clkctl-hex --clkctl-hex` 并把 `clkctl-hex.txt` 交给本工具 ✔）⇒ 健康窗口一出现，"handler 写了哪些槽位"就是**跑完即可读结论**的机械判定，不再需要第二次实机请求 ✔（GET 不可重复：wedge 时发不出去 ✔）。⚠️ 我自己先误判为"工具没 dump 901b"，被源码 case 表当场证伪 ✔ —— 已录的 `clkctl-hex.txt` 是**更早**的一次 dump，不含该块 ✔。
+
+(6) **写入面结论不变** ✔：`settings_write=false`／`settings_restore=false`；**未发任何 SET**，未提权，未改 EFI／驱动配置 ✔。槽位身份（+8／+12／+16 三选一）仍**尚未定位** ✗ ⇒ 只能靠一次最小步 SET 后的**同字段回读**判定；**实时频率不参与判定** ✔。

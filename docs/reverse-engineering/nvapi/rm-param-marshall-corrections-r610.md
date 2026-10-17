@@ -1448,3 +1448,29 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - **热族其余 37 行**：38 行中 6 行有写孪生 ✔（`…c52d@1440`／`…c531@980`／`…c535@1556`／`…c53d@3100`／`…c541@24`／`…c54d@20448` ✔），其余为只读 ✔；其中 1432／6024 两行获候选命名 ✔，其余 36 行**尚未定位**（开放树无对应类型 ✗）✔。
 - **风扇族**：开放 SDK 无声明（空壳 ✗）；候选为 `0x20808540@24`（legacy 别名，可写孪生 `0x2080c541@24` ✔）；含义与单位**尚未定位** ✔。
 - **功耗族**：`RATED_TDP` get-control 的 legacy 别名身份已定（§43.2 ✔），SET 结构按自身行解析 ✔；`SETTINGS_WRITE_SUPPORTED` 仍为 false ⇒ **未写入任何功耗值** ✔。
+
+## 44. `0x2080901b` 写集合由散文改为**可执行断言**：真 0xA5 dump 从此可被自动裁决（2026-10-18）
+
+### 44.1 问题（两个都还没有证据）
+- 写面仍缺两件事：handler 在 0xA5 背景下**实际写了哪些 record-relative 槽位**（这决定 SET 该打哪个槽 ✔），以及 `106/527 changed, last @564` 是否真的由目录十行与各自 type 推出 ✔。
+- 此前只有 106 是实测 ✗，27／132 与 last @116／@564／@692 只是探针注释里的预测 ✗，本文件也只是复述 ⇒ **没有任何代码在检查它**，规则被改动或抄错都不会被发现 ✗。
+- 已录的 `clkctl-hex.txt`（2026-10-17 17:08）**不含** `0x2080901b` 块 ✗：`grep 901b` 零命中 ✔。它是更早的一次 dump；现源码 `nvx_stage2_clkctl_hex()` 的 case 表**已经包含**该 id 的四个 case（首例正是 `in@4=0xFF bg=A5` ✔，另有 `0x3FF`／`0x1`／`0`）⇒ 该块的真字节只能等一次健康窗口 ✗（wedge 自 10-17 起未清，见 §41 ✔）。**我去查这一点时先误判为"工具没 dump 901b"，随即被源码 case 表证伪** ✔ —— 教训：先读源码再下"缺"的结论 ✔。
+
+### 44.2 本轮改动（仓库内工具，纯静态 ✔）
+`probe-macos-rm/tools/decode-clk-containers.py` 新增：
+- `RECORDED_ROWS`＝实机十行（含各自 type word ✔）、`WRITE_SET_HEAD=14`、`WRITE_SET_PER_TYPE={0x08:13, 0x09:13, 0x03:1}`、`RECORDED_WRITE_SET={0x1:(27,116), 0xFF:(106,564), 0x3FF:(132,692)}`（前者的 106 实测，另两个是探针的预注册预测 ✔）；
+- `write_set_model(mask)`：按目录行与 type 规则算出改变 dword 数与最后一个改变偏移；遇到**无规则的 type 返回 `(None, None)`**，不把未知类型当 0 ✔；
+- `a5_block(mask)`：把模型写成字节（head 14；type 08/09 写 12 个值 dword ＋ stamp；type 03 只写 stamp；rec+4／+48／+60 不写；stamp **只写低两字节**，故 rec+0 写成 `a5a50808` ✔）；
+- `write_set_check(buf)`：逐行裁决——每行实际写了的相对槽位 vs 该 type 的规则 ✔、字节隐含的 head 数 vs HEAD=14 ✔、最后一个改变偏移 vs 最后一个 value 行的 rec+56 ✔；**零背景块直接拒绝**（"no dword still holds 0xa5a5a5a5"），因为零背景下"写了 0"与"未触碰"不可区分 ✗；
+- `decode()` 对 `0x2080901b` 自动追加该行；`--selftest` 断言三个 mask 的 (计数, 末偏移) 全部 MATCH，并断言零背景被拒绝、未知 type 被 withhold ✔。
+
+### 44.3 实测（本机，**零 GPU 请求** ✔）
+- `python3 -m py_compile` 通过 ✔；`--selftest` 输出 `selftest ok: geometry + round-trip + field decode + write-set model` ✔。
+- 对已录 `clkctl-hex.txt` 复跑：目录十字矩阵三处仍全 `MATCH`（`rows-as-bits 0x000003ff`／`union 0x0038007f`）、`rows: 0:id0 1:id1 …` 与 `seed 0xff reaches rows 0..7, beyond it: row 8 id 21; row 9 id 5` 全部不变 ⇒ **无回归** ✔。
+- 新代码无 >88 列行 ✔；本机无 ruff（`ruff: command not found` ✔，CI 侧检查 ✔）。
+- 模型对三个 mask 自洽：`0x1→27/@116`、`0xFF→106/@564`、`0x3FF→132/@692`，其中 type 03 行（第 6 行）只贡献 1 ✔ —— 这正是"8 选中里有 1 行不写值"的算术，也解释了为何 106≠8×13 ✔。
+
+### 44.4 可证伪点与仍开放的问题（都不许用"跑不出来"顶替 ✔）
+- `HEAD=14` 是**唯一拟合常数**（由那次 106 反推 ✔）；可独立核对的是一行一行的 type 规则（8 行各自 13／13／…／1 ✔）。真 0xA5 dump 若某行槽位数不符，工具会直接打 `MISMATCH` ✔。
+- **槽位身份仍尚未定位** ✗：12 个槽位里哪个是 signed offset（+8／+12／+16 三选一 ✔）只能靠一次最小步 SET 后的**同字段回读**判定，实时频率**不参与** ✔ ⇒ 因此**仍未发任何 SET** ✔。
+- 下一次健康窗口的收益：`tools/clock-offset-read-run.sh` 的 `--clkctl-hex` 电池含该 id 的 A5 case ✔，runbook 已把该 dump 交给本工具 ✔（其解码调用处 ✔）⇒ 槽位与写集合将变成"跑完即可读结论"的机械判定，而不再需要第二次实机请求 ✔（GET 不可重复：wedge 时根本发不出去 ✔）。
