@@ -32,24 +32,61 @@ are needed at runtime.
 | --- | --- |
 | `get-gpu-list` | GPU name, PCI address, NVOC ID, RM GPU ID, backend flags |
 | `get-info` | RM version, PCI/VBIOS metadata, VRAM/BAR1/L2 sizes, class count |
-| `get-status` | P-state and RUSD temperature, clocks, power, enforced limit, max fan RPM and GPU utilization; missing fields are `null` / `N/A` with reasons |
+| `get-status` | P-state and the full RUSD telemetry vocabulary below (clock domains, temperatures, power/TGP/limits, throttle reasons, fan RPM, GPU/memory/engine utilization, PCIe link generation) plus video-memory usage; missing fields are `null` / `N/A` with reasons |
 | `list` and offline `get-vbios --input` | Existing operations without GPU discovery |
 | Other live queries and all settings writes | Refused before opening the driver |
 
 Status exit code 0 means the query completed; per-field availability is
 reported independently. Missing temperature, clocks, power, fan and utilization
-values are never represented by zero. A valid zero RPM or zero utilization
-reading is preserved. JSON clocks are kHz, power/limits are mW, temperatures
-are Celsius, utilization is percent, and fan RPM is the maximum of the shared
-page's cooler slots. Human output uses MHz, W, Celsius and RPM. Optional
-information-query failures preserve their RM status in `unavailable`;
-connection, version or object-chain failures return
-an error. Capabilities describe implemented backend surfaces, not a guarantee
-that every query succeeds on every board.
+values are never represented by zero, and a value whose RUSD section has not
+published anything is withheld instead of being shown as its default. A valid
+zero RPM or zero utilization reading is preserved. JSON clocks are kHz, target
+clocks are MHz, power/limits are mW, temperatures are Celsius, utilization is
+percent, memory usage is bytes, and fan RPM is the maximum of the cooler slots
+the driver reports as live. Human output uses MHz, W, Celsius, rpm, MiB and
+percent. Optional information-query failures preserve their RM status in
+`unavailable`; connection, version or object-chain failures return an error.
+Capabilities describe implemented backend surfaces, not a guarantee that every
+query succeeds on every board.
 
 The full command-by-command status (101 CLI commands, the non-CLI consumers and
 the stage 0-12 roadmap) lives in
 [the macOS backend feature matrix](macos-backend-feature-matrix.md).
+
+## Telemetry vocabulary (ABI v3)
+
+`nvoc_rm_sample` (see `core/native/macos_rm_abi.h`) carries one status +
+timestamp per polled RUSD section plus the value blocks below. The native
+layer transports the driver's own units and leaves naming, plausibility and
+decoding to Rust, so the one-shot query (`interpret_oneshot`) and the
+continuous monitor (`interpret_sample`) share exactly one interpretation rule
+set (`publish_all`).
+
+| Section (`cl00de.h`) | Fields | Notes |
+| --- | --- | --- |
+| `clkPublicDomainInfos` | `{graphics,memory,video,sm}_{clock_khz,target_clock_mhz}` | SM is 0/0 on Turing: the driver does not implement that domain, so it is reported `unavailable` ("driver reports no value for this field") rather than as a 0 MHz clock |
+| `temperatures[]` | `temperature_c`, `temperature_memory_c`, `temperature_board_c`, `temperature_power_supply_c` | one RUSD section per sensor and therefore per-field freshness; boards without a memory/board/MB sensor report `RUSD_TIMESTAMP_INVALID` and stay unavailable |
+| `instPowerUsage` | `power_mw` | instantaneous die power |
+| `powerLimitGpu` | `power_limit_mw`, `power_limit_requested_mw` | enforced vs requested wall |
+| `avgPowerUsage` | `average_power_mw` | driver average window; unpublished on this board |
+| `powerPolicyStatus` | `power_policy_tgp_mw` | total GPU power from the power-policy block (nvidia-smi's "power policy") |
+| `clkThrottleInfo` | `throttle_reason_mask`, `throttle_reasons[]` | bits 0-8 decoded (`gpu_idle`, `application_clock_setting`, `sw_power_cap`, `hw_slowdown`, `sync_boost`, `sw_thermal_slowdown`, `hw_thermal_slowdown`, `hw_power_brakes_slowdown`, `display_clock_setting`); the raw mask stays in JSON |
+| `fanCoolerStatus` | `fan_rpm`, `fan_rpms[]` | the driver does not report how many coolers exist, so 0 slots are skipped and implausible slots (>20 000 rpm, seen as unpopulated garbage) are dropped; if every non-zero slot is implausible the section is reported as an implausible value |
+| `perfDevUtil` | `utilization_percent`, `memory_utilization_percent` | GPU / frame-buffer busy percent |
+| `procUtil` | `engine_utilization_percent` | one entry per engine (`gr`, `fb`, `nvenc`, `nvdec`, `nvjpg`, `nvofa`), converted from the driver's percent x100 |
+| `pciBusData` | `pcie_link_gen`, `pcie_max_link_gen` | decoded from `RUSD_BUS_DATA_PCIE_GEN_INFO`; a zero word means the driver does not report a link |
+| live RM control | `pstate` | `NV2080_CTRL_CMD_PERF_GET_CURRENT_PSTATE`, re-read every sample |
+| live RM control | `memory_used_bytes` | `NV2080_CTRL_CMD_FB_GET_INFO_V2` heap size − heap free (the used/free pair nvml reports) |
+
+`memEcc` and `memRowRemap` are deliberately **not** carried: even with
+`NV00DE_RUSD_POLL_MEMORY` requested the 610.57.04 driver leaves both at
+`RUSD_TIMESTAMP_INVALID` on this board, so they would be permanent `null`
+fields. `NV00DE_RUSD_POLL_MEMORY` is therefore not requested either.
+
+Plausibility bounds are part of the contract, not a cosmetic filter: a fan slot
+that reads 294 118 rpm, a temperature outside −50…150 C, a clock above 20 GHz
+or a utilization above 100 % is reported as `unavailable` with an
+"implausible value" reason instead of being published as a measurement.
 
 The current transport selects the first matching NVAccel/NVRM service. It does
 not enumerate all physical GPUs in a multi-NVIDIA system. `--gpu` still applies
@@ -125,7 +162,7 @@ nvoc-cli get-status --macos-rm --interval 0.5                   # until Ctrl-C
   interval plus the sampling cost (measured: `--interval 1` gives 1.000-1.011 s
   gaps, `--interval 2` gives 2.001-2.011 s, with 0.1-1.0 ms of sampling).
 - JSON output becomes one JSONL object per sample (`schema
-  nvoc/macos-rm-sample/2`): `sequence`, `host_time` (RFC 3339) and
+  nvoc/macos-rm-sample/3`): `sequence`, `host_time` (RFC 3339) and
   `host_time_unix_ns`, `sample_duration_us`, the telemetry fields in their raw
   units, `rusd_timestamps`, `updated`, `freshness`, `epoch_reset` and
   `unavailable`. Human output keeps the engineering-unit block per sample,
@@ -205,12 +242,44 @@ P-State, clocks, temperature, power and utilization are not one atomic
 snapshot: sections update on the driver's own ~500 ms schedule and
 `rusd_timestamps` carries each field's own stamp.
 
+## Consumers (pynvoc)
+
+The native backend is reachable from the shared Rust core *and* from the Python
+bindings the GUI/TUI drive, so macOS telemetry is not CLI-only:
+
+```python
+import pynvoc
+
+gpus = pynvoc.discover_gpus("macos-rm")     # backend_macos_rm: true
+gpu = gpus[0]["gpu_id_hex"]
+info = pynvoc.query_info(gpu, "macos-rm")   # identity, VRAM, driver version
+status = pynvoc.query_status(gpu, "macos-rm")
+```
+
+`query_info`/`query_status` dispatch to the RM session whenever the selected
+target has a macOS RM backend; NVAPI/NVML are never initialized on that path.
+Both normalizers emit the same field names and units as the NVAPI/NVML paths
+(`gpu_clock_mhz`, `mem_clock_mhz`, `temperature_c`, `temp_core`, `power_w`,
+`power_limit_w`, `eff_gpu_clock_mhz`, `fan_rpm`, `pstate` as `"P<n>"`), so an
+existing dashboard renders macOS without a backend branch; the RM-specific
+extras (per-fan `fan_rpms`, `engine_utilization_percent`, `pcie_link_gen`,
+`memory_used_mib`, `throttle_reasons`, typed temperatures, the requested/policy
+power values and `unavailable`) ride along under their own keys. Unit
+conversion (kHz→MHz, mW→W, bytes→MiB) happens once, in the normalizer. Fields
+the driver does not publish stay absent — never fabricated as zero — and
+`unavailable` carries the reason.
+
 ## Validation
 
 ```sh
 cargo test -p nvoc-core -p nvoc-cli --all-targets
 cargo clippy -p nvoc-core -p nvoc-cli --all-targets --no-deps -- -D warnings
 cargo test -p nvoc-core --test macos_rm_readonly -- --ignored --nocapture
+
+# Python bindings: portable unit tests, then the real extension module.
+cargo test -p pynvoc --no-default-features
+RUSTFLAGS="-C link-arg=-undefined -C link-arg=dynamic_lookup" \
+  cargo build -p pynvoc --release   # maturin does this automatically
 ```
 
 The read-only hardware tests are serialized (a process-wide mutex): the NVOC
@@ -231,10 +300,18 @@ cc -std=c11 -Wall -Wextra -Werror -Icore/native \
   -I"$OGKM/src/common/sdk/nvidia/inc" core/tests/rusd_read.c -o /tmp/nvoc-rusd-read
 /tmp/nvoc-rusd-read
 cc -std=c11 -Wall -Wextra -Werror -Icore/native -fsyntax-only core/tests/macos_rm_abi.c
+# The backend itself must type-check against the driver's own headers.
+cc -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -fsyntax-only \
+  -I"$OGKM/src/common/sdk/nvidia/inc" \
+  -I"$OGKM/src/nvidia/arch/nvalloc/unix/include" \
+  -Iprobe-macos-rm/src -Icore/native core/native/macos_rm.c
 ```
 
 `rusd_read.c` covers the RUSD validity/freshness/stable-copy helpers;
 `macos_rm_abi.c` is a compile-time contract test for the shared header (it is
-checked with `-fsyntax-only`, since it only needs to type-check).
+checked with `-fsyntax-only`, since it only needs to type-check); the last
+command compiles `macos_rm.c` against the extracted 610.57.04 SDK headers, so a
+`cl00de.h` field rename or a struct-shape change fails the check list even on a
+host without a GPU.
 Performance-write tests remain ignored. Raw test output belongs in workspace
 `outputs/`, outside the repository.

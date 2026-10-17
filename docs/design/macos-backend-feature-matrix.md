@@ -29,7 +29,10 @@
   `core/native/rusd_read.h`、`core/src/macos_rm.rs`、`probe-macos-rm/src/*`、
   `docs/design/macos-rm-backend.md`、`docs/reverse-engineering/macos-gtx1650s-access-2026-10-16.md`。
 - 实测日志（仓库外 `outputs/`）：`stage1-*`（阶段 1 验收：build/fmt/clippy/tests/5 项硬件/
-  ABI/探针/CLI 停止与管道）、`continuous-*`（单次与连续基线）、`continuous-watch-*`
+  ABI/探针/CLI 停止与管道）、`stage2-telemetry-20261017T034627Z`（**阶段 2 全量验收：
+  build/fmt/clippy/tests/5 项硬件/rusd-cpu/rusd-abi/native-lint/probe-lint/probe-tests/
+  pynvoc-tests/pynvoc-extension/pynvoc-hw/CLI(JSONL、人类、管道、SIGINT、坏 interval)/Metal 负载，
+  全部 rc=0**）、`continuous-*`（单次与连续基线）、`continuous-watch-*`
   （3 分钟只读 + 时钟域探针）、`continuous-load-*`（温和 Metal 负载响应）、
   `stage2-longrun-20261017T025708Z`（**1 Hz × 10 分钟 = 600 样本**：gap p50 1.008 s /
   p95 1.011 s / max 1.012 s，采样耗时 p50 267 µs / p95 283 µs / max 1872 µs，fd 恒为 8，
@@ -51,7 +54,7 @@
 | `get-gpu-list` | List discovered GPUs and available backends | **已实现且实测**：设备发现/身份（`get-gpu-list`） |
 | `get-info` | Read NVAPI GPU identity and capability information | **已实现且实测**：PCI/VBIOS/显存/驱动信息 |
 | `get-settings` | Read NVAPI overclock settings | 未实现：macOS RM 在访问驱动前拒绝 |
-| `get-status` | Read live GPU status (macOS RM: P-state and RUSD telemetry; unavailable fields include reasons; --interval streams JSONL samples) | **已实现且实测**：P-state + 8 项 RUSD 遥测 + `--interval` 连续监控 |
+| `get-status` | Read live GPU status (macOS RM: P-state and RUSD telemetry; unavailable fields include reasons; --interval streams JSONL samples) | **已实现且实测**：P-state + ABI v3 遥测（图形/显存/视频频率、温度族、功耗族、限频原因、逐风扇 RPM、利用率/逐引擎、PCIe 代际、显存用量）+ `--interval` 连续监控；不可用字段带原因，JSONL schema `nvoc/macos-rm-sample/3` |
 | `get-throttle-reasons` | Read NVML throttle reasons | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-uuid` | Read GPU UUID | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-vbios` | Read and decode a VBIOS image. -i/--input <file> parses a local ROM dump OFFLINE (no GPU/NvAPI needed — works on Linux); without it the live image… | 部分：`-i/--input` 离线解析已实现；实时读取是 NVAPI/Windows 路径，macOS 未实现 |
@@ -196,7 +199,7 @@
 | --- | --- | --- |
 | `nvoc-core` | 已实现：`BackendSet::MacosRm` 分发 + `discover()`/`QueryMacosRmInfo`/`QueryMacosRmStatus`/`MacosRmSession` | 阶段 1 实机 5 项硬件测试通过 |
 | `nvoc-cli` | 部分：见上表（4 命令 + 连续监控） | 其余命令在访问驱动前拒绝 |
-| `nvoc-python`（pynvoc） | 未实现：发现/查询仍走 NVAPI/NVML 路径 | 阶段 11；需要 macOS 分发与字段/单位归一化 |
+| `nvoc-python`（pynvoc） | **部分已实现**：`backends="macos-rm"` 的 `discover_gpus`/`query_info`/`query_status` 走原生 RM，单位归一化到与 NVAPI/NVML 相同的字段（`gpu_clock_mhz`/`temperature_c`/`power_w`…）；设置/写入仍拒绝 | 实机扩展模块端到端见 `stage2-telemetry-…`（`pynvoc-hw`）；GUI/TUI/srv 接线属阶段 11 |
 | `gui` | 未实现：未接 macOS 能力查询与面板 | 阶段 11；不得只靠 CLI 宣称界面可用 |
 | `tui` | 未实现 | 阶段 11 |
 | `srv`（ControlBackend） | 未实现：无 macOS 工厂/实现 | 阶段 11 |
@@ -210,7 +213,7 @@
 | --- | --- | --- | --- |
 | 0 基线/功能表 | 起点、边界、待办、证据索引 | 完成：本文件 + SSH/硬件/分支核对 + 101 条命令表 | 随每阶段更新并复核 |
 | 1 正确性与资源生命周期 | 修 ABI/释放顺序/旧数据/重连/输出/停止 | **完成**：`78d299d`、`a687453`、`8fb1aeb`；实机 5 项硬件测试、ABI 指纹、broken-pipe、SIGINT 全通过 | 保持回归 |
-| 2 基础信息与遥测 | 设备/信息/状态/连续监控 + 公共字段 | 部分：8 项遥测已实测；**1 Hz × 10 分钟长跑已完成**（`stage2-longrun-20261017T025708Z`）；仍缺限频原因、逐风扇、有效/视频频率、显存用量、电压；core/pynvoc 分发未接 | 下一步（协议依据已定位）：`clkThrottleInfo.reasonMask`（cl00de.h 位 0-8：GPU_IDLE / APP_CLOCK / SW_POWER_CAP / HW_SLOWDOWN / SYNC_BOOST / SW_THERMAL / HW_THERMAL / HW_POWER_BRAKES / DISPLAY_CLOCK_SETTING）、`temperatures[MEMORY/BOARD/POWER_SUPPLY]`、`avgPowerUsage`、`powerPolicyStatus.tgpmW`、`clkPublicDomainInfos.info[VIDEO/SM]` 的 targetClkMHz + actualClkKHz、`fanCoolerStatus.rpmCurr[16]` 逐风扇；需新增 poll mask `NV00DE_RUSD_POLL_MEMORY/PCI/PROC_UTIL` 才能读 `memEcc`、`memRowRemap`、`pciBusData`、`procUtil`（逐引擎利用率）；显存用量走 RM control（FB_GET_INFO_V2 used/total）而非 RUSD。实现时把样本 ABI 升到 v3（按 section 表组织），并同步 core/pynvoc 字段归一化 |
+| 2 基础信息与遥测 | 设备/信息/状态/连续监控 + 公共字段 | **完成**：样本 ABI v3（14 节/41 槽）落地——限频原因、逐风扇、有效/目标/视频/SM 频率、显存用量、逐引擎利用率、PCIe 代际、多温度、功耗族全部实测；`clkThrottleInfo`/`temps`/`avgPowerUsage`/`tgpmW`/`fanCoolerStatus.rpmCurr[16]`/`procUtil`/`pciBusData` 读取生效，`POLL_MEMORY` 经实测确认 610.57.04 恒返回 `RUSD_TIMESTAMP_INVALID`（`memEcc`/`memRowRemap` 不携带）、SM 域 Turing 为 0/0 → `unavailable`；`get-status` 人类/JSON/JSONL（schema `nvoc/macos-rm-sample/3`）一致；**1 Hz × 10 分钟长跑**（`stage2-longrun-…`）+ **全量验收**（`stage2-telemetry-20261017T034627Z`，15 项 rc=0）+ Metal 负载响应（gfx 1950 MHz / 54.9 C / 12.7 W / util 91% / gr 91.5% / fan 4243 rpm）；pynvoc `backends="macos-rm"` 的 discover/info/status 已分发并归一化 | 电压读取（`get-status` 无 voltage 字段）留给阶段 3/7 的当前设置读取 |
 | 3 当前设置/范围/恢复基础 | `get-settings`、范围/默认值/粒度、快照/回读/恢复 | 未开始（macOS 拒绝写入） | 需要先确认 RM 只读查询结构与门槛 |
 | 4 核心/显存频率控制 | 偏移 GET/SET、锁频、reset | 未开始 | 依赖阶段 3 与写入授权 |
 | 5 功耗/温度/运行策略 | W/%、温度墙、Boost | 遥测可读；无写入 | 同上 |
