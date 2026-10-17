@@ -1467,6 +1467,28 @@ fn settings_macos_rm_to_map(
             u64_value(limits.records as u64),
         );
     }
+    // The domains the driver will offset. Each entry is the device's own index,
+    // domain bit and type stamp: the bit is a *position* in a domain namespace
+    // this frontend cannot name (see `ClockOffsetDomain`), so no name is
+    // invented here either. Absent when the directory was not read, so "no
+    // domains" and "not read" stay distinguishable.
+    if let Some(domains) = &settings.clock_offset_domains {
+        map.insert(
+            "clock_offset_domains".into(),
+            Value::Array(
+                domains
+                    .iter()
+                    .map(|domain| {
+                        value_object([
+                            ("index", u64_value(domain.index as u64)),
+                            ("domain_bit", u64_value(domain.domain_bit as u64)),
+                            ("type_stamp", u64_value(domain.type_stamp as u64)),
+                        ])
+                    })
+                    .collect(),
+            ),
+        );
+    }
     let caps = settings.capabilities;
     map.insert(
         "capabilities".into(),
@@ -5862,6 +5884,12 @@ mod tests {
                 max_khz: 18_750,
                 records: 3,
             }),
+            // The domains, as the device stamped them: a bit, not a name.
+            clock_offset_domains: Some(vec![nvoc_core::ClockOffsetDomain {
+                index: 0,
+                domain_bit: 1,
+                type_stamp: 0x0808,
+            }]),
             unavailable: std::collections::BTreeMap::from([(
                 "core_clock_offset".to_string(),
                 "no readable RM control for this family on this driver (see notes)".to_string(),
@@ -5890,6 +5918,13 @@ mod tests {
         assert_eq!(map["clock_offset_min_khz"], i64_value(-18_750));
         assert_eq!(map["clock_offset_max_khz"], i64_value(18_750));
         assert_eq!(map["clock_offset_limits_records"], u64_value(3));
+        let domains = map["clock_offset_domains"]
+            .as_array()
+            .expect("the domain list is an array");
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0]["index"], u64_value(0));
+        assert_eq!(domains[0]["domain_bit"], u64_value(1));
+        assert_eq!(domains[0]["type_stamp"], u64_value(0x0808));
         assert_eq!(map["notes"].as_array().map(Vec::len), Some(1));
     }
 

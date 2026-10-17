@@ -137,6 +137,35 @@ pub struct ClockOffsetLimits {
     pub records: usize,
 }
 
+/// One clock domain the driver exposes to the offset channel.
+///
+/// `index` is the entry's position in the device's own directory, which is also
+/// the bit the `0x2080901B` selection mask uses for it -- the mask sweep showed
+/// a mask of `0xFF` selecting exactly the entries at indices 0..7, seven of
+/// which write twelve value dwords and one of which (the `0x0303` entry, at
+/// index 6) writes its stamp only.
+///
+/// `domain_bit` is what the directory stamps on the entry, and it is a *bit
+/// position*, not an index: the ten this device uses are 0..6 and 19..21. There
+/// is no clock-domain enum anywhere in the public OGKM headers, so no name is
+/// claimed here. The one cross-reference that exists (`NV_GPU_CLOCK_DOMAIN_ID`,
+/// 32 wide, in the NVAPI/Windows namespace) names 0..6
+/// GPC/XBAR/SYS/HUB/M/HOST/DISP and 19..21 LEG/PWR/MSD -- the same two clusters
+/// -- which is why bit 0 is *probably* the core engine and bit 4 the memory
+/// domain. That is a hypothesis with a falsification path (read a single-domain
+/// offset once a write is permitted), not a measurement, so the numbers here
+/// stay as the device returned them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct ClockOffsetDomain {
+    /// Directory entry index, also the offset-control mask bit.
+    pub index: usize,
+    /// Bit position the directory stamps on this entry (see the type docs).
+    pub domain_bit: u32,
+    /// Entry type stamp at `rec+0`: `0x0808`/`0x0909` entries carry twelve
+    /// value dwords in the control block, `0x0303` carries only its stamp.
+    pub type_stamp: u16,
+}
+
 /// Read-only projection of the driver-visible configuration.
 ///
 /// This deliberately contains only what the RM session actually reports, and
@@ -159,6 +188,10 @@ pub struct DeviceSettings {
     /// range block. `None` when that block was refused, malformed, empty or its
     /// records disagreed; the offset channel note says which.
     pub clock_offset_limits_khz: Option<ClockOffsetLimits>,
+    /// The domains the driver says it can offset: the device's own directory,
+    /// as returned. `None` when that block was refused or malformed, so an
+    /// unread directory is never an empty capability list.
+    pub clock_offset_domains: Option<Vec<ClockOffsetDomain>>,
     /// Configuration families this backend cannot read (or write) yet, keyed by
     /// the family name, with the cause.
     pub unavailable: BTreeMap<String, String>,
@@ -205,6 +238,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
         // Filled in by `apply_offset_channel` from a live read; the pure
         // projection leaves it absent rather than guessing a window.
         clock_offset_limits_khz: None,
+        clock_offset_domains: None,
         unavailable,
         capabilities: SettingsCapabilities {
             settings_read: true,
@@ -258,6 +292,30 @@ fn apply_offset_channel(
         block_outcome("range 0x20809025:", &channel.range),
         block_outcome("control 0x2080901B:", &channel.control),
     ];
+
+    // Which domains the driver is willing to offset at all. Reported as the
+    // device returned them: an index, a bit and a type stamp, no names.
+    match &channel.directory {
+        Parsed(directory) if directory.entries.is_empty() => {
+            outcomes.push("the directory carried no entry, so no domain is listed".into());
+        }
+        Parsed(directory) => {
+            settings.clock_offset_domains = Some(
+                directory
+                    .entries
+                    .iter()
+                    .map(|entry| ClockOffsetDomain {
+                        index: entry.index,
+                        domain_bit: entry.domain_bit,
+                        type_stamp: entry.type_stamp,
+                    })
+                    .collect(),
+            );
+        }
+        Refused(_) | Malformed(_) => {
+            outcomes.push("no domain is listed because the directory was not read".into());
+        }
+    }
 
     match &channel.range {
         Parsed(range) if range.records.is_empty() => {
@@ -2055,6 +2113,22 @@ mod tests {
     /// parser test uses, so the numbers below are measured rather than restated.
     const OFFSET_RANGE_FIXTURE: &[u8] = include_bytes!("../tests/data/macos-offset-range.bin");
 
+    /// The directory bytes from the same capture.
+    const OFFSET_DIRECTORY_FIXTURE: &[u8] =
+        include_bytes!("../tests/data/macos-offset-directory.bin");
+
+    /// A snapshot that varies only the directory block; the other two keep the
+    /// status the live wedge read returned for them.
+    fn directory_snapshot(
+        directory: macos_offset::OffsetBlockRead<macos_offset::OffsetDirectory>,
+    ) -> macos_offset::OffsetChannelSnapshot {
+        macos_offset::OffsetChannelSnapshot {
+            directory,
+            range: macos_offset::OffsetBlockRead::Refused(0x62),
+            control: macos_offset::OffsetBlockRead::Refused(0x62),
+        }
+    }
+
     fn offset_snapshot(
         range: macos_offset::OffsetBlockRead<macos_offset::OffsetRange>,
     ) -> macos_offset::OffsetChannelSnapshot {
@@ -2085,6 +2159,7 @@ mod tests {
             chip_sku: None,
             project: None,
             clock_offset_limits_khz: None,
+            clock_offset_domains: None,
             unavailable: BTreeMap::new(),
             capabilities: SettingsCapabilities {
                 settings_read: true,
@@ -2093,6 +2168,52 @@ mod tests {
             },
             notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn the_domain_directory_is_the_devices_own_list() {
+        let mut settings = bare_settings();
+        let directory =
+            macos_offset::parse_directory(OFFSET_DIRECTORY_FIXTURE).expect("committed fixture");
+        apply_offset_channel(
+            &mut settings,
+            &directory_snapshot(macos_offset::OffsetBlockRead::Parsed(directory)),
+        );
+        let domains = settings
+            .clock_offset_domains
+            .expect("the directory was read, so the domains are listed");
+        // The recorded directory: ten entries, and the stamped field is a bit
+        // *position*, not an index -- entry 2 carries bit 4, which is exactly
+        // why no domain name is claimed for any of them.
+        assert_eq!(domains.len(), 10);
+        assert_eq!(
+            domains.iter().map(|d| d.index).collect::<Vec<_>>(),
+            (0..10).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            domains.iter().map(|d| d.domain_bit).collect::<Vec<_>>(),
+            vec![1, 2, 16, 4, 8, 1_048_576, 524_288, 64, 2_097_152, 32]
+        );
+        // Three entries carry 0x0808, six 0x0909 and one the stamp-only 0x0303
+        // at index 6 -- the entry the mask sweep identified by behaviour.
+        assert_eq!(domains.iter().filter(|d| d.type_stamp == 0x0808).count(), 3);
+        assert_eq!(domains[6].type_stamp, 0x0303);
+        assert_eq!(domains[6].index, 6);
+        // A directory is not a range: reading it must not invent a window.
+        assert_eq!(settings.clock_offset_limits_khz, None);
+    }
+
+    #[test]
+    fn a_refused_directory_is_not_an_empty_domain_list() {
+        let mut settings = bare_settings();
+        apply_offset_channel(
+            &mut settings,
+            &directory_snapshot(macos_offset::OffsetBlockRead::Refused(0x62)),
+        );
+        assert_eq!(settings.clock_offset_domains, None);
+        let note = settings.notes.join("\n");
+        assert!(note.contains("directory 0x20809019: refused"), "{note}");
+        assert!(note.contains("no domain is listed"), "{note}");
     }
 
     #[test]

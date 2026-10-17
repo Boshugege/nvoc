@@ -10,9 +10,10 @@ pub mod macos_offset;
 pub mod macos_rm;
 pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{
-    ABI_LAYOUT_SLOTS, ClockOffsetLimits, DeviceInfo, DeviceSample, DeviceSettings, DeviceStatus,
-    FieldState, MONITOR_SECTIONS, MONITOR_STALE_AFTER, MacosRmSession, QueryMacosRmInfo,
-    QueryMacosRmSettings, QueryMacosRmStatus, SettingsCapabilities, abi_layout, native_abi_layout,
+    ABI_LAYOUT_SLOTS, ClockOffsetDomain, ClockOffsetLimits, DeviceInfo, DeviceSample,
+    DeviceSettings, DeviceStatus, FieldState, MONITOR_SECTIONS, MONITOR_STALE_AFTER,
+    MacosRmSession, QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus,
+    SettingsCapabilities, abi_layout, native_abi_layout,
 };
 mod nvapi;
 pub mod nvml;
