@@ -1754,7 +1754,11 @@ impl MacosRmSession {
                 macos_offset::parse_directory,
             ),
             range: read_offset_block(self.handle, OffsetBlock::Range, macos_offset::parse_range),
-            control: read_offset_block(self.handle, OffsetBlock::Control, macos_offset::parse_control),
+            control: read_offset_block(
+                self.handle,
+                OffsetBlock::Control,
+                macos_offset::parse_control,
+            ),
         })
     }
 
