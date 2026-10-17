@@ -19,8 +19,10 @@
 #                     0x20809019, and 0x2080901d last (it was only ever read
 #                     with a 0xA5 background, and a timeout on it must not cost
 #                     the other blocks).  The 0xA5 sweep's own delta printout
-#                     is not lossless -- it reported 106 changed dwords for
-#                     0x2080901b but the log kept 40 of them.
+#                     records the written values and the dword class map
+#                     losslessly, but the log captured in the 2026-10-17 sweep
+#                     kept only 40 of its 106 changed dwords, so the full dump
+#                     below is still the authority.
 #   2. --clkctl-read  the wider battery; it refuses 0x20809026@5332 outright
 #                     and aborts on the first 0x65/0x62
 #

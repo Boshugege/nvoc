@@ -1943,7 +1943,7 @@ static void clkctl_dump(nvx_ctx *c, const clkctl_case *k, const unsigned char *b
     unsigned written = 0, cleared = 0, untouched = 0;
     char cls[4096];              /* one class char per dword (max 3084) */
     unsigned nd_listed = 0;
-    char woff[200];
+    char woff[640];              /* the control block alone has 106 written dwords */
     unsigned wo = 0;
 
     if (nd > sizeof cls - 1) nd = sizeof cls - 1;
@@ -1956,7 +1956,13 @@ static void clkctl_dump(nvx_ctx *c, const clkctl_case *k, const unsigned char *b
         else if (cc == 'Z') ++cleared;
         else ++written;
         cls[d] = cc;
-        if (cc == 'W' && wo < sizeof woff - 8 && nd_listed < 32)
+        /* This summary line is the only capped part of this printer. The values
+         * below are emitted five to a line until every written dword has been
+         * printed and the class map covers every dword, so nothing is lost -- but
+         * the summary is what a reader scans first, and 200 bytes cut it off at
+         * 32 entries, well short of the 106 the control block writes. 640 bytes
+         * and 120 entries covers that block whole. */
+        if (cc == 'W' && wo < sizeof woff - 8 && nd_listed < 120)
             wo += (unsigned)snprintf(woff + wo, sizeof woff - wo, " +%u", 4 * d);
         if (cc == 'W') ++nd_listed;
     }
@@ -1965,7 +1971,7 @@ static void clkctl_dump(nvx_ctx *c, const clkctl_case *k, const unsigned char *b
     nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_OK,
              "  dwords %u: U=%u W=%u Z=%u; W offsets:%s%s", nd, untouched,
              written, cleared, written ? woff : " none",
-             nd_listed > 32 ? " ..." : "");
+             nd_listed > 120 ? " ..." : "");
     if (!written) return;
 
     /* The written entries themselves, five per line. */
@@ -2125,12 +2131,17 @@ int nvx_stage2_clkctl_read(nvx_ctx *c)
  * far inside nvx_emit's 288-byte detail field; only GET ids are sent.
  *
  * THIS IS THE AUTHORITATIVE RECORD for the block contents.  The 2026-10-17
- * 0xA5 sweep of 0x2080901b reported "106/527 dwords changed" but the captured
- * log kept only 40 of them (and 60 of the 352 dwords 0x2080901d reported), so
- * the delta printer alone is not a lossless record and a block whose tail was
- * dropped cannot be reconstructed offline.  A GET must not have to be repeated
- * just because the log format lost data -- after a GSP wedge it cannot be
- * repeated at all.  Every read-only clkctl id therefore gets a full dump here,
+ * 0xA5 sweep of 0x2080901b reported "106/527 dwords changed" while the log that
+ * was captured that day kept only 40 of them (and 60 of the 352 dwords
+ * 0x2080901d reported).  That was a property of the *captured log*, not of this
+ * printer as it now stands: it emits every written dword with its seed and its
+ * value, five to a line, and a class map covering every dword of the block, so a
+ * block can be reconstructed offline.  The single capped part is the compact
+ * one-line W-offset summary, and its cap has been raised past the 106 dwords the
+ * control block writes.  The dump below is still the authority, for a reason
+ * that outlives any format: a GET must not have to be repeated -- after a GSP
+ * wedge it cannot be repeated at all.  Every read-only clkctl id gets a full
+ * dump here,
  * written to one file by tools/clock-offset-read-run.sh.
  *
  * Order matters: the ids are read in increasing confidence and the previously
