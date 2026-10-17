@@ -106,8 +106,13 @@ const SETTINGS_UNREADABLE_REASON: &str =
 
 /// The two clock-offset families are the one family where the shared reason
 /// above would overstate the gap: the driver answers a per-domain offset
-/// *range*, it just never fills the current value. See the prefix notes.
-const CLOCK_OFFSET_UNREADABLE_REASON: &str = "offset range readable (0x20809025) but no current offset: the domain-control GET 0x2080901B answers NV_OK while its offset/range/applied dwords come back zero (see notes)";
+/// *range*, and the current offset is measured **zero** rather than missing --
+/// on a background that cannot miss a write, the domain-control GET writes its
+/// value dwords and they are all zero, so no offset is applied. What is still
+/// open is *which* of those twelve dwords is the offset (the slot identity
+/// needed to write one), so the family stays unwritable and, until the public
+/// backend carries the block at all, unreadable through this session.
+const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 (0x2080901B writes its value dwords as zero at stock on an 0xA5 background, so no offset is applied), range readable from 0x20809025 (+-18750 kHz); the dword that carries the offset within each record is not yet pinned and this session does not carry the block, so no SET is issued (see notes)";
 
 /// Read-only projection of the driver-visible configuration.
 ///
@@ -180,7 +185,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             "responder: these ids are answered by the GSP firmware, not by a host RM table row (NVRM forwards legacy ids with bit 0x8000 set), so every parameter block is sized against the GSP's own export table rather than the NVAPI caller struct.".into(),
             "read: P-state, enforced/requested power limit, PCIe generation, board/SKU and memory sizes come from the same RM snapshot as get-status; sensor readings are separate (see get-status).".into(),
             "write: refused before the driver is opened, and on this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids carries the legacy privileged bits (0x2080D01C = 0x2080901B | 0x4000), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). A write would additionally need a readable current value, a bounded step and a verified restore, and the GSP must not be in the RESET_REQUIRED state.".into(),
-            "clock domains/offsets: 0x20809019 answers NV_OK with a 10-domain directory and 0x20809025 answers NV_OK with a per-domain offset range (three entries, +-18750 kHz) whose named fields match the recorded NVAPI struct field for field. 0x2080901B also answers NV_OK, but every value slot of its 64-byte records is written as zero at stock (an 0xA5 pre-seed shows the writes as 0xA5A5A5A5 -> 0), so which slot holds the current offset cannot be fixed from a stock read alone -- and the type stamp is the only non-zero field it returns.".into(),
+            "clock domains/offsets: 0x20809019 answers NV_OK with a 10-domain directory and 0x20809025 answers NV_OK with a per-domain offset range (three entries, +-18750 kHz) whose named fields match the recorded NVAPI struct field for field. 0x2080901B also answers NV_OK, but every value slot of its 64-byte records is written as zero at stock (an 0xA5 pre-seed shows the writes as 0xA5A5A5A5 -> 0), so which slot holds the current offset cannot be fixed from a stock read alone -- and the type stamp is the only non-zero field it returns. The write set is type-conditional and all-or-nothing (the seven type-08/09 entries of a full selection write twelve value dwords each, the single type-03 entry writes its stamp only), so the type split narrows the block but still cannot name the offset slot.".into(),
             "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
     }
