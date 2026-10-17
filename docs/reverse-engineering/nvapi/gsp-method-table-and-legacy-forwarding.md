@@ -134,12 +134,29 @@ live Turing: *"Turing live (RTX 2070) mixes {0x08, 0x09}, Ada live (RTX 4060
 Laptop) reports 0x0A."* So the records **are** the clock-domain records and the
 record base is `+60`, stride 64.
 
-The **value** dwords however stay zero. That matches `nvapi-rs`'s description
-of the V1 handler verbatim: *"V1 silently drops those records (the type dword
-is still written on GET, the value dwords never are)"*, and the same paragraph
-says **"V2 is the REAL read/write path"**. So on this box
-`0x2080901b@2108` is the V1 form: it confirms which domains exist and their
-record type, and it does **not** hand back an offset or a range.
+The **value** dwords however all come back zero -- and §4.2 shows the driver
+*wrote* them (they change from `0xA5` to `0`), so they are marshalled fields
+whose stock value is 0, not fields the handler skips. That distinction matters,
+because the usual way this was read conflates two layers. `nvapi-rs` records
+*"V1 silently drops those records (the type dword is still written on GET, the
+value dwords never are)"* and **"V2 is the REAL read/write path"** -- but that
+describes the **NVAPI-side** handler that copies an RM block into the NVAPI
+*caller* struct (2404 B, `mask@+8`, 32x72 B records at `+100`). Here the RM
+block itself is the 2108 B one, and its records *are* filled:
+
+| layer | what it is | status on this box |
+| --- | --- | --- |
+| L1 NVAPI caller struct | 2404 B, `mask@+8`, records `+100`/72 B | what `nvapi-rs` describes (Windows) |
+| L2 Windows escape container | `0x07000109`-family | not used on macOS |
+| L3 RM control param | 2108 B, `mask@+4`, records `+60`/64 B | what the GSP validates |
+| L4 per-domain record inside L3 | 64 B, 13 dwords written | written by the GSP handler |
+
+An L1 drop does **not** prove an L4 drop. What is still undecided is narrower
+than before: whether one of those 13 dwords *is* the current offset, which would
+become non-zero once an offset is applied. At stock every one of them is `0`, so
+a stock read cannot pin the field map -- it needs either an independent source
+for the same field, or a single gated minimum-step write with a same-field
+readback (write gate G1 in `WRITE-VERIFICATION-PLAN.md`).
 
 Earlier attempts put the mask at `+0` or `+8` (from the NVAPI caller layout).
 Under a zeroed background those answer `NV_OK` too, but only because the real
@@ -485,6 +502,16 @@ printout alone is not a reproducible record of a block.
   until the GET half yields current/limit/state. The step granularity is still
   unknown (the `+/-18750 kHz` pair is the *range*, not a step), so the
   "minimum step" for a first write is not yet defined.
+* the VFP/"get-control" family at its **own** GSP sizes, which has never been
+  read: `0x2080901f @19416`, `0x20809021 @33288`, `0x20809022 @623112`,
+  `0x20809023 @66060` (SET twin `0x2080d024 @66060`), `0x20809027 @6288`,
+  `0x2080902c @4116`. A *get-control* return is the natural place for a
+  per-domain offset/applied pair, i.e. a better G1 candidate than re-reading
+  901b -- but these ids are untried, and the one unanswered safety fact is that
+  `0x20809026` latched the §6 wedge, so an untried id at its true size is
+  exactly the risk class that wedge belongs to. They stay out of the shipped
+  read battery until the wedge has a mechanism (or until an operator accepts a
+  single deliberate, last-request attempt).
 * the V2 form of the clock-domain control — `nvapi-rs` says the value dwords
   live there, and the GSP table does not offer a second size for
   `0x2080901b`, so V2 is either versioned inside the same 2108 B block or not
