@@ -5,8 +5,14 @@
 # already taken the whole legacy path down for a session, so the ordering
 # matters more than the commands:
 #
-#   1. --clkctl-hex   full byte dump of the two blocks whose zero-background
-#                     form is proven safe (0x20809019, 0x20809025)
+#   1. --clkctl-hex   full byte dump of every read-only clock block, and the
+#                     AUTHORITATIVE record of their contents: 0x2080901b with
+#                     its mask seeded at +4 (0xFF, then 0x0), 0x20809025,
+#                     0x20809019, and 0x2080901d last (it was only ever read
+#                     with a 0xA5 background, and a timeout on it must not cost
+#                     the other blocks).  The 0xA5 sweep's own delta printout
+#                     is not lossless -- it reported 106 changed dwords for
+#                     0x2080901b but the log kept 40 of them.
 #   2. --clkctl-read  the wider battery; it refuses 0x20809026@5332 outright
 #                     and aborts on the first 0x65/0x62
 #

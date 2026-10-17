@@ -1628,12 +1628,44 @@ int nvx_stage2_clkctl_read(nvx_ctx *c)
  * The dword-class map from --clkctl-read says *where* the GSP wrote; this
  * prints the actual bytes so the record stride and field offsets can be
  * decoded offline instead of guessed.  16 bytes per line, so the line stays
- * far inside nvx_emit's 288-byte detail field; only GET ids are sent. */
+ * far inside nvx_emit's 288-byte detail field; only GET ids are sent.
+ *
+ * THIS IS THE AUTHORITATIVE RECORD for the block contents.  The 2026-10-17
+ * 0xA5 sweep of 0x2080901b reported "106/527 dwords changed" but the captured
+ * log kept only 40 of them (and 60 of the 352 dwords 0x2080901d reported), so
+ * the delta printer alone is not a lossless record and a block whose tail was
+ * dropped cannot be reconstructed offline.  A GET must not have to be repeated
+ * just because the log format lost data -- after a GSP wedge it cannot be
+ * repeated at all.  Every read-only clkctl id therefore gets a full dump here,
+ * written to one file by tools/clock-offset-read-run.sh.
+ *
+ * Order matters: the ids are read in increasing confidence and the previously
+ * least-known one (0x2080901d, 32680 B) goes last, so a timeout on it still
+ * leaves the rest of the dump complete.  GET ids only; the SET twins
+ * (0x2080d01c / 0x2080d024 / 0x2080f214) are refused below. */
 int nvx_stage2_clkctl_hex(nvx_ctx *c)
 {
-    static const struct { const char *name; NvU32 cmd; unsigned size; } cases[] = {
-        { "domains-get-info 0x20809019 @12336", 0x20809019u, 12336u },
-        { "freq-ctrl-info   0x20809025 @7188",  0x20809025u, 7188u  },
+    /* mask/mask_off: some blocks take a domain mask as *input*, and a zeroed
+     * input selects nothing, so those cases must seed the mask to return a
+     * populated block.  0x2080901b's input mask is at +4: with a 0xA5
+     * background, seeding 0xFF at +4 is the only seed that answers NV_OK
+     * (every other header dword -> 0x25), which is also why the zero-filled
+     * --clkctl-read cases seeded at +8 returned NV_OK with an empty block.
+     * The zero-background confirmation of +4 is in the same battery. */
+    static const struct {
+        const char *name;
+        NvU32 cmd;
+        unsigned size;
+        unsigned mask_off;   /* ~0u = no mask field */
+        NvU32 mask;
+    } cases[] = {
+        { "domains-get-control 0x2080901B @2108 in@4=0xFF", 0x2080901bu, 2108u,
+          4u, 0x000000ffu },
+        { "domains-get-control 0x2080901B @2108 in@4=0",    0x2080901bu, 2108u,
+          4u, 0x00000000u },
+        { "freq-ctrl-info   0x20809025 @7188",  0x20809025u, 7188u,  ~0u, 0u },
+        { "domains-get-info 0x20809019 @12336", 0x20809019u, 12336u, ~0u, 0u },
+        { "gc-1d             0x2080901D @32680", 0x2080901du, 32680u, ~0u, 0u },
     };
 
     if (!c->hSubdevice) {
@@ -1661,6 +1693,8 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
             nvx_emit(c, "V2.clkctl", name, 0, NVX_V_HARD, "buffer alloc failed");
             continue;
         }
+        if (cases[i].mask_off != ~0u)
+            memcpy(buf + cases[i].mask_off, &cases[i].mask, 4);
 
         NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
                                   cases[i].cmd, buf, size);
