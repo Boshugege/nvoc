@@ -95,6 +95,24 @@ pub(super) fn format_human(execution: &Execution) -> String {
     lines.join("\n")
 }
 
+/// Join a JSON list of scalars for single-line human output; `empty` is the
+/// text used for "the list is there but carries nothing".
+fn join_string_array(values: &[Value], empty: &str) -> String {
+    let joined = values
+        .iter()
+        .map(|value| match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if joined.is_empty() {
+        empty.to_string()
+    } else {
+        joined
+    }
+}
+
 /// Keep unavailable reasons as plain text; the generic renderer infers units
 /// from field names and would append kHz / percent to error descriptions.
 fn format_macos_rm_output(output: &Value) -> Vec<String> {
@@ -103,15 +121,47 @@ fn format_macos_rm_output(output: &Value) -> Vec<String> {
         .as_object_mut()
         .and_then(|map| map.remove("unavailable"));
     if let Some(map) = data.as_object_mut() {
-        map.remove("rusd_timestamps"); // raw diagnostics remain in JSON output
+        // Raw diagnostics and the bitmask the decoded reasons come from stay
+        // in JSON output only.
+        map.remove("rusd_timestamps");
+        map.remove("throttle_reason_mask");
         for (source, label, scale, unit) in [
             ("graphics_clock_khz", "graphics_clock", 1000.0, "MHz"),
             ("memory_clock_khz", "memory_clock", 1000.0, "MHz"),
+            ("video_clock_khz", "video_clock", 1000.0, "MHz"),
+            ("sm_clock_khz", "sm_clock", 1000.0, "MHz"),
+            (
+                "graphics_target_clock_mhz",
+                "graphics_target_clock",
+                1.0,
+                "MHz",
+            ),
+            ("memory_target_clock_mhz", "memory_target_clock", 1.0, "MHz"),
+            ("video_target_clock_mhz", "video_target_clock", 1.0, "MHz"),
+            ("sm_target_clock_mhz", "sm_target_clock", 1.0, "MHz"),
             ("temperature_c", "temperature", 1.0, "C"),
+            ("temperature_memory_c", "temperature_memory", 1.0, "C"),
+            ("temperature_board_c", "temperature_board", 1.0, "C"),
+            (
+                "temperature_power_supply_c",
+                "temperature_power_supply",
+                1.0,
+                "C",
+            ),
             ("power_mw", "power", 1000.0, "W"),
             ("power_limit_mw", "power_limit", 1000.0, "W"),
+            (
+                "power_limit_requested_mw",
+                "power_limit_requested",
+                1000.0,
+                "W",
+            ),
+            ("average_power_mw", "average_power", 1000.0, "W"),
+            ("power_policy_tgp_mw", "power_policy_tgp", 1000.0, "W"),
             ("fan_rpm", "fan_speed", 1.0, "rpm"),
             ("utilization_percent", "gpu_utilization", 1.0, "%"),
+            ("memory_utilization_percent", "memory_utilization", 1.0, "%"),
+            ("memory_used_bytes", "memory_used", 1024.0 * 1024.0, "MiB"),
         ] {
             if let Some(value) = map.remove(source) {
                 map.insert(
@@ -125,6 +175,37 @@ fn format_macos_rm_output(output: &Value) -> Vec<String> {
     }
     if let Some(pstate) = data.get("pstate").and_then(Value::as_u64) {
         data["pstate"] = json!(format!("P{pstate}"));
+    }
+    // Lists and maps read better as one line than as a nested value block.
+    if let Some(reasons) = data.get("throttle_reasons").and_then(Value::as_array) {
+        data["throttle_reasons"] = json!(join_string_array(reasons, "none"));
+    }
+    if let Some(rpms) = data.get("fan_rpms").and_then(Value::as_array) {
+        data["fan_rpms"] = json!(join_string_array(rpms, "none"));
+    }
+    if let Some(engines) = data
+        .as_object_mut()
+        .and_then(|map| map.remove("engine_utilization_percent"))
+        .and_then(|value| value.as_object().cloned())
+    {
+        let joined = engines
+            .iter()
+            .map(|(name, value)| format!("{name} {:.2}%", value.as_f64().unwrap_or(f64::NAN)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Already in percent: drop the `_percent` suffix so the generic
+        // renderer does not append a second one.
+        data["engine_utilization"] = json!(if joined.is_empty() {
+            "none".to_string()
+        } else {
+            joined
+        });
+    }
+    if let Some(generation) = data.get("pcie_link_gen").and_then(Value::as_u64) {
+        data["pcie_link_gen"] = json!(format!("Gen{generation}"));
+    }
+    if let Some(generation) = data.get("pcie_max_link_gen").and_then(Value::as_u64) {
+        data["pcie_max_link_gen"] = json!(format!("Gen{generation}"));
     }
     let mut lines = format_value_block(&data, 1);
     if let Some(Value::Object(reasons)) = unavailable
@@ -3519,6 +3600,49 @@ mod tests {
     }
 
     #[test]
+    fn macos_status_renders_v3_telemetry_fields() {
+        let output = json!({
+            "video_clock_khz": 1410000,
+            "video_target_clock_mhz": 1410,
+            "temperature_memory_c": 49.5,
+            "average_power_mw": 11368,
+            "power_policy_tgp_mw": 11347,
+            "fan_rpms": [1200],
+            "engine_utilization_percent": {"gr": 91.48, "fb": 0.25},
+            "throttle_reasons": ["sw_power_cap"],
+            "throttle_reason_mask": 4,
+            "pcie_link_gen": 3,
+            "memory_used_bytes": 209_715_200,
+            "unavailable": {},
+        });
+        let rendered = format_macos_rm_output(&output).join("\n");
+        assert!(rendered.contains("1410.000 MHz"), "{rendered}");
+        assert!(rendered.contains("49.500 C"), "{rendered}");
+        assert!(rendered.contains("11.347 W"), "{rendered}");
+        assert!(rendered.contains("1200"), "{rendered}");
+        assert!(rendered.contains("gr 91.48%"), "{rendered}");
+        assert!(rendered.contains("sw_power_cap"), "{rendered}");
+        assert!(rendered.contains("Gen3"), "{rendered}");
+        assert!(rendered.contains("200.000 MiB"), "{rendered}");
+        // The raw bitmask stays in JSON, not in the human block.
+        assert!(!rendered.contains("throttle_reason_mask"), "{rendered}");
+    }
+
+    #[test]
+    fn macos_status_renders_empty_lists_without_dropping_the_field() {
+        let output = json!({
+            "fan_rpms": [],
+            "engine_utilization_percent": {},
+            "throttle_reasons": [],
+            "unavailable": {},
+        });
+        let rendered = format_macos_rm_output(&output).join("\n");
+        assert!(rendered.contains("Fan Rpms: none"), "{rendered}");
+        assert!(rendered.contains("Engine Utilization: none"), "{rendered}");
+        assert!(rendered.contains("Throttle Reasons: none"), "{rendered}");
+    }
+
+    #[test]
     fn human_output_formats_objects_without_json_dump() {
         nvoc_cli_common::color::init(true);
         let execution = Execution {
@@ -4660,8 +4784,10 @@ pub(super) fn macos_rm_sample_json(
     let object = value.as_object_mut().ok_or_else(|| {
         crate::CliError::new("macOS RM sample did not serialize to a JSON object")
     })?;
-    // v2 adds the per-field `freshness` classification and `epoch_reset`.
-    object.insert("schema".into(), json!("nvoc/macos-rm-sample/2"));
+    // v3 adds the per-field `freshness` classification, `epoch_reset`, the
+    // full v3 telemetry vocabulary (temperatures, clock domains, throttle
+    // reasons, per-fan rpm, per-engine utilization, PCIe link, memory used).
+    object.insert("schema".into(), json!("nvoc/macos-rm-sample/3"));
     object.insert("sequence".into(), json!(sequence));
     object.insert("host_time".into(), json!(rfc3339(host_time)));
     object.insert("host_time_unix_ns".into(), json!(unix_ns(host_time)));

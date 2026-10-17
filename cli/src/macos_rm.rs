@@ -327,13 +327,16 @@ fn open_monitored_session(
 
 /// Tell the user which sections had not published a new value when the session
 /// opened. Those fields are reported as `never_refreshed` until the driver
-/// publishes, instead of being presented as fresh data.
+/// publishes, instead of being presented as fresh data. Sections the driver
+/// does not publish at all are not "pending": they settle during the open and
+/// are reported per sample as `unsupported` with a reason, so they are not
+/// listed here.
 fn warn_missing_initial_freshness(session: &MacosRmSession) {
-    let freshness = session.initial_freshness();
+    let settled = session.initial_settled();
     let waiting: Vec<&str> = nvoc_core::MONITOR_SECTIONS
         .iter()
         .enumerate()
-        .filter(|(index, _)| !freshness[*index])
+        .filter(|(index, _)| !settled[*index])
         .map(|(_, name)| *name)
         .collect();
     if !waiting.is_empty() {
