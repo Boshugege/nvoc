@@ -313,7 +313,11 @@ def verdict(
 
 
 def audit(
-    paths: list[Path], census_text: str, declared: dict[str, int] | None = None
+    paths: list[Path],
+    census_text: str,
+    declared: dict[str, int] | None = None,
+    census_path: Path | None = None,
+    declared_path: Path | None = None,
 ) -> int:
     # Facts come from every census tier, including the weaker ones: a count credited to
     # a row that named its control by label, or to a sweep row attributed by the case
@@ -327,6 +331,19 @@ def audit(
         "RETRACTED": 0,
         "UNVERIFIABLE": 0,
     }
+    # Name the inputs before the verdicts: a tally is only comparable with a tally
+    # taken from the same census, the same declared table and the same files, and a
+    # reader who has only the summary line cannot tell whether that holds.
+    print(f"census: {census_path if census_path is not None else '(text)'}")
+    print(
+        "declared table: "
+        + (
+            f"{declared_path if declared_path is not None else '(table)'} "
+            f"({len(declared)} id/paramSize row(s))"
+            if declared is not None
+            else "none -- every 'table declares N B' claim is NO ARTIFACT (SKIP)"
+        )
+    )
     print(f"census ids with facts: {len(facts)}")
     for path in paths:
         items, dense = claims_in(path.read_text(errors="replace"))
@@ -351,6 +368,14 @@ def audit(
         f"{counts['NO ARTIFACT']} with no artifact, {counts['CONTRADICTED']} contradicted, "
         f"{counts['RETRACTED']} quoted as retracted, "
         f"{counts['UNVERIFIABLE']} marked unverifiable"
+    )
+    # The same tally, with the inputs that produced it: copy this line into a record
+    # and the count can be reproduced instead of trusted.
+    inputs = ", ".join(str(p) for p in paths)
+    print(
+        f"tally from: census={census_path if census_path is not None else '(text)'}, "
+        f"declared={declared_path if declared_path is not None else 'none'}, "
+        f"inputs=[{inputs}]"
     )
     # Only a contradiction about the captures fails the gate: a retraction and a
     # claim that names its own missing artifact are records, and are reported.
@@ -508,7 +533,13 @@ def main(argv: list[str]) -> int:
     if declared_path and declared is not None and not declared:
         print(f"SKIP: {declared_path} has no id/paramSize rows", file=sys.stderr)
         return 2
-    return audit(files, census_path.read_text(errors="replace"), declared)
+    return audit(
+        files,
+        census_path.read_text(errors="replace"),
+        declared,
+        census_path,
+        declared_path,
+    )
 
 
 if __name__ == "__main__":
