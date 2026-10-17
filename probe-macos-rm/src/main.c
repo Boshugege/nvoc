@@ -43,6 +43,45 @@ static int parse_number(const char *raw, unsigned long long max,
     return 0;
 }
 
+static int parse_rated_tdp_client(const char *s, NvU32 *out)
+{
+    static const struct { const char *name; NvU32 v; } map[] = {
+        { "RM", 0 }, { "WAR", 1 }, { "WAR_BUG_1785342", 1 },
+        { "GLOBAL", 2 }, { "OS", 3 }, { "PROFILE", 4 },
+    };
+    for (unsigned i = 0; i < sizeof map / sizeof map[0]; ++i)
+        if (!strcmp(s, map[i].name)) { *out = map[i].v; return 0; }
+    unsigned long long n;
+    if (parse_number(s, 4, &n) == 0) { *out = (NvU32)n; return 0; }
+    return -1;
+}
+
+static int parse_rated_tdp_action(const char *s, NvU32 *out)
+{
+    static const struct { const char *name; NvU32 v; } map[] = {
+        { "DEFAULT", 0 }, { "EXCEED", 1 }, { "FORCE_EXCEED", 1 },
+        { "LIMIT", 2 }, { "FORCE_LIMIT", 2 }, { "LOCK", 3 },
+        { "FORCE_LOCK", 3 }, { "FLOOR", 4 }, { "FORCE_FLOOR", 4 },
+    };
+    for (unsigned i = 0; i < sizeof map / sizeof map[0]; ++i)
+        if (!strcmp(s, map[i].name)) { *out = map[i].v; return 0; }
+    unsigned long long n;
+    if (parse_number(s, 4, &n) == 0) { *out = (NvU32)n; return 0; }
+    return -1;
+}
+
+static int parse_rated_tdp_set(const char *spec, NvU32 *client, NvU32 *action)
+{
+    char buf[64];
+    if (strlen(spec) >= sizeof buf) return -1;
+    strcpy(buf, spec);
+    char *colon = strchr(buf, ':');
+    if (!colon) return -1;
+    *colon = '\0';
+    return (parse_rated_tdp_client(buf, client) == 0 &&
+            parse_rated_tdp_action(colon + 1, action) == 0) ? 0 : -1;
+}
+
 static void on_signal(int sig)
 {
     (void)sig;
@@ -63,6 +102,10 @@ static void usage(void)
         "                   (voltage rails + V/F points; explicit opt-in)\n"
         "  --rated-tdp-read read-only PERF_RATED_TDP_GET_CONTROL (+ derived\n"
         "                   status); never sends the SET twin\n"
+        "  --rated-tdp-set C:A   gated WRITE: set RATED_TDP client C to action A\n"
+        "                   (needs --write; pre-record + readback + restore)\n"
+        "                   C=RM|WAR|GLOBAL|OS|PROFILE or 0-4, A=DEFAULT|EXCEED|\n"
+        "                   LIMIT|LOCK|FLOOR or 0-4\n"
         "  --jsonl <file>   also write every result/sample as JSON lines\n"
         "  --gpu <id>       attach explicit gpuId (default: first from CARD_INFO)\n"
         "  --quiet          suppress text detail, keep JSONL\n"
@@ -77,7 +120,8 @@ int main(int argc, char **argv)
     const char *stages = "012";
     const char *jsonl_path = NULL;
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
-    int tierb_read = 0, rated_tdp_read = 0;
+    int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
+    NvU32 rtdp_client = 0, rtdp_action = 0;
     NvU32 gpuId = 0;
 
     for (int i = 1; i < argc; i++) {
@@ -101,6 +145,13 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--tierb-read")) tierb_read = 1;
         else if (!strcmp(argv[i], "--rated-tdp-read")) rated_tdp_read = 1;
+        else if (!strcmp(argv[i], "--rated-tdp-set") && i + 1 < argc) {
+            if (parse_rated_tdp_set(argv[++i], &rtdp_client, &rtdp_action) != 0) {
+                fprintf(stderr, "invalid --rated-tdp-set spec (want CLIENT:ACTION)\n");
+                return 2;
+            }
+            rated_tdp_set = 1;
+        }
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
         else if (!strcmp(argv[i], "--help")) { usage(); return 0; }
         else { usage(); return 2; }
@@ -108,6 +159,11 @@ int main(int argc, char **argv)
 
     if (!*stages || strspn(stages, "012345") != strlen(stages)) {
         fprintf(stderr, "invalid --stages set\n"); return 2;
+    }
+    if (rated_tdp_set && !want_write) {
+        fprintf(stderr, "--rated-tdp-set is a performance write and also requires "
+                        "--write (it is refused before opening the driver)\n");
+        return 2;
     }
     if (NVX_IDLE_ONLY && (want_write || strpbrk(stages, "35"))) {
         fprintf(stderr, "idle-only build refuses --write and stages 3/5 "
@@ -182,6 +238,11 @@ int main(int argc, char **argv)
     if (rated_tdp_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_rated_tdp_read(&g_ctx) != 0) rc = 1;
+    }
+
+    if (rated_tdp_set) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage3_rated_tdp_set(&g_ctx, rtdp_client, rtdp_action) != 0) rc = 1;
     }
 
     if (sample_sec > 0 && !strchr(stages, '4')) {

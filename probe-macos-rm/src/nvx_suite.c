@@ -941,6 +941,16 @@ int nvx_stage2(nvx_ctx *c)
 
 static nvx_ctx *g_boost_ctx;
 
+/* RATED_TDP restore state (kept separate from the boost latch so one write
+ * path can never trigger the other's restore). Armed only after a successful
+ * pre-record, so an interrupted run always returns the client to its prior
+ * action. */
+static nvx_ctx *g_rtdp_ctx;
+static int g_rtdp_armed;
+static NvU32 g_rtdp_client;
+static NvU32 g_rtdp_orig_action;
+static NvU32 g_rtdp_orig_vpstate;
+
 static void boost_clear(nvx_ctx *c)
 {
     NV2080_CTRL_PERF_BOOST_PARAMS bp;
@@ -954,12 +964,36 @@ static void boost_clear(nvx_ctx *c)
 
 void nvx_restore_arm(nvx_ctx *c) { g_boost_ctx = c; }
 
+static void rated_tdp_restore(nvx_ctx *c)
+{
+    NV2080_CTRL_PERF_RATED_TDP_SET_CONTROL_PARAMS s;
+    memset(&s, 0, sizeof s);
+    s.client = (NV2080_CTRL_PERF_RATED_TDP_CLIENT)g_rtdp_client;
+    s.input = (NV2080_CTRL_PERF_RATED_TDP_ACTION)g_rtdp_orig_action;
+    s.vPstateType = (NV2080_CTRL_PERF_RATED_TDP_VPSTATE_TYPE)g_rtdp_orig_vpstate;
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_SET_CONTROL, &s);
+
+    NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS g;
+    memset(&g, 0, sizeof g);
+    g.client = (NV2080_CTRL_PERF_RATED_TDP_CLIENT)g_rtdp_client;
+    NvU32 st2 = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL, &g);
+    printf("[..] restoring RATED_TDP client %s(%u) -> %s(%u): SET 0x%x, GET 0x%x%s\n",
+           rated_tdp_client_name(g_rtdp_client), g_rtdp_client,
+           rated_tdp_action_name(g_rtdp_orig_action), g_rtdp_orig_action,
+           st, st2, (st2 == 0 && g.input == g_rtdp_orig_action) ? " (verified)" : "");
+}
+
 void nvx_restore_run(void)
 {
     if (g_boost_ctx && g_boost_ctx->hSubdevice) {
         printf("[..] restoring: clearing PERF_BOOST latched state\n");
         boost_clear(g_boost_ctx);
         g_boost_ctx = NULL;
+    }
+    if (g_rtdp_armed && g_rtdp_ctx && g_rtdp_ctx->hSubdevice) {
+        rated_tdp_restore(g_rtdp_ctx);
+        g_rtdp_armed = 0;
+        g_rtdp_ctx = NULL;
     }
 }
 
@@ -1057,6 +1091,90 @@ int nvx_stage3(nvx_ctx *c)
 
     nvx_restore_run();
     return 0;
+}
+
+/* Gated RATED_TDP SET: the lowest-risk performance write candidate. Reached
+ * only via `--write --rated-tdp-set C:A`. Sequence is mandatory and ordered:
+ * pre-record -> arm restore -> SET -> readback. If the pre-record GET fails we
+ * refuse to write, because we could not guarantee a restore. */
+int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
+{
+    if (NVX_IDLE_ONLY) {
+        nvx_emit(c, "V3.4", "rated-tdp-set", 0, NVX_V_GATED,
+                 "idle-only build: performance writes disabled");
+        return -1;
+    }
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V3.4", "rated-tdp-set", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    if (client >= NV2080_CTRL_PERF_RATED_TDP_CLIENT_NUM_CLIENTS) {
+        nvx_emit(c, "V3.4", "rated-tdp-set", 0, NVX_V_SKIP,
+                 "client %u out of range [0,%u)", client,
+                 NV2080_CTRL_PERF_RATED_TDP_CLIENT_NUM_CLIENTS);
+        return -1;
+    }
+    if (client == NV2080_CTRL_PERF_RATED_TDP_CLIENT_RM) {
+        nvx_emit(c, "V3.4", "rated-tdp-set", 0, NVX_V_SKIP,
+                 "client RM(0) cannot be set (per ctrl2080perf.h:425); it is RM-internal");
+        return -1;
+    }
+
+    /* 1. pre-record the client's current request; refuse to write without it. */
+    NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS g;
+    memset(&g, 0, sizeof g);
+    g.client = (NV2080_CTRL_PERF_RATED_TDP_CLIENT)client;
+    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL, &g);
+    if (st != 0) {
+        nvx_emit(c, "V3.4a", "rated-tdp-pre-record", st, NVX_V_REJECTED,
+                 "GET before SET failed; refusing to write (restore not guaranteed)");
+        return -1;
+    }
+    nvx_emit(c, "V3.4a", "rated-tdp-pre-record", st, NVX_V_OK,
+             "client %s(%u) original action %s(%u) vPstate %u",
+             rated_tdp_client_name(client), client,
+             rated_tdp_action_name((NvU32)g.input), (NvU32)g.input,
+             (NvU32)g.vPstateType);
+
+    /* 2. arm the dedicated restore path before mutating anything. */
+    g_rtdp_ctx = c;
+    g_rtdp_client = client;
+    g_rtdp_orig_action = (NvU32)g.input;
+    g_rtdp_orig_vpstate = (NvU32)g.vPstateType;
+    g_rtdp_armed = 1;
+
+    /* 3. SET the requested action. */
+    NV2080_CTRL_PERF_RATED_TDP_SET_CONTROL_PARAMS s;
+    memset(&s, 0, sizeof s);
+    s.client = (NV2080_CTRL_PERF_RATED_TDP_CLIENT)client;
+    s.input = (NV2080_CTRL_PERF_RATED_TDP_ACTION)action;
+    s.vPstateType = (NV2080_CTRL_PERF_RATED_TDP_VPSTATE_TYPE)g_rtdp_orig_vpstate;
+    st = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_SET_CONTROL, &s);
+    nvx_emit(c, "V3.4b", "rated-tdp-set", st,
+             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             "client %s(%u) <- %s(%u) (rc 0x%x %s)",
+             rated_tdp_client_name(client), client,
+             rated_tdp_action_name(action), action, st, nvx_status_name(st));
+
+    /* 4. readback and compare. */
+    NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS r;
+    memset(&r, 0, sizeof r);
+    r.client = (NV2080_CTRL_PERF_RATED_TDP_CLIENT)client;
+    NvU32 st2 = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL, &r);
+    int ok = (st2 == 0 && (NvU32)r.input == action);
+    nvx_emit(c, "V3.4c", "rated-tdp-readback", st2,
+             ok ? NVX_V_OK : NVX_V_REJECTED,
+             "after SET: action %s(%u) (GET 0x%x) vPstate %u; restore-on-exit armed -> %s(%u)",
+             rated_tdp_action_name((NvU32)r.input), (NvU32)r.input, st2,
+             (NvU32)r.vPstateType,
+             rated_tdp_action_name(g_rtdp_orig_action), g_rtdp_orig_action);
+
+    /* 5. restore now (proving the round-trip) and disarm; atexit/SIGINT would
+     * have done the same had we died in between. */
+    rated_tdp_restore(c);
+    g_rtdp_armed = 0;
+    g_rtdp_ctx = NULL;
+    return st == 0 ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------ */

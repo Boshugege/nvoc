@@ -68,6 +68,17 @@ OGKM=/path/to/ogkm python3 tests/test_idle_cli.py
 ./probe-macos-rm-idle --stages 0 --rated-tdp-read   # PERF_RATED_TDP_GET_CONTROL 全 client 扫描 + 越界反证
 ```
 
+**写入（门控）**：RATED_TDP 仲裁 SET 已实现为 V3.4，但**不随任何 stage 组运行**，必须显式同时给出
+`--write` 与 `--rated-tdp-set`；idle-only 构建与缺 `--write` 都在**打开驱动前**拒绝：
+
+```bash
+PROFILE=full sh build.sh
+./probe-macos-rm --write --rated-tdp-set GLOBAL:EXCEED   # 唯一最低风险写对；带 pre-record/readback/restore
+```
+
+序列为 pre-record（GET 原值，失败即拒绝写）→ SET → readback 比对 → 退出前恢复原值（`atexit`/SIGINT/SIGTERM）。
+它是"是否允许越过 RATED_TDP 点"的策略开关，**不是时钟/电压偏移**，`NV_OK` 也不构成稳定性证据。
+
 - 退出码：`0` 阶段调度完成，具体支持情况仍需查看每项 verdict；`1` 传输/对象链或阶段失败；`3` full profile 中有 --write 门控项未授权；`2` 用法或 profile 限制错误。
 - 每个条目输出 `[OK|REJECTED|SKIP|GATED|HARD]` 判定 + `NV_STATUS` 名；`--jsonl` 同步落盘（结果 + 采样流），供与 Linux/Windows 实机三方对照。
 

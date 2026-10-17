@@ -63,8 +63,9 @@
 | V3.1b | `PERF_BOOST` 0x2080200A `BOOST_TO_MAX\|CUDA_YES` + 5 s 采样 + `CMD_CLEAR` | ctrl2080perf.h（**A-proven**，nvk-macos.patch:10701——全仓库唯一已在用户态发过的 GSP perf 写入） | 采样 pre/boost×5/clear | `OK` ⇒ 报告 §3.4"OS 层特权全开是否足以过固件检查"**判定为是**；boost 期间 pstate/频率抬升 ⇒ 性能写入面全通 |
 | V3.2 | `PERF_SET_POWERSTATE` 0x2080205B 往返 | ctrl2080perf.h（A-tree） | 读当前值→回写同值→回读验证 | 零位移；接受 ⇒ perf 电源状态写面通 |
 | V3.3 | `UPDATE_EDPP_LIMIT` 0x20800AD0 往返 | ctrl2080internal.h:3234（A-tree） | GET curr→`bEnable=1, clientLimit=limitCurr`→回读验证 | **功耗墙写面探针**（M3 前置）；桌面卡可能 NOT_SUPPORTED（eDPp 是移动/平台语义）——本身即结论 |
+| V3.4 | `PERF_RATED_TDP_SET_CONTROL` 0x2080206F（`--write --rated-tdp-set C:A`） | ctrl2080perf.h:438（A-tree；与读面同结构） | **强制序列**：pre-record（GET 原值，失败则拒绝写）→ arm restore → SET → readback 比对；`atexit`/SIGINT/SIGTERM 亦恢复原值。**非默认电池**：不随 stage 3 运行，必须显式给 `--write --rated-tdp-set C:A` | client GLOBAL(2)←`EXCEED(1)` = 解除 RATED_TDP 越点限制（文档指其预期使用方为 EVGA Precision 类工具）；**无偏移/无电压/可逆**，是本战役**最低风险写对**。`NV_OK` + readback==action ⇒ 写面通；**不等于超频稳定**。RM(0) 按头文件不可 SET，工具直接拒绝 |
 
-恢复：`atexit`/SIGINT/SIGTERM 时对 BOOST 发 `CMD_CLEAR`（best-effort）。V3.2/V3.3 按构造自恢复。
+恢复：`atexit`/SIGINT/SIGTERM 时对 BOOST 发 `CMD_CLEAR`（best-effort）。V3.2/V3.3 按构造自恢复。V3.4 记录 5 个 client 中被写 client 的原始 action/vPstate 并在退出前回写 + 回读校验（与 boost 恢复路径分离，互不触发）。
 
 ## 阶段 4 — 遥测采样流
 1 Hz 输出 pstate / gpc / dram / GPU 温度 / 瞬时功耗 / enforced 功耗墙 / 风扇转速 / GPU busy（来源：ctrl pstate + PMUMON + RUSD）。用途：
@@ -91,7 +92,7 @@ NullMoth 自家 push_test（`kexts/NVRM/push.inc`）的移植。不含任何调�
 
 ## 后续探针（v1 代码不发送，按风险递增排序）
 
-1. **RATED_TDP 仲裁 SET**：`NV2080_CTRL_CMD_PERF_RATED_TDP_SET_CONTROL` 0x2080206f（ctrl2080perf.h:438，结构与读面同）。把 client GLOBAL(2) 置 `FORCE_EXCEED(1)` = 解除 RATED_TDP 限制以允许越过 RATED_TDP 点（文档指其预期使用方为 EVGA Precision 这类终端工具）。**这是本战役目前找到的最低风险写对**：无偏移、无电压、可逆（回 DEFAULT=0 即恢复），且读面(V2.4)已证同结构可用、越界校验有效。**但仍属性能写，门控未发**；启用需：先记录 5 client 的 input/vPstate 原值 → SET → 回读确认 → 退出前恢复 DEFAULT。注意它只放开/限制越点，**不等于超频偏移**，不得据此宣称稳定。
+1. **RATED_TDP 仲裁 SET**：`NV2080_CTRL_CMD_PERF_RATED_TDP_SET_CONTROL` 0x2080206f（ctrl2080perf.h:438，结构与读面同）。**已在工具中实现为 V3.4（`--write --rated-tdp-set C:A`，带 pre-record/readback/restore），但仍门控未发**。把 client GLOBAL(2) 置 `FORCE_EXCEED(1)` = 解除 RATED_TDP 限制以允许越过 RATED_TDP 点（文档指其预期使用方为 EVGA Precision 这类终端工具）。**这是本战役目前找到的最低风险写对**：无偏移、无电压、可逆（回 DEFAULT=0 即恢复），且读面(V2.4)已证同结构可用、越界校验有效。**但仍属性能写，门控未发**；启用需：先记录 5 client 的 input/vPstate 原值 → SET → 回读确认 → 退出前恢复 DEFAULT。注意它只放开/限制越点，**不等于超频偏移**，不得据此宣称稳定。
 2. **legacy 温度读数 ID 核实**：MODS 4060 IDA 库（`reverse/mods_analysis/a3_work/mods4060.i64`）找 THERMAL 族（0x2080 11xx）分发点，取 `THERMAL_GET_INFO` 精确 ID + 参数尺寸，做成 B 层探针。（RUSD 已覆盖温度，此项为冗余备份。）
 3. **VF 偏移 SET**：`nvmlDeviceSetGpcClkVfOffset` → RM `0x2080D031`（580）/`0x2080F031`（610 文档，参数 0x608 B，blackwell audit T2-10）。**M2 的核心写面**。先 GET 对应面（`0x208090A2` 已在 V2.11 探路），再小步幅（±15 MHz）+ V2.7 频率回读。
 4. **电压轨 SET**：`0x20801ACF`（7 轨 ×316 B，uV；MODS REPORT.md）。前置：确认 kext 侧 RM registry key 通道（`RmVFPointCheckIgnore=1` 的 macOS 等价物，Linux 是 `NVreg_RegistryDwords`）——否则越限写会被 OV/reliability 预检拦下。**风险最高档**，必须在 M0 遥测闭环建立后进行。

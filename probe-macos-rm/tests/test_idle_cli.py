@@ -48,6 +48,9 @@ int nvx_stage2_rated_tdp_read(nvx_ctx *c) {
     puts("FAKE ratedtdp");
     return 0;
 }
+int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action) {
+    (void)c; (void)client; (void)action; abort();
+}
 int nvx_stage3(nvx_ctx *c) { (void)c; abort(); }
 int nvx_stage5(nvx_ctx *c) { (void)c; abort(); }
 int nvx_close(int fd) { printf("FAKE close %d\n", fd); return 0; }
@@ -172,6 +175,28 @@ class IdleCli(unittest.TestCase):
         asked = self.run_cli("--stages", "0", "--rated-tdp-read")
         self.assertEqual(asked.returncode, 0, asked.stderr)
         self.assertEqual(asked.stdout.count("FAKE ratedtdp"), 1)
+
+    def test_rated_tdp_set_is_gated_like_other_writes(self):
+        log = self.directory / "must-not-exist.jsonl"
+        # Without --write it is refused before the driver, with a clear reason.
+        for args in [("--rated-tdp-set", "GLOBAL:EXCEED")]:
+            with self.subTest(args=args):
+                result = self.run_cli(*args, "--jsonl", str(log))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("requires", result.stderr)
+                self.assertNotIn("FAKE", result.stdout)
+                self.assertFalse(log.exists())
+        # In the idle-only profile, --write itself is refused.
+        result = self.run_cli("--write", "--rated-tdp-set", "GLOBAL:EXCEED")
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("idle-only build refuses", result.stderr)
+        self.assertNotIn("FAKE", result.stdout)
+        # A malformed spec is a usage error, also before transport.
+        for spec in ("GLOBAL", "GLOBAL:BOGUS", "BOGUS:EXCEED", "9:1", "1:9", ":"):
+            with self.subTest(spec=spec):
+                result = self.run_cli("--write", "--rated-tdp-set", spec)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertNotIn("FAKE", result.stdout)
 
     def test_failed_transport_stops_before_chain_and_sampling(self):
         for stage in ("0", "1", "2", "4"):
