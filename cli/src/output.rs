@@ -4825,6 +4825,9 @@ pub(super) fn macos_rm_sample_json(
     // v3 adds the per-field `freshness` classification, `epoch_reset`, the
     // full v3 telemetry vocabulary (temperatures, clock domains, throttle
     // reasons, per-fan rpm, per-engine utilization, PCIe link, memory used).
+    // Fields are only ever added inside a version, never reinterpreted:
+    // `fan_coolers` (the same rpm readings with the driver's own cooler slot)
+    // joined v3 additively, so a consumer of the earlier key set is unaffected.
     object.insert("schema".into(), json!("nvoc/macos-rm-sample/3"));
     object.insert("sequence".into(), json!(sequence));
     object.insert("host_time".into(), json!(rfc3339(host_time)));

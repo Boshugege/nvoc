@@ -816,7 +816,10 @@ fn status_macos_rm_to_map(gpu_id: u32, index: usize, status: &DeviceStatus) -> V
         );
     }
     // Fans: `fan_rpm` is the highest live reading (NVML-style single value),
-    // `fan_rpms` is the per-cooler list. A stopped fan reads 0 and stays 0.
+    // `fan_rpms` is the per-cooler list, and `fan_coolers` keeps the driver's
+    // own cooler slot next to each reading (the list position is a position
+    // after the plausibility filter, so it is not the cooler index). A stopped
+    // fan reads 0 and stays 0.
     if let Some(rpm) = status.fan_rpm {
         map.insert("fan_rpm".into(), u64_value(rpm as u64));
     }
@@ -828,6 +831,23 @@ fn status_macos_rm_to_map(gpu_id: u32, index: usize, status: &DeviceStatus) -> V
                     .fan_rpms
                     .iter()
                     .map(|rpm| u64_value(*rpm as u64))
+                    .collect(),
+            ),
+        );
+    }
+    if !status.fan_coolers.is_empty() {
+        map.insert(
+            "fan_coolers".into(),
+            Value::Array(
+                status
+                    .fan_coolers
+                    .iter()
+                    .map(|cooler| {
+                        value_object([
+                            ("slot", u64_value(cooler.slot as u64)),
+                            ("rpm", u64_value(cooler.rpm as u64)),
+                        ])
+                    })
                     .collect(),
             ),
         );
@@ -1773,6 +1793,16 @@ fn normalize_pstates(target: &GpuTarget<'_>) -> PyResultValue {
 }
 
 fn normalize_fan_info(target: &GpuTarget<'_>) -> PyResultValue {
+    // macOS RM: same dispatch rule as info/status/settings. This backend does
+    // publish a tachometer reading per cooler, so the entry answers from it
+    // instead of failing on the missing NVML handle; the projection is core's,
+    // so this entry cannot state anything the backend does not.
+    if target.has_macos_rm() {
+        let device = target.macos_rm().map_err(to_py_err)?;
+        let report = device.status().map_err(to_py_err)?.fan_report();
+        let value = serde_json::to_value(&report).map_err(to_py_err)?;
+        return Ok(value);
+    }
     let fan = run(target, QueryFanInfo).map_err(to_py_err)?.output;
     Ok(value_object([
         ("count", u64_value(fan.count as u64)),
@@ -5868,6 +5898,9 @@ mod tests {
             throttle_reasons: Vec::new(),
             fan_rpm: Some(1650),
             fan_rpms: vec![1650],
+            // The same reading with the driver's cooler slot, which the entry
+            // that names a cooler needs.
+            fan_coolers: vec![nvoc_core::FanCoolerReading { slot: 0, rpm: 1650 }],
             utilization_percent: Some(92),
             memory_utilization_percent: Some(0),
             engine_utilization_percent: std::collections::BTreeMap::from([

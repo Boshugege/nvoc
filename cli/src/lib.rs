@@ -529,7 +529,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 Command::GetFanInfo,
                 CommandSpec {
                     adapters: &BOTH_BACKENDS,
-                    ..CommandSpec::new("get-fan-info", Group::Fan, "Read fan/cooler info (NVML: count + min/max percent; NVAPI: per-cooler info via private FanCoolerGetInfo)")
+                    ..CommandSpec::new("get-fan-info", Group::Fan, "Read fan/cooler info (NVML: count + min/max percent; NVAPI: per-cooler info via private FanCoolerGetInfo; macOS RM: per-cooler rpm with the driver's own cooler slot, the percent fields null with the reason attached)")
                 },
             ),
             (

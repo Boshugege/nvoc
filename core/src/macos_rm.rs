@@ -65,6 +65,10 @@ pub struct DeviceStatus {
     pub fan_rpm: Option<u32>,
     /// One entry per live cooler the driver reports.
     pub fan_rpms: Vec<u32>,
+    /// The same readings with the driver's own cooler slot kept, which is what
+    /// the fan-info entry needs: the position in `fan_rpms` is a position after
+    /// the plausibility filter, not the cooler index.
+    pub fan_coolers: Vec<FanCoolerReading>,
     pub utilization_percent: Option<u32>,
     pub memory_utilization_percent: Option<u32>,
     /// Busy percent per engine, keyed the way the driver names them (gr, fb,
@@ -938,6 +942,88 @@ impl DeviceSettings {
                 .iter()
                 .find(|entry| entry.name == name)
                 .ok_or_else(|| unnamed_offset_reason(name)),
+        }
+    }
+}
+
+/// One live fan reading: the driver's own cooler slot plus the rpm it reports.
+///
+/// The slot is kept because it is the only stable identity this layer offers.
+/// The order of the published readings is a position after the plausibility
+/// filter, so it is not the cooler index; a consumer that has to name a cooler
+/// needs the driver's coordinate, the same way the offset records need their
+/// device domain bit rather than a position in a list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FanCoolerReading {
+    pub slot: u32,
+    pub rpm: u32,
+}
+
+/// The fan face of this backend: the readings it publishes, and the fields of
+/// the common fan-info contract it has no source for.
+///
+/// Kept separate from [`DeviceStatus`] because it answers a question about the
+/// entry contract ("can this backend fill fan-info, and with what?") rather
+/// than about the device. `unavailable` names the fields this backend cannot
+/// fill and why, in the same shape the rest of this backend uses for fields it
+/// cannot report -- never by leaving a consumer to guess from a missing key or,
+/// worse, to read a fabricated zero.
+#[derive(Debug, Clone, Serialize)]
+pub struct FanReport {
+    /// Coolers that reported a live reading in this snapshot. Not "coolers
+    /// fitted": see `notes`.
+    pub count: usize,
+    pub coolers: Vec<FanCoolerReading>,
+    /// The three percentage fields of the common fan-info contract. `None`
+    /// because this backend has no source for them, with the reason in
+    /// `unavailable`: a null that a consumer can look up, never a zero standing
+    /// in for a value that was not read.
+    pub min_percent: Option<u32>,
+    pub max_percent: Option<u32>,
+    pub current_percent: Option<u32>,
+    pub unavailable: BTreeMap<String, String>,
+    pub notes: Vec<String>,
+}
+
+/// The RUSD fan section publishes a tachometer reading per cooler slot and
+/// nothing else: no duty percent, and no rpm range to turn one into a percent
+/// without inventing a scale. So the three fields the NVML fan-info entry
+/// reports as percentages have no source here, while rpm does.
+pub const FAN_PERCENT_UNREADABLE_REASON: &str = "the RUSD fan section publishes a tachometer reading per cooler slot, with no duty percent and no rpm range, so a percentage would need an invented scale; the rpm reading the driver does publish is reported instead";
+
+impl DeviceStatus {
+    /// What this snapshot can say about the fans, and what it cannot.
+    pub fn fan_report(&self) -> FanReport {
+        let unavailable = ["min_percent", "max_percent", "current_percent"]
+            .into_iter()
+            .map(|field| (field.to_string(), FAN_PERCENT_UNREADABLE_REASON.to_string()))
+            .collect();
+        let mut notes = Vec::new();
+        match self.unavailable.get("fan_rpm") {
+            // The section itself was unusable, so an empty cooler list means
+            // "not read", not "nothing turned" -- the two must not be merged.
+            Some(reason) => notes.push(format!(
+                "the fan section of this snapshot was not usable ({reason}), so an empty cooler \
+                 list here means \"not read\", not \"no fan\""
+            )),
+            None => notes.push(
+                "count and coolers list only the coolers that reported a plausible non-zero rpm \
+                 in this snapshot: a stopped fan reads 0 rpm, which this layer cannot tell apart \
+                 from an unpopulated slot"
+                    .to_string(),
+            ),
+        }
+        if !self.unavailable.is_empty() {
+            notes.push("see unavailable for the readings this snapshot could not fill".to_string());
+        }
+        FanReport {
+            count: self.fan_coolers.len(),
+            coolers: self.fan_coolers.clone(),
+            min_percent: None,
+            max_percent: None,
+            current_percent: None,
+            unavailable,
+            notes,
         }
     }
 }
@@ -1989,8 +2075,9 @@ fn publish_all(
     fields.note_section(fan);
     let fan_ts = raw.timestamps[SEC_FAN];
     let mut fan_rpms: Vec<u32> = Vec::new();
+    let mut fan_coolers: Vec<FanCoolerReading> = Vec::new();
     let mut implausible = false;
-    for rpm in raw.fan_rpm.iter().copied() {
+    for (slot, rpm) in raw.fan_rpm.iter().copied().enumerate() {
         if rpm == 0 {
             continue; // an empty cooler slot, or a stopped fan
         }
@@ -1999,6 +2086,10 @@ fn publish_all(
             continue;
         }
         fan_rpms.push(rpm);
+        fan_coolers.push(FanCoolerReading {
+            slot: slot as u32,
+            rpm,
+        });
     }
     // Every non-zero slot was nonsense: the section itself is not usable.
     let fan_value = if implausible && fan_rpms.is_empty() {
@@ -2013,6 +2104,9 @@ fn publish_all(
     let fan_rpms = fields
         .publish("fan_rpms", fan, fan_ts, fan_value, stale_ms, scope)
         .then_some(fan_rpms);
+    let fan_coolers = fields
+        .publish("fan_coolers", fan, fan_ts, fan_value, stale_ms, scope)
+        .then_some(fan_coolers);
 
     // ---- device utilization ----------------------------------------------
     let util = &checks[SEC_UTIL];
@@ -2143,6 +2237,7 @@ fn publish_all(
             .unwrap_or_default(),
         fan_rpm,
         fan_rpms: fan_rpms.unwrap_or_default(),
+        fan_coolers: fan_coolers.unwrap_or_default(),
         utilization_percent,
         memory_utilization_percent,
         engine_utilization_percent,
@@ -2708,6 +2803,7 @@ mod tests {
             throttle_reasons: Vec::new(),
             fan_rpm: Some(0),
             fan_rpms: Vec::new(),
+            fan_coolers: Vec::new(),
             utilization_percent: Some(0),
             memory_utilization_percent: Some(0),
             engine_utilization_percent: BTreeMap::new(),
@@ -3502,6 +3598,63 @@ mod tests {
     }
 
     #[test]
+    fn fan_readings_keep_the_cooler_slot_and_the_report_names_the_missing_fields() {
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        // Slots 0 and 2 are turning, slot 1 is stopped or empty -- this layer
+        // cannot tell those apart, so it must not renumber what is left.
+        s.telemetry.sample.fan_rpm = [1_200, 0, 2_500, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let status = status_from_snapshot(&s);
+        assert_eq!(status.fan_rpms, vec![1_200, 2_500]);
+        assert_eq!(
+            status.fan_coolers,
+            vec![
+                FanCoolerReading {
+                    slot: 0,
+                    rpm: 1_200
+                },
+                FanCoolerReading {
+                    slot: 2,
+                    rpm: 2_500
+                },
+            ]
+        );
+        let report = status.fan_report();
+        assert_eq!(report.count, 2);
+        assert_eq!(report.coolers, status.fan_coolers);
+        assert_eq!(report.min_percent, None);
+        assert_eq!(report.max_percent, None);
+        assert_eq!(report.current_percent, None);
+        assert_eq!(report.unavailable.len(), 3);
+        for field in ["min_percent", "max_percent", "current_percent"] {
+            assert_eq!(report.unavailable[field], FAN_PERCENT_UNREADABLE_REASON);
+        }
+        assert!(
+            report.notes.iter().any(|note| note.contains("stopped fan")),
+            "{:?}",
+            report.notes
+        );
+
+        // An unusable fan section is "not read", which must not come out as
+        // "no cooler turned".
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        s.telemetry.sample.fan_rpm = [294_118, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let unread = status_from_snapshot(&s).fan_report();
+        assert_eq!(unread.count, 0);
+        assert!(
+            unread.notes.iter().any(|note| note.contains("not read")),
+            "{:?}",
+            unread.notes
+        );
+        assert!(
+            unread.notes.iter().all(|note| !note.contains("stopped")),
+            "{:?}",
+            unread.notes
+        );
+    }
+
+    #[test]
     fn throttle_reasons_and_pcie_generation_are_decoded() {
         let mut s = snapshot();
         s.telemetry.sample = raw_sample();
@@ -3639,9 +3792,13 @@ mod tests {
         // The two containers that carry numbers are emptied, not half-filled.
         assert!(status.rusd_timestamps.is_empty());
         assert!(status.engine_utilization_percent.is_empty());
-        // The same count the wedged device reported for the same page failure,
-        // so this fixture is the device case rather than an approximation of it.
-        assert_eq!(status.unavailable.len(), 26);
+        // The wedged device reported 26 unavailable names for the same page
+        // failure on the field set as it stood then, and 27 once `fan_coolers`
+        // -- the same readings with the driver's cooler slot kept -- joined it
+        // (measured on that device, 2026-10-18, the same 0x00000062 page
+        // failure), so this fixture is the device case rather than an
+        // approximation of it.
+        assert_eq!(status.unavailable.len(), 27);
     }
 
     #[test]
@@ -3729,9 +3886,9 @@ mod tests {
         assert!(sample.status.unavailable.is_empty());
         assert_eq!(sample.advancing_sections(), RUSD_FIELDS);
         // 8 clock + 4 temperature + 2 limit + power + avg + policy + throttle
-        // + fan_rpm + fan_rpms + 2 utilization + engines + 2 pcie + the two
-        // live RM controls (pstate, memory_used_bytes).
-        assert_eq!(sample.updated.len(), 27);
+        // + fan_rpm + fan_rpms + fan_coolers + 2 utilization + engines + 2 pcie
+        // + the two live RM controls (pstate, memory_used_bytes).
+        assert_eq!(sample.updated.len(), 28);
         assert!(sample.updated.values().all(|value| *value));
         assert_eq!(sample.status.rusd_timestamps["temperature_c"], 1_000);
     }

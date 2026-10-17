@@ -11,11 +11,11 @@ pub mod macos_rm;
 pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{
     ABI_LAYOUT_SLOTS, ClockOffsetDomain, ClockOffsetLimits, ClockOffsetReading, DeviceInfo,
-    DeviceSample, DeviceSettings, DeviceStatus, FieldState, MONITOR_SECTIONS, MONITOR_STALE_AFTER,
-    MacosRmSession, NamedClockOffset, OffsetStep, OffsetStepTarget, OffsetStepVerdict,
-    PUBLIC_OFFSET_DOMAINS, QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus,
-    SettingsCapabilities, abi_layout, native_abi_layout, parse_offset_delta, parse_offset_target,
-    plan_offset_step, unnamed_offset_reason,
+    DeviceSample, DeviceSettings, DeviceStatus, FAN_PERCENT_UNREADABLE_REASON, FanCoolerReading,
+    FanReport, FieldState, MONITOR_SECTIONS, MONITOR_STALE_AFTER, MacosRmSession, NamedClockOffset,
+    OffsetStep, OffsetStepTarget, OffsetStepVerdict, PUBLIC_OFFSET_DOMAINS, QueryMacosRmInfo,
+    QueryMacosRmSettings, QueryMacosRmStatus, SettingsCapabilities, abi_layout, native_abi_layout,
+    parse_offset_delta, parse_offset_target, plan_offset_step, unnamed_offset_reason,
 };
 mod nvapi;
 pub mod nvml;

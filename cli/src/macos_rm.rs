@@ -20,11 +20,17 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             // Refusing the command outright would read as "the backend cannot",
             // which is exactly what it can.
             | Command::GetPstateGlobalFreqOffset
+            // The fan read is allowed for the same reason the offset read is:
+            // this backend does publish a tachometer reading per cooler, so a
+            // wholesale refusal would read as "the backend cannot". The parts of
+            // the contract it has no source for (the three percentages) come
+            // back null with a reason in `unavailable`, not as a zero.
+            | Command::GetFanInfo
     ) {
         Ok(())
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, get-fan-info. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
             command.name()
         )))
     }
@@ -95,6 +101,15 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "corroboration": named.corroboration,
                         "plan": plan,
                     })
+                }
+                // The fan-info contract: a cooler count plus, on NVML, three
+                // percentages. This backend publishes a tachometer reading per
+                // cooler slot and nothing else, so the percentages are null with
+                // the reason attached, and the readings carry the driver's own
+                // cooler slot -- the position in the published list is a position
+                // after the plausibility filter, which is not the cooler index.
+                Command::GetFanInfo => {
+                    serde_json::to_value(run(&target, nvoc_core::QueryMacosRmStatus)?.output.fan_report())?
                 }
                 // Decoded by the shared `QueryThrottleReasons` operation (core
                 // serves it from the RM snapshot on macOS), so this surface and
@@ -223,6 +238,23 @@ mod tests {
         assert!(write.contains("unavailable on macOS RM"), "{write}");
         assert!(write.contains("0x2080D01C"), "{write}");
         assert!(!write.contains("named"), "{write}");
+    }
+
+    #[test]
+    fn the_fan_read_is_allowed_and_its_unfillable_fields_say_so() {
+        // Stage 11 item 5, fan family. This backend does publish a tachometer
+        // reading per cooler (the same snapshot `get-status` reports), so
+        // refusing fan-info wholesale would read as "this backend has no fan
+        // data", which is not true. The arm answers from the core projection,
+        // so the entry and the backend cannot state different things; the three
+        // percentage fields of the contract come back null with the reason
+        // attached rather than as a zero.
+        assert!(validate(Command::GetFanInfo).is_ok());
+        // The write half of the family keeps the terse capability refusal: no
+        // fan SET exists on this path at all, so no layer needs naming.
+        let write = validate(Command::SetFanSpeed).unwrap_err().to_string();
+        assert!(write.contains("unavailable on macOS RM"), "{write}");
+        assert!(!write.contains("rpm"), "{write}");
     }
 
     #[test]
