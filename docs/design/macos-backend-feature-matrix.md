@@ -651,3 +651,19 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **新发现的诚实性风险（未定，不猜）**：楔形下 `get-status --macos-rm` 报 `pstate = 0`、`memory_used_bytes = 0`，而这两个字段**不在 `unavailable` 里**——即 `PERF_GET_CURRENT_PSTATE` 与 `FB_GET_INFO_V2` 返回了 `NV_OK`，同时所有 RUSD 字段都正确地 null 并注明 `0x00000062`。同一次开机 wedge 前的记录里，同一控制返回 `P1` 与非零 heap。若楔形 GSP 以**全零结构**回答 `NV_OK`，则 `publish_live` 标称的 `advancing` 是错的——正是本项目禁止的假零。**不在此下结论**：健康且**空闲**的基线从未记录过，空闲读数本就可能是 0。**重启后第一件事**（不加任何负载）读一次 `get-status --macos-rm`：若非零，则楔形确实在清零。**在拿到该读数之前不改代码**——此处猜测本身就是另一种假值。已写入整合计划 §6。
 
 **未发出**：任何性能 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。本轮新发的 GPU 请求只有三次只读：`get-settings`、两次 `get-status`。
+
+### 本轮追加十四（2026-10-17，域目录成为数据 + 位命名空间的调查结论）
+
+**做了什么**（commit `a069cee`）：把「0x20809019 返回 10 域目录」这句散文变成**数据**——`Device::settings()` 新增 `clock_offset_domains`（每项 `index`/`domain_bit`/`type_stamp`），仍由同一个纯投影函数从设备自己的块填入；**被拒 ≠ 空列表**（`None`，不是空数组）。`pynvoc` 侧输出为对象数组。
+
+**不声称名称，只报设备给的位**：该字段是**位位置**而非索引——条目 2 带的是 bit 4 而不是 bit 2，这一条本身就否掉了「按索引命名」的诱惑。
+
+**本轮由测量确立的两件事**（写进类型文档并附证据）：
+1. **条目索引 = `0x2080901B` 选择掩码位**。记录证据：A5 前导运行 `seed@+4=0xFF` → `NV_OK, 106/527 dwords changed (first @0 last @564)`，106 = 14（头）+ 7×13（值 dword）+ 1（仅时间戳）= 与掩码选中 8 个条目（其中恰一个只写时间戳）**算术自洽**；同一次运行的 seed sweep 显示 `seed@+0/+8/+12/+16` 全部 `0x25 (NV_ERR_INVALID_DATA)`，**只有 +4 给 NV_OK**——掩码在 +4 是实验结论，不是推测。打印出的明细里 `+60:a5a5a5a5>a5a50808`、`+124:a5a5a5a5>a5a50909` 与目录条目 0、1 的类型戳逐一对应（索引对齐的直接证据）。
+2. **类型戳分裂为 3×`0x0808` / 6×`0x0909` / 1×`0x0303`，仅写时间戳的那个是索引 6**。计数与目录给出同一个答案（106 里少掉的 12 个 dword 恰是一个只写时间戳的条目）。**如实标注**：A5 明细打印在记录 1 之后被截断（"last @564" 属记录 7），所以「索引 6」是**计数 + 目录类型分裂**两条独立证据的合取，而非逐记录打印。
+
+**名称命名空间：调查结论 + 未证假设 + 证伪路径**（不再写「未知」）：设备用的十位是 bits 0..6 与 19..21；**公共 OGKM 头文件里没有任何时钟域枚举**（`grep DOMAIN_XBAR|MSD|LEG|PWR|HOTCLK|GPUCACHE` **零命中**）——所以不能从驱动树引用名字；唯一的交叉引用是 NVAPI/Windows 的 `NV_GPU_CLOCK_DOMAIN_ID`（32 宽，`nvapi-rs/sys/src/gpu/clock.rs:255`），其 0..6 = GPC/XBAR/SYS/HUB/M/HOST/DISP、19..21 = LEG/PWR/MSD，**与本设备用的两组簇完全同形**。**工作假设**（刻意不落到用户可见输出）：bit j = 域 j ⇒ 目录索引 0（bit 0）是核心引擎、索引 2（bit 4）是显存域。**证伪路径**：单域偏移读（或写入解禁后单域写）。在此之前偏移留在 `unavailable`、窗口保持域无关——而这**零代价**，因为三条范围记录本就一致。
+
+**验证范围**：`fmt --all --check` **rc=0**；`clippy -p nvoc-core -p pynvoc --all-targets -- -D warnings` **rc=0**；`cargo test -p nvoc-core --all-targets` = **85 lib（含 2 个新用例）+ 5 fixture + 15 non-GPU 全过 / 0 失败**（50 硬件门控 ignored）。楔形下公共 CLI 实测：两字段均为 `null` + `offset channel: not read (… 0x00000062)`——**没读过的块绝不编造域列表**。分类：**已实现并实测（拒绝路径）**；正路径待 GSP 能应答。
+
+**未发出**：任何性能 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。本轮新发 GPU 请求仅 2 次只读（`get-settings`、`--anchor-read`）。

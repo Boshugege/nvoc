@@ -99,6 +99,19 @@ The family may be reported as *implemented and measured* only when all of:
   transient error** in the public vocabulary. Today the family is statically
   unavailable; the reason text distinguishes "not yet wired" from "driver
   refused".
+* **Which domain each directory entry is (open, with a falsification path).**
+  The stamped field is a bit position, not an index, and the ten the device uses
+  are bits 0..6 and 19..21. The public OGKM headers contain no clock-domain
+  enum at all, so no name can be cited from the driver tree; the only
+  cross-reference is the NVAPI/Windows `NV_GPU_CLOCK_DOMAIN_ID` namespace (32
+  wide, `nvapi-rs/sys/src/gpu/clock.rs`), which names 0..6
+  GPC/XBAR/SYS/HUB/M/HOST/DISP and 19..21 LEG/PWR/MSD -- the same two clusters.
+  Working hypothesis, deliberately *not* surfaced as a name: bit j is domain j,
+  so directory index 0 (bit 0) is the core engine and index 2 (bit 4) the memory
+  domain. Falsified by a single-domain offset read (or, once writes are
+  permitted, a single-domain offset write) on a domain whose entry index is
+  known. Until then the offsets stay in `unavailable` and the window stays
+  domain-independent -- which costs nothing, because all range records agree.
 * **Wedge-time live-control payloads may be zeroed (found 2026-10-17, while
   verifying §3 on the wedged machine).** `get-status --macos-rm` on the wedged
   card reports `pstate = 0` and `memory_used_bytes = 0` with those two fields
