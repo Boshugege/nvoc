@@ -1144,3 +1144,10 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (3) 互证：`core/src/macos_rm.rs:328` 记录调用方尺寸 **2520/2404 被 `0x1f` 拒绝** ✔，RM 侧三尺寸被接受 ✔ ⇒ 与 §20 的两层结论一致 ✔。
 (4) **预登记（只读）**：`0x3FF` 全选十条 ⇒ 按已测算术与 fixture 类型序列（非-03 条目 9 个）**预测 132 个写入 dword** ✔；=132 ⇒ 映射与算术同时证实且第 8/9 条目写入集免写入可知 ✔；=154 ⇒ 算术作废重推 ✔；其它 ⇒ 逐条 census，禁止猜 ✗。
 **状态**：发送层审计=已实现且实测（读）✔ / 写入=**未实现（缺客户端命令 + 需 root）** ✔。全静态，**未跑 GPU**，设备访问 1 次。
+
+### 本轮追加五十六（2026-10-18，**定位**：`0x20809025` 的 ∓18750 = 偏移下界/上界（±18.75 MHz 控制跨度），单位 kHz；公共文案随证据更正）
+
+(1) **定位**（仓库内封送资料，非猜测 ✔）：`nvapi-rs/sys/src/gpu/clock.rs:5408-5428` 明载 `RM 0x20809025` 的 ClkFreqController 记录含 `1638400 max_kHz` 与 `±18750 offset pair`，并把 `rec+0x38` 称为 **freq offset floor**、`rec+0x3C` 为 **offset ceiling**（`nvapi-rs/src/clock.rs:2246` 称 **±18.75 MHz control span**）；`sys/src/gpu/clock.rs:4814-4821` 另有 IDA 实测：该值为 **16 位** `0xB6C2=-18750`，与 §18 实测 int16 宽度吻合 ✔。⇒ **语义 = 偏移跨度（非绝对上限）、单位 = kHz** ✔，**§20 的"尚未定位"就此关闭** ✔。
+(2) **随证据更正公共文案** ✔：`core/src/macos_rm.rs` 的 `ClockOffsetLimits`/`clock_offset_limits_khz` 文档与设备注记、以及 `core/src/macos_offset.rs` 的命名caveat，原先写"目录 Gpc/M 行的 ±int16 窗口**单位未定位**、故不作数" ✗ ⇒ 改为：目录那对 ±int16 **不是**调用方可见窗口（RM+80/+84 且各行 type 0 = 无 range 信息 ✔），**上报的窗口来自 range 块**，其含义与单位已如上定位 ✔。
+(3) **如实保留的未证** ✗：副本的调用方几何 `0x4C+32×0x60` 与本驱动 RM 块 `20+32×224` 是两层，记录**仅以内容匹配**（1638400 与 ∓18750 int16 全部吻合 ✔），**逐字段映射尚无证明** ✔。
+**验证范围**：`cargo fmt --all -- --check` **clean** ✔；`cargo test -p nvoc-core --all-targets` ⇒ **109 passed / 0 failed**（另 51 个 hardware-gated ignored ✔）；clippy 仅剩已知的 `nvapi-sys` 依赖告警 ✔；`pynvoc` 在本环境**无法链接**（pyo3 符号，环境问题、与本改动无关）✗ ⇒ 本轮验证范围为 `nvoc-core` ✔，且该 crate 的测试只读 `CLOCK_OFFSET_UNREADABLE_REASON`（本轮未改 ✗）⇒ 无期望漂移 ✔。**未跑 GPU**，设备访问 1 次。

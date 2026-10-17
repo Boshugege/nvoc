@@ -195,7 +195,12 @@ pub const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 for 
 /// the control block, whose value dwords read zero at stock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ClockOffsetLimits {
+    /// Offset floor, as the device's range record carries it. In kHz, and an
+    /// *offset* span rather than an absolute limit: the in-tree NVAPI copy's IDA
+    /// note names this same `-18750` "freq offset floor" and reads the pair as
+    /// the +-18.75 MHz control span on RM 0x20809025.
     pub min_khz: i32,
+    /// Offset ceiling, same record and same note.
     pub max_khz: i32,
     /// How many range records the window was read from, so an aggregate cannot
     /// be mistaken for a single domain's.
@@ -249,9 +254,12 @@ pub struct DeviceSettings {
     pub board_id: Option<u32>,
     pub chip_sku: Option<String>,
     pub project: Option<String>,
-    /// The offset window the driver reports, in kHz, measured from the device's
-    /// range block. `None` when that block was refused, malformed, empty or its
-    /// records disagreed; the offset channel note says which.
+    /// The offset span the driver reports, in kHz, read from the device's range
+    /// block (RM 0x20809025) and named after that block's own fields: the
+    /// in-tree NVAPI copy's IDA note calls the pair the offset floor and ceiling,
+    /// the +-18.75 MHz control span. `None` when that block was refused,
+    /// malformed, empty or its records disagreed; the offset channel note says
+    /// which.
     pub clock_offset_limits_khz: Option<ClockOffsetLimits>,
     /// The domains the driver says it can offset: the device's own directory,
     /// as returned. `None` when that block was refused or malformed, so an
@@ -325,7 +333,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             "responder: these ids are answered by the GSP firmware, not by a host RM table row (NVRM forwards legacy ids with bit 0x8000 set), so every parameter block is sized against the GSP's own export table rather than the NVAPI caller struct.".into(),
             "read: P-state, enforced/requested power limit, PCIe generation, board/SKU and memory sizes come from the same RM snapshot as get-status; sensor readings are separate (see get-status).".into(),
             "write: refused before the driver is opened, and on this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids carries the legacy privileged bits (0x2080D01C = 0x2080901B | 0x4000), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). A write would additionally need a readable current value, a bounded step and a verified restore, and the GSP must not be in the RESET_REQUIRED state.".into(),
-            "clock domains/offsets: 0x20809019 answers NV_OK with a directory whose 32 record slots carry 10 populated mask bits, and 0x20809025 answers NV_OK with a per-domain offset range (three entries, +-18750 kHz). The NVAPI caller struct is a shape hint, not a verified mapping: this driver rejects the caller-side sizes (2520 and 2404) with 0x1f, the record stride it accepts is 384 bytes against the caller struct's 72, and the field at +4 is the record's mask bit where the caller struct has a clock type. The caller struct is also marked Pascal only. Only the Gpc (0x1) and M (0x10) records carry a +-int16 window of their own (+-1000 and -1000/+3000) and its unit is not located, so no limit is reported from it as a settled number. 0x2080901B also answers NV_OK, but every value slot of its 64-byte records is written as zero at stock (an 0xA5 pre-seed shows the writes as 0xA5A5A5A5 -> 0), so which slot holds the current offset cannot be fixed from a stock read alone -- and the type stamp is the only non-zero field it returns. The write set is type-conditional and all-or-nothing (the seven type-08/09 entries of a full selection write twelve value dwords each, the single type-03 entry writes its stamp only), so the type split narrows the block but still cannot name the offset slot.".into(),
+            "clock domains/offsets: 0x20809019 answers NV_OK with a directory whose 32 record slots carry 10 populated mask bits, and 0x20809025 answers NV_OK with a per-domain offset range (three entries, +-18750 kHz). The NVAPI caller struct is a shape hint, not a verified mapping: this driver rejects the caller-side sizes (2520 and 2404) with 0x1f, the record stride it accepts is 384 bytes against the caller struct's 72, and the field at +4 is the record's mask bit where the caller struct has a clock type. The caller struct is also marked Pascal only. The +-int16 pair of the Gpc/M directory rows (+-1000 and -1000/+3000) is *not* the caller-visible window: the in-tree NVAPI copy's IDA note puts rangeMax/Min at RM+80/+84 of the caller's own record layout, and every populated row of the directory carries type 0 there, which means no range information. The window this backend reports instead comes from the range block, and the copy locates its meaning: 0x20809025 is its RM id, its ClkFreqController record carries 1638400 max VF kHz and a -18750/+18750 pair that the note calls the frequency-offset floor and ceiling (the +-18.75 MHz control span), so the pair is in kHz and reads as an offset span rather than an absolute limit. What is not reconciled is the record base: the copy's caller geometry is 0x4C + 32x0x60 where this driver's RM block is 20 + 32x224, and the two records are matched by content, not by a proven field map. 0x2080901B also answers NV_OK, but every value slot of its 64-byte records is written as zero at stock (an 0xA5 pre-seed shows the writes as 0xA5A5A5A5 -> 0), so which slot holds the current offset cannot be fixed from a stock read alone -- and the type stamp is the only non-zero field it returns. The write set is type-conditional and all-or-nothing (the seven type-08/09 entries of a full selection write twelve value dwords each, the single type-03 entry writes its stamp only), so the type split narrows the block but still cannot name the offset slot.".into(),
             "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
     }

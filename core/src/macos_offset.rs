@@ -16,7 +16,10 @@
 //!
 //! * the range block's two `i32` fields are called `min_khz`/`max_khz` because
 //!   they read `-18750`/`+18750` and the NVAPI caller struct orders the same
-//!   pair; no driver header names them on this platform;
+//!   pair; no driver header names them on this platform. The in-tree NVAPI copy
+//!   does name the meaning: its IDA note on RM `0x20809025` calls the pair the
+//!   frequency-offset floor and ceiling, "the +-18.75 MHz control span", which
+//!   also fixes the unit as kHz for this magnitude;
 //! * which dword of a control record carries the *offset* is **not** decided
 //!   here -- the parser reports all twelve value dwords verbatim and leaves the
 //!   identification to a write/read-back experiment.
