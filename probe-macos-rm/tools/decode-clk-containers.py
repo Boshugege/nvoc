@@ -84,6 +84,29 @@ NAMED = {
     0x20809019: {4: "domain_bit", 8: "count_or_mask", 28: "version_pair"},
 }
 
+# Candidate value slots, printed for every domain the block's own echoed input
+# mask names -- INCLUDING the all-zero case, which the generic record printer
+# skips and which is exactly the stock reading we have to interpret.
+#
+# 0x2080901b: the RM record is the driver-side struct; the layer above
+# (nvapi-rs clk_ctrl_entry) names five value dwords at record+44/+48/+52/+56/
+# +60, and the one measured RM<->nvapi coordinate constant (0x24, pinned on
+# 0x20809025's max_khz/offset_floor/offset_ceiling) puts them at RM rec+8/12/
+# 16/20/24.  The order inside that five is NOT resolved: the article's own text
+# says slot 0 is the signed kHz frequency offset, while the same layer's
+# Blackwell field map says the frequency delta is VALUES[2].  So the current
+# offset is one of rec+8 / rec+12 / rec+16, and only a same-field readback
+# after a single-step SET can decide.  Printed as CANDIDATES, never as names.
+CANDIDATES = {
+    0x2080901B: {
+        8: "offset_khz?",
+        12: "range_min?",
+        16: "freq_offset_or_range_max?",
+        20: "applied?",
+        24: "extra?",
+    },
+}
+
 BLOCK_RE = re.compile(
     r"0x([0-9a-fA-F]{8})\s+@(\d+)\s+status\s+0x([0-9a-fA-F]{8})"
 )
@@ -184,6 +207,43 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
         print(f"  rec{index:<2} @+{base}: " + " ".join(words), file=out)
     if not populated:
         print("  (no populated record)", file=out)
+    if mid in CANDIDATES:
+        # Mask-driven: the echoed mask at +4 IS the set of records the caller
+        # asked for, so this prints one candidate row per requested domain even
+        # when every value is zero (the stock case).
+        mask = struct.unpack_from("<I", buf, 4)[0] if len(buf) >= 8 else 0
+        fields = sorted(CANDIDATES[mid].items())
+        print(f"  candidate slots (mask@+4=0x{mask:x}); the ORDER inside them is",
+              file=out)
+        print("  NOT resolved: the layer above names five value dwords at RM",
+              file=out)
+        print("  rec+8/12/16/20/24 (offset_khz, range_min, range_max, applied,",
+              file=out)
+        print("  extra) via the measured 0x24 shift, but its own article says",
+              file=out)
+        print("  slot 0 is the signed kHz offset while its Blackwell field map",
+              file=out)
+        print("  says the frequency delta is VALUES[2] -- so the current offset",
+              file=out)
+        print("  is one of +8/+12/+16, and ONLY a same-field readback after one",
+              file=out)
+        print("  minimal-step SET decides which. Realtime MHz never does.",
+              file=out)
+        for bit in range(32):
+            if not (mask >> bit) & 1:
+                continue
+            base = header + bit * stride
+            record = buf[base:base + stride]
+            if len(record) < stride:
+                continue
+            stamp = struct.unpack_from("<H", record, 0)[0]
+            cells = []
+            for off, _label in fields:
+                if off + 4 > len(record):
+                    continue
+                cells.append(f"+{off}={struct.unpack_from('<i', record, off)[0]}")
+            print(f"    bit {bit:<2} rec @+{base} type=0x{stamp:04x}: "
+                  + " ".join(cells), file=out)
     return 0
 
 
@@ -229,6 +289,22 @@ def selftest() -> int:
     report19 = sink.getvalue()
     assert "i16 pair = [-1000, 1000]" in report19, report19
     assert "65600536" in report19, report19
+    # 0x2080901b candidate table: the stock case is an ALL-ZERO record whose
+    # value slots the driver did write, so the mask-driven rows must appear even
+    # though the generic record printer sees nothing.  mask@+4 = 0x2 selects
+    # exactly record 1 (bit -> index, 1:1), which is what the live battery saw.
+    buf1b = bytearray(GEOMETRY[0x2080901B][0])
+    struct.pack_into("<I", buf1b, 4, 0x2)
+    base1b = GEOMETRY[0x2080901B][1] + 1 * GEOMETRY[0x2080901B][2]
+    struct.pack_into("<H", buf1b, base1b, 0x0808)
+    sink = io.StringIO()
+    assert decode(0x2080901B, GEOMETRY[0x2080901B][0], bytes(buf1b), sink) == 0
+    report1b = sink.getvalue()
+    assert "candidate slots" in report1b, report1b
+    assert "ONLY a same-field readback" in report1b, report1b
+    assert f"bit 1  rec @+{base1b} type=0x0808: " in report1b, report1b
+    assert "+8=0 +12=0 +16=0 +20=0 +24=0" in report1b, report1b
+    assert "bit 0 " not in report1b, report1b
     assert decode(0x20809025, 2108, bytes(buf), sink) == 2, "size guard"
     assert decode(0x20801234, 4, b"\0" * 4, sink) == 2, "unknown id guard"
     print("selftest ok: geometry + round-trip + field decode")

@@ -777,6 +777,14 @@ the 2026-10-17 `0xA5` sweep reported `106/527` changed dwords for `0x2080901b`
 but its log kept 40 of them (`0x2080901d`: 352 reported, 60 kept), so a delta
 printout alone is not a reproducible record of a block.
 
+`tools/decode-clk-containers.py` (run by the runbook into `decode.txt`) now
+prints a **mask-driven candidate table** for `0x2080901b`: one row per bit the
+block's own echoed `+4` mask names, showing `rec+8/12/16/20/24` *including the
+all-zero case*. That case is the stock reading and the generic record printer
+skips it, which is exactly the row §11.3 needs to be read after the reboot. The
+decoder still refuses to name any of the five slots (`offset_khz?`,
+`freq_offset_or_range_max?`, …) because §11.3's order question is open.
+
 ## 9. What is still missing
 
 * a container that returns the **current** per-domain offset. Candidates, in
