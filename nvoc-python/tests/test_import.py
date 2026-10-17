@@ -42,6 +42,7 @@ EXPECTED_EXPORTS = [
     "query_fan_info",
     "query_info",
     "query_legacy_gpc_rail_volt_range",
+    "query_legacy_temp_sensor",
     "query_power_ceiling",
     "query_power_limits",
     "query_private_freq_domain_info",

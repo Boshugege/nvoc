@@ -12,7 +12,8 @@ use nvoc_core::{
     QueryNvapiClkDomains, QueryNvapiClkVfPoints, QueryNvapiCoolerInfo,
     QueryNvapiCoreVoltageControl, QueryNvapiDNotifier, QueryNvapiOcScannerIncomplete,
     QueryNvapiPmgrVoltageArbiter, QueryNvapiPowerCeiling, QueryNvapiRatedTdp,
-    QueryNvapiTargetTempPolicies, QueryNvapiTgpWattRange, QueryNvapiThermalSim,
+    QueryNvapiTargetTempPolicies, QueryNvapiTgpWattRange, QueryNvapiThermalSettings,
+    QueryNvapiThermalSim,
     QueryNvapiVoltRails, QueryPowerLimits, QueryPstateBaseVoltage, QueryPstates,
     QuerySupportedApplicationsClocks, QueryTdpTempLimits, QueryTemperatureThresholds,
     QueryThrottleReasons, QueryVbiosImage, QueryVfpPointVoltage, QueryVoltageBoost,
@@ -1801,6 +1802,42 @@ fn normalize_power_limits(target: &GpuTarget<'_>) -> PyResultValue {
     ]))
 }
 
+/// The legacy thermal entry, in the same shape and from the same sources as the
+/// CLI's `get-legacy-temp-sensor`.
+///
+/// macOS answers from the native RM thermal view: the live reading of every
+/// sensor this backend knows, the per-sensor physical range when the public
+/// thermal read answers for that sensor's target, and a per-field reason for
+/// whatever stays null. Other platforms keep the NVAPI thermal-settings path
+/// unchanged.
+///
+/// Without this function the Python entry could only reach the live readings,
+/// through `query_status`'s `sensors` list of `(descriptor, temperature)` pairs
+/// -- and a pair carries no range, so the range this backend reads was
+/// unreachable from Python while core and the CLI could both report it.
+fn normalize_legacy_temp_sensor(target: &GpuTarget<'_>) -> PyResultValue {
+    if target.has_macos_rm() {
+        let device = target.macos_rm().map_err(to_py_err)?;
+        let view = device.thermal_view().map_err(to_py_err)?;
+        return serde_json::to_value(&view).map_err(to_py_err);
+    }
+    let sensors = run(target, QueryNvapiThermalSettings).map_err(to_py_err)?.output;
+    Ok(Value::Array(
+        sensors
+            .into_iter()
+            .map(|s| {
+                value_object([
+                    ("target", Value::String(format!("{:?}", s.target))),
+                    ("controller", Value::String(format!("{:?}", s.controller))),
+                    ("current_c", i64_value(s.current_c as i64)),
+                    ("min_c", i64_value(s.min_c as i64)),
+                    ("max_c", i64_value(s.max_c as i64)),
+                ])
+            })
+            .collect(),
+    ))
+}
+
 fn normalize_pstates(target: &GpuTarget<'_>) -> PyResultValue {
     let items = run(target, QueryPstates)
         .map_err(to_py_err)?
@@ -2336,6 +2373,21 @@ fn query_cooler_info(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 fn query_temperature_thresholds(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
     let value = with_target(gpu, "nvml", normalize_temperature_thresholds)?;
+    py_value(py, &value)
+}
+
+#[pyfunction]
+#[pyo3(signature = (gpu, backends = None))]
+fn query_legacy_temp_sensor(
+    py: Python<'_>,
+    gpu: &str,
+    backends: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let value = with_target(
+        gpu,
+        backends.unwrap_or_else(|| fan_power_backends(cfg!(target_os = "macos"))),
+        normalize_legacy_temp_sensor,
+    )?;
     py_value(py, &value)
 }
 
@@ -5757,6 +5809,7 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(query_power_limits, m)?)?;
     m.add_function(wrap_pyfunction!(query_pstates, m)?)?;
     m.add_function(wrap_pyfunction!(query_fan_info, m)?)?;
+    m.add_function(wrap_pyfunction!(query_legacy_temp_sensor, m)?)?;
     m.add_function(wrap_pyfunction!(query_cooler_info, m)?)?;
     m.add_function(wrap_pyfunction!(query_temperature_thresholds, m)?)?;
     m.add_function(wrap_pyfunction!(query_throttle_reasons, m)?)?;
