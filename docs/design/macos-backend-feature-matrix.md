@@ -31,6 +31,10 @@
 - 实测日志（仓库外 `outputs/`）：`stage1-*`（阶段 1 验收：build/fmt/clippy/tests/5 项硬件/
   ABI/探针/CLI 停止与管道）、`continuous-*`（单次与连续基线）、`continuous-watch-*`
   （3 分钟只读 + 时钟域探针）、`continuous-load-*`（温和 Metal 负载响应）、
+  `stage2-longrun-20261017T025708Z`（**1 Hz × 10 分钟 = 600 样本**：gap p50 1.008 s /
+  p95 1.011 s / max 1.012 s，采样耗时 p50 267 µs / p95 283 µs / max 1872 µs，fd 恒为 8，
+  RSS 5412→6636 KB 后稳定，600/600 全字段 `advancing`、无 `epoch_reset`、无 `unavailable`，
+  正常 `--count` 停止 exit 0）、
   `rusd-*`/`nvoc-access-*`（遥测与属性基线）。
 
 ## 一、CLI 命令表（101 条，来源：`cli/src/lib.rs` 的 `CommandSpec`）
@@ -206,7 +210,7 @@
 | --- | --- | --- | --- |
 | 0 基线/功能表 | 起点、边界、待办、证据索引 | 完成：本文件 + SSH/硬件/分支核对 + 101 条命令表 | 随每阶段更新并复核 |
 | 1 正确性与资源生命周期 | 修 ABI/释放顺序/旧数据/重连/输出/停止 | **完成**：`78d299d`、`a687453`、`8fb1aeb`；实机 5 项硬件测试、ABI 指纹、broken-pipe、SIGINT 全通过 | 保持回归 |
-| 2 基础信息与遥测 | 设备/信息/状态/连续监控 + 公共字段 | 部分：8 项遥测已实测；缺电压、显存用量、逐风扇/%（本机单风扇）、有效频率、限频原因；1 Hz ≥10 分钟长跑未做；core/Python 分发未接 | 补字段与 `--interval 1` 长跑，再补 core/pynvoc 归一化 |
+| 2 基础信息与遥测 | 设备/信息/状态/连续监控 + 公共字段 | 部分：8 项遥测已实测；**1 Hz × 10 分钟长跑已完成**（`stage2-longrun-20261017T025708Z`）；仍缺限频原因、逐风扇、有效/视频频率、显存用量、电压；core/pynvoc 分发未接 | 下一步（协议依据已定位）：`clkThrottleInfo.reasonMask`（cl00de.h 位 0-8：GPU_IDLE / APP_CLOCK / SW_POWER_CAP / HW_SLOWDOWN / SYNC_BOOST / SW_THERMAL / HW_THERMAL / HW_POWER_BRAKES / DISPLAY_CLOCK_SETTING）、`temperatures[MEMORY/BOARD/POWER_SUPPLY]`、`avgPowerUsage`、`powerPolicyStatus.tgpmW`、`clkPublicDomainInfos.info[VIDEO/SM]` 的 targetClkMHz + actualClkKHz、`fanCoolerStatus.rpmCurr[16]` 逐风扇；需新增 poll mask `NV00DE_RUSD_POLL_MEMORY/PCI/PROC_UTIL` 才能读 `memEcc`、`memRowRemap`、`pciBusData`、`procUtil`（逐引擎利用率）；显存用量走 RM control（FB_GET_INFO_V2 used/total）而非 RUSD。实现时把样本 ABI 升到 v3（按 section 表组织），并同步 core/pynvoc 字段归一化 |
 | 3 当前设置/范围/恢复基础 | `get-settings`、范围/默认值/粒度、快照/回读/恢复 | 未开始（macOS 拒绝写入） | 需要先确认 RM 只读查询结构与门槛 |
 | 4 核心/显存频率控制 | 偏移 GET/SET、锁频、reset | 未开始 | 依赖阶段 3 与写入授权 |
 | 5 功耗/温度/运行策略 | W/%、温度墙、Boost | 遥测可读；无写入 | 同上 |
