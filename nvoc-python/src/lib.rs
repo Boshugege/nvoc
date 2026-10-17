@@ -1473,19 +1473,31 @@ fn settings_macos_rm_to_map(
     }
     // The measured offset window. Absent rather than zeroed when the driver
     // refused the range block, so a UI can tell "unknown" from "0 kHz".
-    if let Some(limits) = &settings.clock_offset_limits_khz {
-        map.insert(
-            "clock_offset_min_khz".into(),
-            i64_value(limits.min_khz as i64),
-        );
-        map.insert(
-            "clock_offset_max_khz".into(),
-            i64_value(limits.max_khz as i64),
-        );
-        map.insert(
-            "clock_offset_limits_records".into(),
-            u64_value(limits.records as u64),
-        );
+    match &settings.clock_offset_limits_khz {
+        Some(limits) => {
+            map.insert(
+                "clock_offset_min_khz".into(),
+                i64_value(limits.min_khz as i64),
+            );
+            map.insert(
+                "clock_offset_max_khz".into(),
+                i64_value(limits.max_khz as i64),
+            );
+            map.insert(
+                "clock_offset_limits_records".into(),
+                u64_value(limits.records as u64),
+            );
+        }
+        // Absent is not enough: a caller cannot tell a refused range block from a
+        // block the read never reached, and the whole point of this projection is
+        // that a missing window is never a window of zero. The reason is the
+        // range block's own outcome, taken from the same shared accessor the CLI
+        // entry uses, so the two frontends cannot describe it differently.
+        None => {
+            if let Some(reason) = settings.window_absence_reason() {
+                map.insert("clock_offset_window_reason".into(), text(&reason));
+            }
+        }
     }
     // The offsets the driver currently applies, per domain, from the clock
     // document. Absent rather than empty when that block was refused or
@@ -1528,6 +1540,10 @@ fn settings_macos_rm_to_map(
                             ("domain_bit", u64_value(entry.domain_bit as u64)),
                             ("frequency_khz", u64_value(entry.frequency_khz as u64)),
                             ("offset_khz", i64_value(entry.offset_khz as i64)),
+                            // The value a restore must write back is the value
+                            // read now, so it is carried explicitly: the write
+                            // gate's target is read, never invented later.
+                            ("restore_khz", i64_value(entry.offset_khz as i64)),
                             ("corroboration", Value::String(entry.corroboration.clone())),
                         ])
                     })
