@@ -6,6 +6,8 @@
 //! - [`pid`]: pure PID controller (no GPU dependency, unit tested)
 //! - [`controller`]: per-GPU mode state machine + failsafes around the PID
 //! - [`backend`]: NVAPI-backed [`ControlBackend`] with NVML fallback
+//! - [`macos`]: read-only macOS [`ControlBackend`] over the native NullMoth RM
+//!   channel (no NVAPI/NVML runtime; observation only)
 //! - [`runtime`]: single-threaded control loop + heartbeat watchdog
 //! - [`http`]: loopback-only HTTP control plane
 //! - [`logging`]: rotating file sink (+console tee in foreground)
@@ -21,6 +23,7 @@ pub mod controller;
 pub mod history;
 pub mod http;
 pub mod logging;
+pub mod macos;
 pub mod monitor;
 pub mod pid;
 pub mod runtime;

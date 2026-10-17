@@ -185,6 +185,26 @@ fn offset_clock_domain(domain: OffsetDomain) -> ClockDomain {
 }
 
 impl ControlBackend for NvapiBackend {
+    fn gpu_count(&self) -> usize {
+        NvapiBackend::gpu_count(self)
+    }
+
+    fn name(&self, index: usize) -> Cow<'_, str> {
+        NvapiBackend::name(self, index)
+    }
+
+    fn backend_kind(&self) -> &'static str {
+        "nvapi"
+    }
+
+    fn supports_writes(&self) -> bool {
+        true
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
     fn read_temps(&mut self, gpu_index: usize) -> Result<SensorBundle, String> {
         let target = self.target(gpu_index)?;
         let report = run_gpu_operation(&target, QueryNvapiThermalSettings)

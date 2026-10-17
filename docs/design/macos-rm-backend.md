@@ -330,6 +330,23 @@ conversion (kHz→MHz, mW→W, bytes→MiB) happens once, in the normalizer. Fie
 the driver does not publish stay absent — never fabricated as zero — and
 `unavailable` carries the reason.
 
+## Consumers (srv, read-only)
+
+The control service reaches the same channel through a read-only
+`ControlBackend` (`srv/src/macos.rs::MacosRmBackend`), selected at discovery by
+`cfg(target_os = "macos")`. It maps the RM status onto the same
+`SensorBundle`/`MonitorSample` types the NVAPI backend fills in, so
+`/status`, `/api/status`, `/api/gpus`, `/api/info`, `/api/history` and
+`/config` behave like any other platform, and it reports
+`supports_writes() == false` — which pins the loop to `Auto` (observe only),
+skips every hand-back call, and makes `/mode?value=pid|manual`, `/fan`,
+`/api/oc/*`, `/api/reset` and `/oc_global` fail before the driver is touched
+(`409`, or `ERR: read-only macOS backend: no writable RM control is reachable
+on this driver`). There is no macOS fan PID loop, manual duty, or offset/limit
+write until a writable interface exists. Evidence: `stage11-srv-macos-*` +
+`stage11-srv-smoke-*` in the delivery `outputs/`, and
+`review-stage11-srv-macos-backend-20261017.md`.
+
 ## Validation
 
 ```sh

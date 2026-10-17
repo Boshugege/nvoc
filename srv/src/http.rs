@@ -8,7 +8,7 @@
 use crate::config::{
     ControlMode, INTERVAL_MS_MAX, INTERVAL_MS_MIN, LoopKind, RuntimeConfig, SensorKind,
 };
-use crate::controller::{ControlBackend, GpuControlStatus};
+use crate::controller::GpuControlStatus;
 use crate::monitor::{OffsetBackend, OffsetDomain};
 use crate::runtime::{ServiceCmd, SharedBackend, SharedConfig, SharedHistory, SharedStatus, lock};
 use crate::{audit, auth, web};
@@ -479,6 +479,17 @@ pub fn start_http_server(state: &std::sync::Arc<ServerState>) {
     }
 }
 
+/// Does the active backend accept actuation commands? Before discovery there
+/// is no backend and no running loop, so the config plane stays permissive;
+/// `run_control_loop` normalises a read-only backend to `Auto` before its
+/// first tick, so nothing can be actuated in the gap.
+fn writes_supported(backend: &SharedBackend) -> bool {
+    match lock(backend).as_ref() {
+        Some(active) => active.supports_writes(),
+        None => true,
+    }
+}
+
 fn handle_request(
     request: tiny_http::Request,
     path: &str,
@@ -617,6 +628,13 @@ fn handle_request(
                         "pid" => ControlMode::Pid,
                         _ => ControlMode::Manual,
                     };
+                    if mode != ControlMode::Auto && !writes_supported(backend) {
+                        return text_response(
+                            request,
+                            409,
+                            "Conflict: active backend is read-only (macOS RM); only value=auto is accepted",
+                        );
+                    }
                     lock(config).mode = mode;
                     info!("control mode set to {mode:?} via HTTP");
                     text_response(request, 200, format!("OK: mode={mode:?}"));
@@ -628,6 +646,13 @@ fn handle_request(
             if !is_mutation_request(&request) {
                 reject_mutation(request, path);
                 return;
+            }
+            if !writes_supported(backend) {
+                return text_response(
+                    request,
+                    409,
+                    "Conflict: active backend is read-only (macOS RM); manual fan control is unavailable",
+                );
             }
             match params.get("percent").and_then(|s| s.parse::<u32>().ok()) {
                 Some(p) if p <= 100 => {

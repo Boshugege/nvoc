@@ -152,8 +152,33 @@ pub struct FanReading {
 }
 
 /// Hardware boundary behind the controller. Implemented by the NVAPI(+NVML
-/// fallback) backend in [`crate::backend`] and by in-test mocks.
+/// fallback) backend in [`crate::backend`], by the read-only macOS RM backend
+/// in [`crate::macos`], and by in-test mocks.
+///
+/// ## Read-only backends
+///
+/// A backend whose platform exposes no actuator surface reports
+/// [`supports_writes`](Self::supports_writes) as false. The runtime then pins
+/// the loop to [`ControlMode::Auto`] (observe only) and skips every
+/// restore/hand-back call, so no actuation method is ever invoked; the write
+/// methods still fail closed with a read-only error as a second line of
+/// defence (an HTTP write reaches the backend directly).
 pub trait ControlBackend: Send {
+    /// Number of GPUs this backend manages — the index space of every other
+    /// method.
+    fn gpu_count(&self) -> usize;
+    /// Stable display name for one GPU (`/status`, logs).
+    fn name(&self, index: usize) -> std::borrow::Cow<'_, str>;
+    /// Short backend identifier for logs and `/status` ("nvapi", "macos-rm").
+    fn backend_kind(&self) -> &'static str;
+    /// Does this backend have an actuator surface at all? False pins the
+    /// control loop to observe-only and short-circuits hand-back calls.
+    fn supports_writes(&self) -> bool;
+    /// Downcast hook: lets the runtime reach surfaces that exist on only one
+    /// backend (the legacy `/oc_global` NVAPI call) without the trait growing
+    /// a method per legacy entry point.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+
     fn read_temps(&mut self, gpu_index: usize) -> Result<SensorBundle, String>;
     fn read_fan(&mut self, gpu_index: usize) -> Option<FanReading>;
     /// Live board power draw (W), best effort — the `freq_power` loop sensor.
@@ -406,12 +431,16 @@ impl GpuController {
         if cfg.loop_kind == self.loop_kind {
             return;
         }
-        match self.loop_kind {
-            LoopKind::FanTemp => {
-                let _ = backend.restore_fan_auto(index);
-            }
-            LoopKind::FreqTemp | LoopKind::FreqPower => {
-                let _ = backend.restore_freq_auto(index);
+        // A read-only backend never held the actuator, so there is nothing to
+        // hand back and no write call is issued at all.
+        if backend.supports_writes() {
+            match self.loop_kind {
+                LoopKind::FanTemp => {
+                    let _ = backend.restore_fan_auto(index);
+                }
+                LoopKind::FreqTemp | LoopKind::FreqPower => {
+                    let _ = backend.restore_freq_auto(index);
+                }
             }
         }
         log::info!(
@@ -918,6 +947,21 @@ mod tests {
     }
 
     impl ControlBackend for Mock {
+        fn gpu_count(&self) -> usize {
+            1
+        }
+        fn name(&self, _index: usize) -> std::borrow::Cow<'_, str> {
+            std::borrow::Cow::Borrowed("mock")
+        }
+        fn backend_kind(&self) -> &'static str {
+            "mock"
+        }
+        fn supports_writes(&self) -> bool {
+            true
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
         fn read_temps(&mut self, _i: usize) -> Result<SensorBundle, String> {
             if !self.temps.is_empty() {
                 if self.temps.len() > 1 {

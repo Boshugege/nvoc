@@ -62,6 +62,17 @@
   （**阶段 10 只读评测**：`macos-eval` 20 s 实机 rc=0——GFX 1950→1965 MHz、util 均值 87%/峰值 99%、
   功耗 12.5→13.5 W、温度 52→57.6 ℃、风扇升速；`stress-macos --verify` pass；
   `settings_written=false`；坏参数/坏路径 rc=1）。
+  `stage11-srv-macos-20261017T052414Z`（**阶段 11 srv 只读后端构建/测试**：
+  `cargo fmt --check -p nvoc-srv`、`cargo check -p nvoc-srv --all-targets`（macOS）、
+  `cargo test -p nvoc-srv`（**52 passed**，含 5 个新增 macOS 映射/拒绝测试）、
+  `cargo clippy -p nvoc-srv --all-targets` 全部 rc=0；首次 `check` rc=101 的
+  `&mut Box<dyn C>` unsize 报错与最小修复记录在同目录 `stage11-srv-macos-20261017T051729Z`）、
+  `stage11-srv-smoke-20261017T052418Z`（**阶段 11 srv 实机只读 smoke**：配置故意写
+  `mode="pid"` → 启动 `WARN` 归一为 `Auto`；15/15 断言 PASS——`/status`/`/api/status` 活温度、
+  `/api/info` 带 `backend:"macos-rm"`/`read_only:true`、`/api/history` 1 Hz 样本、
+  `POST /mode?value=pid|manual` 与 `/fan` 返回 **409**、`/api/oc/*` 与 `/api/reset` 返回
+  `ERR: read-only macOS backend…`、`/oc_global` 被控制循环拒绝、`/api/vfcurve` 502、
+  `/shutdown` 后进程 **exit 0**）。
 
 ## 一、CLI 命令表（101 条，来源：`cli/src/lib.rs` 的 `CommandSpec`）
 
@@ -225,7 +236,7 @@
 | `nvoc-python`（pynvoc） | **部分已实现**：`backends="macos-rm"` 的 `discover_gpus`/`query_info`/`query_status`/`query_settings` 走原生 RM，单位归一化到与 NVAPI/NVML 相同的字段（`gpu_clock_mhz`/`temperature_c`/`power_w`/`power_limit_current`…），配置族缺口经 `unavailable` 暴露；写入仍拒绝。新增 `backends="auto"`/`"default"`（`37f786f`）：macOS→RM、其他→NVAPI+NVML，与 CLI `Auto` 同一规则，供 GUI/TUI 复用 | 实机扩展模块端到端见 `stage2-telemetry-…`/`stage3-settings-…`/`stage11-shared-entry-…`（`pynvoc-hw`） |
 | `gui` | **部分已实现**：原生后端不再硬编码 `"both"`，`discover_gpus`/`query_info`/`query_status`/`query_settings` 统一传共享后端串 `auto`（macOS 解析为 RM 只读路径）；NVAPI 专属面板（超频/VF/风扇）在 macOS 上仍按既有路径明确失败 | 客户端 `gui/tests/` 281 passed / 13 skipped、ruff 干净；macOS 实机由 pynvoc `auto` 端到端覆盖（`stage11-shared-entry-…`）；GUI 本体未在 macOS 跑（测试机无 customtkinter） |
 | `tui` | **部分已实现**：同 GUI，`NativeService` 统一传 `auto` | 客户端 `tui/tests/` 214 passed、ruff 干净；同 GUI 的 macOS 本体限制 |
-| `srv`（ControlBackend） | 未实现：`srv/src/backend.rs` 的 `NvapiBackend` 硬依赖 NVAPI 枚举 + `Nvml::init()`，两者在 macOS 上都不存在，需要独立的只读 macOS ControlBackend（监控循环 + 无写入操作） | 明确阻塞：`NvapiBackend::discover()` 在 macOS 上必失败（无 NVML）；属阶段 11 未完成项，不是"已接线" |
+| `srv`（ControlBackend） | **只读部分已实现且实测**：后端持有类型泛化为 `Box<dyn ControlBackend>`；新增 `srv/src/macos.rs::MacosRmBackend`（复用 `nvoc_core::macos_rm` 快照，`supports_writes()=false`），`/status`/`/api/status`/`/api/gpus`/`/api/info`/`/api/history`/`/config` 可用；写入在访问驱动前被拒（`/mode?value=pid|manual`、`/fan` → 409；`/api/oc/*`、`/api/reset` → `ERR: read-only…`；`/oc_global` 由循环拒绝），控制模式钉在 `Auto` | 非 macOS 路径逐字未变（`supports_writes()=true`）；macOS 上**无闭环控制**——PID/风扇/manual 需要写通道（阶段 4–7 的同一外部条件）。证据：`stage11-srv-macos-…` + `stage11-srv-smoke-…`，review `review-stage11-srv-macos-backend-20261017.md` |
 | `auto-optimizer` | **部分**：`stressor-external` 非 CUDA 构建在 macOS 可编译运行；新增只读 `macos-eval`（`195e7af`）走 `BackendSet::MacosRm` 选设备 + 原 Vulkan 负载 + Metal 校验 + RM 遥测，`settings_written=false`；原 NVAPI 命令、`has_nvapi` 筛选与默认 feature 均未改 | 阶段 10 后续：候选/SET/回读/接受-回退/恢复需 macOS 写通道；见 `review-stage10-*` |
 | `cli-stressor-cuda-rs`（`--vulkan-only` / `--vulkan`） | **已实现且实测**：原 Vulkan 渲染负载在 macOS 直接复用，只新增 loader/ICD 解析（`vulkan_loader`，`4993a42`）——自动使用 `/Library/GPUBundles/nvmtl/` 的 Khronos loader + NVK ICD，无需手工导出 env；`--vulkan-window` 仍限 Windows（macOS 固定 offscreen） | CUDA GEMM 与 CUDA+Vulkan 混合模式在 macOS 不可用（无 CUDA）；渲染负载不做读回比对，计算域校验见下一行 |
 | `stress-macos`（新增） | **已实现且实测**：Metal 计算负载 + bit-exact CPU 参考校验（`1dcf27a`）；自检、负例、限时负载、SIGINT 停止全部通过 | 补 `--vulkan-only` 缺的**计算正确性**维度；是校验器，不是 CUDA/OpenCL 负载的等价替代 |
@@ -247,8 +258,8 @@
 | 8 其余功能族 | VBIOS、EDID、限频原因、策略 | 部分：`get-vbios -i` 离线解析可用 | 逐项给依据 |
 | 9 自动压力执行与验证器 | 限时负载、停止、结构化结果、正确性校验 | **主负载 + 校验器完成**。主负载＝原 `--vulkan-only` 渲染路径（零算法改动，仅补 loader/ICD 解析 `4993a42`）：无 env 冷启动 rc=0，5/10/30 s 阶梯与 60 s stock 负载 rc=0，错误路径（`--gpu-index` 越界 / `--pci-bus` 不匹配）rc=1，`--vulkan-window` 在非 Windows 回退 offscreen rc=0；同步遥测显示 util 峰值 100%/均值 83%、gfx 1.53→1.95 GHz、功耗 11.5→13.5 W、温度 54→62 ℃、风扇 1778→1920 rpm。校验器＝`stress-macos`（`1dcf27a`）：全量 bit-exact 比对、启动自检、负例 rc=1、60 s 限时 1206 次 dispatch/0 失败、SIGINT 优雅停止。**整体验收**（`stage9-accept-20261017T045311Z`）：3 组 feature 构建 + fmt/clippy/tests 全 rc=0；`--vulkan-only` 冷启动 rc=0、错误路径 rc=1/1/0、阶梯 rc=0；信号语义实测 `--vulkan-only` SIGINT rc=-2 / SIGTERM rc=-15（OS 默认处置、立即终止），`metal_check` `--stress 300` 收 SIGINT 后 rc=0 优雅停止 | 渲染负载无读回校验、`--vulkan-only` 无进程内取消（靠 SIGINT/SIGTERM 默认处置）；阶段 10 需把负载/校验器结果接进 optimizer 闭环 |
 | 10 自动扫描/优化/结果应用 | 受限闭环、保存/应用/恢复 | **部分：非 CUDA 构建 + 只读评测入口落地**。`--no-default-features --features stressor-external` 的 check/build rc=0；新增子命令 `macos-eval`（`195e7af`、证据 `stage10-eval-…`）：用 `BackendSet::MacosRm` 选设备（不再要求 `has_nvapi`），复用原 `cli-stressor-cuda-rs --vulkan-only` 限时负载 + NullMoth RM 遥测采样 + `stress-macos/metal_check --verify`，输出 `nvoc/macos-stock-eval/1`（pre/under_load/post、FPS、校验结论、`settings_written=false`）。实机 20 s：gfx 1950→1965 MHz、util 均值 87%/峰值 99%、power 12.5→13.5 W、temp 52→57.6 ℃、校验 pass。**无候选/SET/回读/接受-回退/恢复**：macOS 无公开写通道，这些仍不能跑 | 需要 macOS 写通道或非公开接口；在此之前闭环停在"预检+原状态快照+限时负载+校验"这半 |
-| 11 共享入口与界面集成 | pynvoc/GUI/TUI/srv 接入 | **pynvoc + GUI/TUI 完成，srv 未接入**：pynvoc 新增 `auto`/`default` 后端串（macOS→RM、其他→NVAPI+NVML，与 CLI `Auto` 同规则，`37f786f`），GUI/TUI 全部改传该串；客户端 GUI 281 passed/13 skipped、TUI 214 passed，macOS 实机 pynvoc `auto` 的 discover/info/status/settings rc=0 且与 `macos-rm` 同后端同字段集（`stage11-shared-entry-…`）。**srv** 的 `NvapiBackend` 硬依赖 NVAPI+NVML，macOS 需独立只读 ControlBackend | srv 的 macOS 只读后端；GUI/TUI 在 macOS 本体的实机冒烟（需 customtkinter/textual） |
-| 12 全量回归与交付 | 逐项复核、契约对照、CI 与 review 材料 | 进行中：阶段 1/2/3/9/10/11 均已有实机验收 bundle + `outputs/review-stage*.md`（阶段 9/10/11 本轮补齐）；阶段 4–7 有明确读/写阻塞，`srv` 有明确后端阻塞 | 最终全量回归 + `outputs/` 索引 |
+| 11 共享入口与界面集成 | pynvoc/GUI/TUI/srv 接入 | **pynvoc + GUI/TUI + srv 均已完成**：pynvoc 新增 `auto`/`default` 后端串（macOS→RM、其他→NVAPI+NVML，与 CLI `Auto` 同规则，`37f786f`），GUI/TUI 全部改传该串；客户端 GUI 281 passed/13 skipped、TUI 214 passed，macOS 实机 pynvoc `auto` 的 discover/info/status/settings rc=0 且与 `macos-rm` 同后端同字段集（`stage11-shared-entry-…`）。**srv** 完成只读接入：`SharedBackend` 泛化为 `Box<dyn ControlBackend>`，新增 `MacosRmBackend`（`supports_writes()=false`），macOS 上发现设备 + 监控循环 + `/status`/`/api/*` 可用，写入在驱动前被拒、模式钉在 `Auto`——构建/测试 bundle `stage11-srv-macos-…`（52 passed）、实机 smoke `stage11-srv-smoke-…`（15/15 PASS、`/shutdown` exit 0），review `review-stage11-srv-macos-backend-20261017.md` | macOS 上无闭环控制（需写通道）；GUI/TUI 在 macOS 本体的实机冒烟（需 customtkinter/textual） |
+| 12 全量回归与交付 | 逐项复核、契约对照、CI 与 review 材料 | 进行中：阶段 1/2/3/9/10/11 均已有实机验收 bundle + `outputs/review-stage*.md`（阶段 9/10/11 本轮补齐）；阶段 4–7 有明确读/写阻塞，`srv` 的 macOS 后端阻塞**已解除为"只读可用、写入受限"**（不再是"启动即失败"） | 最终全量回归 + `outputs/` 索引 |
 
 ## 四、已知限制（本表不得当成支持声明）
 
@@ -268,8 +279,12 @@
   "可读"**：这些返回值不是可用读数，不得据此声明范围/曲线/恢复支持。
 - 阶段 11 的 GUI/TUI 只在客户端跑其单元测试（fake pynvoc，验证接线）；**未在 macOS 主机冒烟**
   （测试机无 customtkinter/textual）。macOS 上的实机证据来自 pynvoc 扩展模块，不是 GUI/TUI 本体。
-- `srv` 无 macOS 后端：`NvapiBackend::discover()` 依赖 NVAPI 枚举与 `Nvml::init()`，两者在 macOS 上
-  都不存在，启动即失败；这是明确阻塞，不是"已接线未实测"。
+- `srv` 在 macOS 上是**只读观测服务**（`MacosRmBackend`，`supports_writes()=false`）：
+  `/status`/`/api/status`/`/api/gpus`/`/api/info`/`/api/history`/`/config` 可用，控制模式恒为
+  `Auto`；`/mode?value=pid|manual`、`/fan` 返回 409，`/api/oc/*`、`/api/reset` 返回
+  `ERR: read-only macOS backend…`，`/oc_global` 由控制循环拒绝。**不存在** macOS 风扇 PID 闭环、
+  手动占空比、偏移/限值写入——这些需要可写 RM/固件接口（与阶段 4–7 同一外部条件）。
+  非 macOS 平台走原 `NvapiBackend`，行为逐字未变。
 - `auto-optimizer` 在 macOS 上：可构建、`--help`、并新增只读 `macos-eval`（真实负载 + 遥测 + 校验），
   但**不能扫描/应用/恢复**——原 `optimize`/`autoscan` 按 `has_nvapi()` 选目标且 SET 全走 NVAPI，
   本机 NVAPI/NVML 均缺库。真实闭环在拿到 macOS 写通道前无法运行，`macos-eval` 只是它的只读一半。
