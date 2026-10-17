@@ -533,3 +533,15 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
   逐字节相同 ∧ restore 后整块 2108 B 逐字节相同；**实时 kHz 不作判据**（NVK 自发 PERF_BOOST）。
   本轮验证：`LINT=1 build.sh` rc=0、`build.sh` rc=0、三条拒绝路径 rc=2、解码器 selftest ok。
   **未执行任何 SET。** 提交 `ed95433`。
+
+- **风扇族 = 接口层面关闭（新，2026-10-17，静态）**：不是「还没找到 id」，而是**不存在** RM 风扇命令：
+  ① 公开 SDK 的 `ctrl2080fan.h` 是 **33 行空壳、0 个 `NV2080_CTRL_CMD_*`**；② host NVOC 表 **0 行**风扇族；
+  ③ GSP 导出表 **0 行**风扇族；④ 文档化的 thermal executor 只有两个 opcode
+  （`GET_STATUS_SENSOR_READING=0x1500`、`GET_INFO_SENSOR_READING_RANGE=0x0540`），**没有风扇 opcode**。
+  剩下只有两条**板级**路径：RUSD/NV00DE 遥测页的 `fan` 字段（实测驱动不填：`0 rpm`），或文档化的**裸 I2C**
+  （host 表已注册：`0x20800601 I2C_READ_BUFFER@532`/`0602@276`/`0603@276`/`0604@276`，家族 0x06 四行与
+  头文件逐一吻合）+ GPIO（0x03，8 行）。裸 I2C 需要板级风扇控制器的从地址与寄存器图（属板卡资料，不是 RM
+  接口），且 I2C **写**属硬件写、同样受现有门控。另：`ctrl2080thermal.h:137` 直接给出私有别名
+  `NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2_PHYSICAL (0x20808513)` ⇒ **私有 thermal 族 = 公开 id | 0x8000
+  且参数结构有文档**，与 §2.1 的转发编码推导一致。详见
+  `docs/reverse-engineering/nvapi/nvrm-610-method-table-and-dispatch.md`「Fan and thermal」节。

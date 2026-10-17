@@ -372,3 +372,66 @@ Bundles cited here: `stage-clkdoc-20261017T074256Z`,
 `stage-clkobj-20261017T074755Z`, `stage-clkload-20261017T075559Z`,
 `stage-regcmp-20261017T081500Z`, `stage-reg-20261017T082800Z`,
 `stage-clklevel-20261017T083400Z`, `stage-svc-20261017T085500Z`.
+
+## Fan and thermal: what the two tables and the public SDK actually expose (2026-10-17, static)
+
+Answering "fan / power / temperature, investigated separately" with evidence
+rather than a shrug. All of this is a re-read of files already on disk: the
+extracted host table (604 rows, `tools/extract-nvrm-method-table.py` over
+`NVRM.610.57.04`), the extracted GSP table (889 rows) and the OGKM 610.57.04
+SDK headers. **No GPU request.**
+
+### The fan family does not exist as an RM command — on either side
+
+* `ctrl/ctrl2080/ctrl2080fan.h` is a **33-line shell with 0
+  `NV2080_CTRL_CMD_*` definitions** in the published SDK.
+* the host NVOC table has **0 rows** in any fan family;
+* the GSP export table has **0 fan rows** — the `.fwimage` contains exactly two
+  fan-flavoured strings, both unrelated.
+* the documented thermal executor carries **no fan opcode** either: across
+  `ctrl2080thermal.h` there are only two opcodes,
+  `..._GET_STATUS_SENSOR_READING_OPCODE = 0x1500` and
+  `..._GET_INFO_SENSOR_READING_RANGE_OPCODE = 0x0540`.
+
+⇒ "we have not found the fan id yet" is the wrong framing. There is no RM fan
+control *or* read command here; that path is closed by the interface itself, not
+by a missing probe.
+
+### The private THERMAL family is the documented public one plus `0x8000`
+
+`ctrl2080thermal.h:137` defines
+
+```c
+#define NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2_PHYSICAL (0x20808513U)
+/* Evaluated from (FINN_NV20_SUBDEVICE_0_THERMAL_LEGACY_NON_PRIVILEGED_INTERFACE_ID << 8) | ... */
+```
+
+i.e. the `0x208085xx` private rows are `0x2080_05xx | 0x8000` — the same
+legacy-non-privileged encoding §2.1 derived from the forward path, here
+confirmed by the vendor header itself. So the private thermal reads are
+`public_id | 0x8000`, and their **parameter structures are documented** (the V2
+executor's opcode union is in the same header). That is why the earlier battery
+could read a sensor range through the public form; the documented executor is
+available on both sides of the namespace.
+
+### What is left for a fan tachometer reading
+
+Only two non-RM-API routes remain, both board-level rather than command-level:
+
+1. the **RUSD/NV00DE telemetry page** (`fan` field; a reading of `0 rpm` was
+   observed, so it is a field the driver does not populate on this board), or
+2. the documented **raw I2C** commands, which *are* host-registered:
+   `0x20800601 I2C_READ_BUFFER @532`, `0x20800602 I2C_WRITE_BUFFER @276`,
+   `0x20800603 I2C_READ_REG @276`, `0x20800604 I2C_WRITE_REG @276`
+   (family 0x06 = 4 rows in the host table, matching the header exactly), plus
+   the GPIO family (0x03, 8 rows).
+
+Route 2 needs the board's fan-controller slave address and register map, which
+is board documentation, not an RM interface — and a raw I2C **write** is a
+hardware write, so it stays behind the same gates as everything else. Route 1 is
+read-only and already covered by the existing RUSD battery.
+
+Per-family status this round: **fan = closed by the interface** (evidence
+above), **temperature reads = documented opcode, existing evidence stands**,
+**power = unchanged** (`RATED_TDP` read works, its SET stays gated; the internal
+PM/PFM read twins still answer `0x56`).
