@@ -23,12 +23,16 @@ include = [
 # stressor must pick exactly one generation (cuda11 for R470-era drivers, cuda12
 # otherwise), enforced by compile_error! in the stressor crate.
 #
-# `stressor-bundled` is only the "bundle the stressor crate in-process" switch
-# that the source gates on; the features below choose its backend. Keeping the
-# two apart is what lets a platform with no CUDA runtime (macOS has no
-# NVAPI/NVML and no CUDA driver) build the bundled Vulkan-only stressor, while
-# `stressor-bundled-cuda12` -- the default -- still turns on exactly the
-# features it always did, cuda and vulkan, so no existing build changes.
+# `stressor-bundled` is only the "link the stressor crate into this binary"
+# switch that the source gates on; the features below choose its backend. A
+# bundled stressor does not run in-process: `stressor_process::bundled_command`
+# resolves the path to `current_exe()` and re-invokes it with a worker sentinel
+# in argv, so the stress still runs as a child process (same executable, no
+# separate binary to locate). Keeping the two apart is what lets a platform with
+# no CUDA runtime (macOS has no NVAPI/NVML and no CUDA driver) build the bundled
+# Vulkan-only stressor, while `stressor-bundled-cuda12` -- the default -- still
+# turns on exactly the features it always did, cuda and vulkan, so no existing
+# build changes.
 default = ["stressor-bundled-cuda12"]
 stressor-bundled = ["dep:cli-stressor-cuda-rs"]
 stressor-bundled-cuda = [

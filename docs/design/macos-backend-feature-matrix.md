@@ -1280,3 +1280,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (4) **已加入可证伪只读用例** ✔：保留零种子对照遍，新增 `input=FORCE_LIMIT(2)` 播种遍 ✔；预注册预测＝上一个答 `DEFAULT(0)` 的 client 在此仍应为 0，若恰回 2 才是真回显 ✔（同会话对照排除"所有 client 恰好都 FORCE_LIMIT" ✔）；`GET_CONTROL` 不仲裁不 latch，SET `0x2080206f` **仍未发送** ✗。
 (5) **验证范围** ✔：真机 macOS `OGKM=… sh build.sh` ⇒ **`built probe-macos-rm-idle (profile idle)`** ✔；**未运行** ✗（GSP `0x62`）⇒ **已实现待实测** ✔。分类：结构/字段/枚举＝已定位（公开头文件 ✔）；数值＝已实现待实测；写＝待授权 ✔。
 (6) **设备访问** ✔：本轮仅一次 wedge 轮询（`0x62`，uptime `1 day, 4:13`，同一 boot）；真机编译不访问设备 ⇒ 未重启、未写入、无性能操作。
+
+### 本轮追加七十二（2026-10-18，压力侧就绪度核对：**Vulkan 非 CUDA 路径的构建与入口契约**）
+
+(1) **选择依据** ✔：次优先级要求"先复用原 NVOC 的 Vulkan 压力实现（`cli-stressor-cuda-rs --vulkan-only`，底层就是 NVK），wedge 解除后才跑"⇒ 本轮核实**跑之前的先决条件** ✔。
+(2) **构建可行** ✔：本机 `cargo check -p cli-stressor-cuda-rs --no-default-features --features vulkan` **rc 0（20.79 s）** ✔；测试机 macOS 同一 recipe ⇒ **`Finished` 未重编**，现存 `target/debug/cli-stressor-cuda-rs`（10 885 680 B，10-17 10:10）即该 feature 的产物 ✔；指纹独立佐证 ✔：`cli-stressor-cuda-rs-0633834fc92c7fa1`＝`["ash","vulkan"]` ✔，与 `["ash","cuda","cuda12","default","vulkan"]`／`["ash","cuda","cuda12","vulkan"]` 分开记账 ✔ ⇒ **无 CUDA 那套确在本机构建过** ✔。
+(3) **入口契约** ✔：`macos_eval.rs:63-66` 要求 `--vulkan-stressor <path>`（缺失即报错）✔，`:180-187` 以 `--vulkan-only` 调起并追加尺寸/壳数/迭代 ✔；`--help` 实测参数面 ✔（**不加载设备** ✗）；`--vulkan-only` 在未以 `vulkan` 构建时会明确提示 ✔。
+(4) **"bundled"真义更正** ✗：非"进程内"× ⇒ `stressor_process.rs:10,67-93` 把路径解析为 `current_exe()` 并以 worker 哨兵 argv 重新调起自身 ⇒ 压力仍以**子进程**运行 ✔；我的 Cargo.toml 注释已按此改写 ✔。
+(5) **状态** ✔：构建/入口＝**已实现且实测**；**实际负载运行＝已实现待实测**（wedge ✗）；Metal 校验器**未跑** ✗。本节未跑任何负载 ✔。
+(6) **设备访问** ✔：仅 wedge 轮询一次（`0x62`，uptime `1 day, 4:16`，同一 boot）；`cargo build` 与 `--help` 均不访问设备 ⇒ 未重启、未写入、无性能操作。

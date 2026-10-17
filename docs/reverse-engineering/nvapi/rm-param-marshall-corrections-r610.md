@@ -1313,3 +1313,22 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - 真机 macOS 编译 ✔：`OGKM=… sh build.sh` ⇒ **`built probe-macos-rm-idle (profile idle)`** ✔（按交接文档 §7.0 只认这一行 ✔）。
 - **未运行** ✗：GSP 仍 `0x62` ✔（本轮仅一次 wedge 轮询：`0x00000062`，uptime `1 day, 4:13`，同一 boot ✔）⇒ 新用例属**已实现待实测** ✔。
 - 分类 ✔：结构/字段/枚举＝**已定位（公开头文件直接给出 ✔，非推断）**；各 client 当前动作与 RATED_TDP 数值＝**已实现待实测**；写＝**待授权** ✔。
+
+## 38. 压力侧就绪度核对：Vulkan 非 CUDA 路径的构建与入口契约（2026-10-18）
+
+**选择依据** ✔：次优先级里明确要求"压力侧先复用原 NVOC 的 **Vulkan 压力实现**（`cli-stressor-cuda-rs --vulkan-only`，底层就是 NVK），**wedge 解除后**才跑"✔ ⇒ 本轮把**跑之前必须先成立的条件**逐条核实 ✔（纯构建/参数面 ✔，不加载 GPU ✗）。
+
+### 38.1 构建可行性 ✔
+- 本机（分析侧）`CARGO_NET_OFFLINE=true cargo check -p cli-stressor-cuda-rs --no-default-features --features vulkan` ⇒ **rc 0（20.79 s）** ✔（`ash 0.38.0+1.3.281`、`naga 30.0.1` 均已在 `Cargo.lock` 内 ✔）。
+- 测试机 macOS ✔：`cargo build -p cli-stressor-cuda-rs --no-default-features --features vulkan` ⇒ **`Finished` 且未触发重编** ⇒ 现存 `target/debug/cli-stressor-cuda-rs`（10 885 680 B，**10 月 17 日 10:10**，即第 9 阶段那批 ✔）**已经就是这套 feature 的产物** ✔。
+- **独立佐证**（cargo 会按 feature 集合区分指纹 ✔，故"未重编"是有意义的 ✔）：`target/debug/.fingerprint/` 下同时存在 `cli-stressor-cuda-rs-0633834fc92c7fa1`＝`features: ["ash","vulkan"]` ✔、`074330bd1b3bdef2`/`78a309eeaac19e51`＝`["ash","cuda","cuda12","default","vulkan"]` ✔、`1a1cd0f24d19e1b4`＝`["ash","cuda","cuda12","vulkan"]` ✔ ⇒ **无 CUDA 的那套确实在本机构建过且与默认那套分开记账** ✔。
+### 38.2 入口契约（怎么被优化器驱动）✔
+- `auto-optimizer/src/macos_eval.rs:63-66`：`--vulkan-stressor <path>` 是**硬性要求**（缺失即报错 ✔）；`:180-187`：`Command::new(&opts.stressor).arg("--vulkan-only")` 再按需追加 `--vulkan-width/height/shells/iters` ✔。
+- `cli-stressor-cuda-rs` 参数面实测（`--help`，仅打印参数、**不加载设备** ✗）✔：`--vulkan-only`＝"Run Vulkan-only stress (skip CUDA workload)" ✔、`--vulkan`＝FurMark 式图形负载（默认离屏 target，除非 `--vulkan-window` ✔）✔；未以 `vulkan` feature 构建时 `--vulkan-only` 会给出明确提示 ✔（`main.rs:1315` ✔）。
+- 因此"bundled"的真义 ✗：不是进程内线程 ✔，而是 `stressor_process.rs:10,67-93` 的 `is_bundled`／`bundled_command` ⇒ **把路径解析为 `current_exe()` 并以 worker 哨兵 argv 重新调起自身** ✔ ⇒ 压力仍以**子进程**运行 ✔（同一可执行文件、无需另找一个二进制 ✔）。
+### 38.3 更正我自己的措辞 ✗
+第 60 轮我在 `auto-optimizer/Cargo.toml` 的 feature 注释里写了"bundle the stressor crate **in-process**"× ⇒ 已按上述真实机制改写为"link the stressor crate into this binary … re-invokes it with a worker sentinel in argv, so the stress still runs as a child process" ✔。
+### 38.4 状态与设备访问 ✔
+- 分类 ✔：压力侧**构建/入口就绪＝已实现且实测（构建层）**；**实际负载运行＝已实现待实测**（wedge ✗）；Metal 校验器仍**未跑** ✗。
+- 本节**未跑任何负载** ✗（`cargo build` 与 `--help` 均不访问设备 ✔）。
+- 设备访问 ✔：本轮仅一次 wedge 轮询（verdict `0x00000062`，uptime `1 day, 4:16`，同一 boot ✔）⇒ 未重启、未写入、无性能操作 ✔。
