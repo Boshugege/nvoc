@@ -948,3 +948,13 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **四、顺带纠到一条此前没有的风扇来源**（校核上轮措辞）：`src/common/sdk/nvidia/inc/class/cl00de.h` 声明 `RUSD_FAN_COOLER_INFO { NvU32 rpmCurr[16]; }` 与 `RUSD_FAN_COOLER_STATUS` ✔ ⇒ **RUSD 快照里本来就有风扇转速** ✔，且是我们**早已采样**的路径 ✔。上轮措辞"SDK 没有任何**风扇控制**"依然准确 ✔，此处补上的是**风扇遥测**：风扇族现在有**两个独立候选来源**（策略控制 + RUSD 遥测），后者受同一个 RUSD 页门禁阻塞 ✔。
 
 **验证范围**：core 改的是该族**用户可见成因串**（`get-settings --macos-rm` 的 `unavailable["thermal_limit"]` ✔）；fmt clean、clippy（core/cli/auto-optimizer，`-D warnings`）无 error、core tests 89+5+15 全绿 ✔。本轮**设备访问 1 次**（anchor 轮询）、**无写入、未提权**、客户端未构建 ✔。
+
+### 本轮追加三十七（2026-10-18，功耗族：RATED_TDP 候选 id/字段/写入前置条件已定位；一条候选规则被证伪）
+
+**一、RATED_TDP 候选已定位（SDK + 方法表互相印证）**：`0x2080206e`（GET_CONTROL）与 `0x2080206f`（SET_CONTROL）——SDK **只声明这两个** ✔，均在方法表且 paramSize **12** ✔＝文档结构 `{client,input,vPstateType}` 的 sizeof ✔；表 flags GET `0x10008`、SET `0x40048` ✔。文档给出 `client∈{RM,WAR_BUG_1785342,GLOBAL,OS,PROFILE}` ✔、`action∈{DEFAULT,FORCE_EXCEED,FORCE_LIMIT,FORCE_LOCK,FORCE_FLOOR}` ✔、合法状态仅 `NV_OK`/`NV_ERR_NOT_SUPPORTED` ✔。
+
+**二、写入前置条件（文档）**：`SET_CONTROL` **不能设置 RM 客户端** ✔，RM 在客户端间**仲裁**并可能**回落 `FORCE_EXCEED`** ✔ ⇒ **RATED_TDP 是仲裁请求而非瓦数**：写入成功也可能看不到上限变化 ⇒ 这正是"不得以实时频率变化代替写入生效"的文档依据，也支持"RATED_TDP 不能取代真正的偏移/VF 控制" ✔。该前置条件已写入**用户可见成因串**（`get-settings --macos-rm` 的 `unavailable["power_limit_write"]`，并加了不与他人共享、不得回退成共享串的测试 ✔）。
+
+**三、一条候选规则被证伪（如实记录）**：猜想"表 flags 位 `0x40000` = SET 行"✗ —— 表里能找到的 SDK SET id 共 **103** 个，带该位者仅 **14** 个，且在 id 位写半边者 **0** 个；`0x40000` 集（58 行）与 id 位写半边（92 行）**交集为空** ✔ ⇒ **两套互不重叠的约定**（私有/legacy 转发 vs SDK 公开 SET）✔。`0x40000` 的真实含义对那 58 行**尚未定位**。
+
+**验证范围**：core 改动为该族成因串 + 一处断言；fmt clean、clippy（core/cli/auto-optimizer，`-D warnings`）无 error、core tests 89+5+15 全绿 ✔。本轮**设备访问 1 次**（anchor 轮询）、**无写入、未提权**、客户端未构建 ✔。

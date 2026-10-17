@@ -566,3 +566,32 @@ than three attributed ones until something other than the numbering supports it.
 没有行数据；`outputs/` 里也再无 12336 B 目录块的转储 ⇒ 目前**唯一**的行字节记录就是上述 fixture。
 因此给 probe 的 `--clkdom-read` 加了**逐行非零 dword 普查**（仅当 `size == 12336`，即该块文档
 caller 尺寸），让下次会话自动把行尾字段记进记录，而不是再次丢失。
+
+## 9. 写入命令的两套约定：`0x40000` 不是 SET 标记（已证伪），以及 RATED_TDP 的写入前置条件（2026-10-18）
+
+### 9.1 被证伪的候选规则（如实记录，不留成"以为"）
+猜想：方法表 flags 位 `0x40000` 标出 SET 行。**用 SDK 自己声明的 SET id 全集交叉验证后证伪**：
+在 1118 行表里能找到的 SDK SET id 共 **103** 个，其中带 `0x40000` 的只有 **14** 个 ✔；而全部 103 个里
+**没有一个**落在"id 位写半边"（`cmd & 0xC000 == 0xC000`）✔。反过来，`0x40000` 行（58 行）与 id 位
+写半边（92 行）**交集为 0** ✔。⇒ 二者是**两套互不重叠的约定**：id 位写半边属于**私有/legacy 转发**
+那一族（`0x2080D01C = 0x2080901B | 0x4000` ✔），而 SDK 公开的 SET（如 `0x2080206F` RATED_TDP_SET_CONTROL、
+`0x2080205B` SET_POWERSTATE）**都带 `0x40000` 却不在写半边** ✔。**剩余问题**：`0x40000` 对那 58 行
+究竟标记什么，**尚未定位**（不要当作"该行是 SET"使用）。
+
+### 9.2 RATED_TDP：候选 id 已定、字段与前置条件均有文档
+- **id 与尺寸**：`NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL (0x2080206e)` ✔ 与
+  `NV2080_CTRL_CMD_PERF_RATED_TDP_SET_CONTROL (0x2080206f)` ✔（`ctrl2080perf.h`）——**SDK 只声明这两个** ✔；
+  两者都在方法表里，paramSize **12** ✔，与文档结构 `{client, input, vPstateType}` 的 sizeof 一致 ✔（表与头文件互相印证 ✔）。
+  表里 flags：GET `0x10008`、SET `0x40048` ✔。
+- **字段语义（文档）**：`client ∈ {RM=0, WAR_BUG_1785342=1, GLOBAL=2, OS=3, PROFILE=4}` ✔、
+  `input/action ∈ {DEFAULT=0, FORCE_EXCEED=1, FORCE_LIMIT=2, FORCE_LOCK=3, FORCE_FLOOR=4}` ✔、`vPstateType` ✔；
+  合法状态只有 `NV_OK` / `NV_ERR_NOT_SUPPORTED` ✔。
+- **写入前置条件（文档原文要点）**：`SET_CONTROL` **无法设置 RM 客户端** ✔；RM 在客户端之间**仲裁**，
+  并可能**回落到 `FORCE_EXCEED`** ✔。⇒ **RATED_TDP 是"仲裁请求"而不是瓦数** ✔：写入成功也可能
+  *看不到* 上限变化 ⇒ 这为"不得以实时频率变化代替写入生效"提供了文档依据 ✔，**不能取代真正的偏移/VF 控制** ✔。
+
+### 9.3 顺带核到的既有做法（未改）
+probe 里派生的 `0x2080206d`（RATED_TDP **status**）：SDK 未导出 CMD 宏，只给了 message id
+`NV2080_CTRL_PERF_RATED_TDP_STATUS_PARAMS_MESSAGE_ID = 0x6D` ✔，整份 SDK 里**没有** `0x2080206d` 字面量 ✔，
+1118 行方法表里也**没有**该行 ✔ ⇒ 该 id 是**由 message id 约定派生**、并在源码注释中如实标注为派生 ✔
+（未改动，仅记录）；因此它能否被主机表放行，由驱动而非表决定 ✔。

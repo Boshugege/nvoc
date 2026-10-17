@@ -107,6 +107,17 @@ pub struct SettingsCapabilities {
 /// exactly the 92 write-half ids and nothing else), not a missing control.
 pub const WRITE_NEEDS_PRIVILEGE_REASON: &str = "needs a write, and a private SET is refused below root on this host: the write half carries the legacy privileged bits (0x2080D01C = 0x2080901B | 0x4000), so no SET has been issued (see notes)";
 
+/// The power-limit write: the same privilege gap as every other write, and one
+/// *documented* precondition that is specific to it. The SDK's RATED_TDP control
+/// is an arbitration request rather than a wattage -- the caller picks a client
+/// (RM, WAR_BUG_1785342, GLOBAL, OS, PROFILE) and an action (DEFAULT,
+/// FORCE_EXCEED, FORCE_LIMIT, FORCE_LOCK, FORCE_FLOOR) -- and the header states
+/// that SET_CONTROL cannot set the RM client while RM arbitrates between the
+/// clients and may fall back to FORCE_EXCEED. A write can therefore succeed and
+/// still leave the observed limit unchanged, which is exactly why a frequency
+/// change must not be taken as proof that a write took effect.
+pub const POWER_WRITE_NEEDS_PRIVILEGE_REASON: &str = "needs a write, and a private SET is refused below root on this host (the same privilege gap as every other write), plus a precondition specific to this one: the SDK's RATED_TDP control is an arbitration request rather than a wattage -- the caller picks a client (RM, WAR_BUG_1785342, GLOBAL, OS, PROFILE) and an action (DEFAULT, FORCE_EXCEED, FORCE_LIMIT, FORCE_LOCK, FORCE_FLOOR) -- and SET_CONTROL is documented as unable to set the RM client, while RM arbitrates between clients and may fall back to FORCE_EXCEED, so a write that succeeds can still leave the observed limit unchanged and a frequency change must not be taken as proof that it took effect (see notes)";
+
 /// Fan control, the family whose published surface really is absent: the SDK's
 /// own `ctrl2080fan.h` is a FINN-generated file with no definitions, and no
 /// `NV2080_CTRL_CMD_*FAN*`/`*COOLER*` macro exists anywhere in the control-header
@@ -268,9 +279,8 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             "vf_curve" => VF_CURVE_UNREADABLE_REASON,
             "thermal_limit" => THERMAL_LIMIT_UNREADABLE_REASON,
             "voltage_boost" => VOLTAGE_BOOST_UNREADABLE_REASON,
-            "pstate_lock" | "power_limit_write" | "settings_restore" => {
-                WRITE_NEEDS_PRIVILEGE_REASON
-            }
+            "power_limit_write" => POWER_WRITE_NEEDS_PRIVILEGE_REASON,
+            "pstate_lock" | "settings_restore" => WRITE_NEEDS_PRIVILEGE_REASON,
             _ => WRITE_NEEDS_PRIVILEGE_REASON,
         };
         (family.to_string(), reason.to_string())
@@ -2238,12 +2248,22 @@ mod tests {
         }
 
         // The families that only need a *write* share the privilege cause.
-        for family in ["pstate_lock", "power_limit_write", "settings_restore"] {
+        for family in ["pstate_lock", "settings_restore"] {
             assert_eq!(
                 settings.unavailable[family], WRITE_NEEDS_PRIVILEGE_REASON,
                 "{family} should give the privilege cause"
             );
         }
+        // The power-limit write has the privilege cause plus a precondition of
+        // its own, so it must not simply borrow the shared string.
+        assert_eq!(
+            settings.unavailable["power_limit_write"], POWER_WRITE_NEEDS_PRIVILEGE_REASON,
+            "power_limit_write should state its own documented precondition"
+        );
+        assert_ne!(
+            POWER_WRITE_NEEDS_PRIVILEGE_REASON, WRITE_NEEDS_PRIVILEGE_REASON,
+            "the power write must not collapse into the shared cause"
+        );
         // And the ones with a real read gap do not borrow it.
         for family in [
             "core_clock_offset",
