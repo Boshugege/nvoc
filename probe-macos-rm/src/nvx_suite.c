@@ -1661,6 +1661,40 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
         nvx_emit(c, "V2.clkdom", k->name, st, NVX_V_OK,
                  "  non-zero dwords (%u listed):%s", listed, off);
 
+        /* The two lines above stop at dword 24, but the 2108-byte control block
+         * is a 60-byte head plus 64-byte records whose twelve value dwords sit at
+         * record-relative {8,12,16,20,24,28,32,36,40,44,52,56} -- record 0's last
+         * slot is absolute dword 29, past that cap, so the values were never in
+         * the dump. Reading the vendored copy adds a reason to want them per
+         * record: it records that the driver copies value dwords only for a fixed
+         * internal-type set, and that the V1 fallback window rec+44..60 would fill
+         * only the four late slots of a 64-byte record. So where a record's
+         * non-zeros sit says which window, if either, this host marshals -- and a
+         * record whose values are all zero is then uninformative rather than proof
+         * of a zero offset. Print each selected record's non-zero dwords
+         * record-relative; selected means the mask bit at +4 is set. */
+        if (k->size == 2108u) {
+            for (unsigned i = 0; i < 32u; ++i) {
+                unsigned base = 60u + 64u * i;
+                if (!((k->mask >> i) & 1u)) continue;
+                if (base + 64u > k->size) break;
+                char line[1280];
+                char *lp = line;
+                size_t left = sizeof line;
+                unsigned rlisted = 0;
+                for (unsigned d = 0; d < 16u; ++d) {
+                    NvU32 w; memcpy(&w, buf + base + 4u * d, 4);
+                    if (!w) continue;
+                    int n = snprintf(lp, left, " +%u=0x%08x", 4u * d, w);
+                    if (n <= 0 || (size_t)n >= left) break;
+                    lp += n; left -= (size_t)n; ++rlisted;
+                }
+                nvx_emit(c, "V2.clkdom", k->name, st, NVX_V_OK,
+                         "  record %u @%u rel non-zero (%u listed):%s",
+                         i, base, rlisted, line);
+            }
+        }
+
         /* The published ClockDomainsInfo caller struct names a per-domain kHz
          * range and a per-domain VFP index range, but the RM block is 32 rows of
          * 384 B and only the row head (stamp, domain bit) was ever decoded -- the
