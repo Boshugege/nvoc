@@ -99,6 +99,21 @@ The family may be reported as *implemented and measured* only when all of:
   transient error** in the public vocabulary. Today the family is statically
   unavailable; the reason text distinguishes "not yet wired" from "driver
   refused".
+* **Wedge-time live-control payloads may be zeroed (found 2026-10-17, while
+  verifying §3 on the wedged machine).** `get-status --macos-rm` on the wedged
+  card reports `pstate = 0` and `memory_used_bytes = 0` with those two fields
+  *absent* from `unavailable`: the live controls `PERF_GET_CURRENT_PSTATE` and
+  `FB_GET_INFO_V2` answer `NV_OK` while every RUSD field is correctly null with
+  "RUSD allocation/mapping failed: 0x00000062". The pre-wedge recording of the
+  same boot has the same control answering `P1` and a non-zero heap. A wedged
+  GSP answering `NV_OK` with a zeroed structure would make `publish_live`'s
+  "advancing" claim wrong -- i.e. exactly the fake-zero this project forbids.
+  Not resolved here, because a healthy *idle* baseline has never been recorded:
+  an idle card may legitimately read 0. **Planned check:** immediately after the
+  next restart, before any load, read `get-status --macos-rm` on the idle card;
+  a non-zero heap or P-state there means the wedge was zeroing them. No code
+  change is justified until that reading exists -- guessing here would be its own
+  kind of fake.
 
 ## 7. Verification scope of this document
 

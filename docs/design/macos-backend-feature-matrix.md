@@ -637,3 +637,17 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **新增常驻规矩**：同步后**必须**核对文件清单与逐文件 sha256，**不得以 rsync 退出码代替**；远端路径一律用 `~/` 写法。这条已写入 INDEX 与 review，防止重犯。
 
 **仍未发出**：任何 GPU 请求、任何 RM 会话、任何 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。
+
+### 本轮追加十三（2026-10-17，公共面实测 + 一处新发现的诚实性风险）
+
+**做了什么**（commit `dd0f5fe`）：把「限制」从散文变成**测量**。原状：`±18750 kHz` 只存在于一条静态 reason 字符串里，而计划 §5 验收条件 3 明确要求「上报的范围必须是设备的、不是常数」。现：`Device::settings()` 打开会话读三个块，经**纯函数** `apply_offset_channel` 折叠进 `DeviceSettings`，并新增公开字段 `clock_offset_limits_khz`（`{min_khz, max_khz, records}`）；测试用**已提交的设备字节 fixture**，所以断言里的数字是测出来的。
+
+**守住的界线**：① 拒绝/畸形块 ⇒ 字段**缺席**并写明 RM 状态（楔形下绝不显示「限制为 0 kHz」）；② 只在**所有可读记录一致**时才给出窗口，且携带 `records` 计数——因为「哪条记录属于哪个命名域」尚未确立，把某一条当窗口就是未挣得的断言；不一致、空选择、被拒各有各的原因。③ **偏移本身仍不进数字**：stock 实测为 0，但报 0 等于断言了 G1 正在追的那个槽位身份，故两族继续留在 `unavailable`，且 reason 已改为指向该字段而非复述常数。
+
+**公共面实测（楔形状态下，只读）**：`nvoc-cli get-settings --macos-rm` 输出 `Clock Offset Limits kHz: N/A`，notes 末尾为 `offset channel: not read (macOS RM: RUSD allocate/map: 0x00000062)` —— **会话都没开起来，于是不给任何值**，正是要的行为。分类：**已实现并实测（拒绝路径）/ 正路径待重启后实测**。
+
+**验证范围**：`cargo fmt --all --check` **rc=0**；`clippy -p nvoc-core -p pynvoc --all-targets -- -D warnings` **rc=0**；`cargo test -p nvoc-core --all-targets` **83 lib（含 3 个新投影用例）+ 5 fixture + 15 non-GPU 全过 / 0 失败**，50 个硬件门控保持 ignored。**如实记录一处环境限制**：`pynvoc` 的 Rust 单测在本机**无法链接**（默认 `extension-module` 下 pyo3 不链 libpython → `_PyBytes_AsString` 未定义；`--no-default-features` 又找不到 CommandLineTools 的 libpython3.9）——**旧 checkout 同样失败**，属既有环境问题；故本次 pynvoc 侧映射**只经 clippy 类型检查，未被执行**。
+
+**新发现的诚实性风险（未定，不猜）**：楔形下 `get-status --macos-rm` 报 `pstate = 0`、`memory_used_bytes = 0`，而这两个字段**不在 `unavailable` 里**——即 `PERF_GET_CURRENT_PSTATE` 与 `FB_GET_INFO_V2` 返回了 `NV_OK`，同时所有 RUSD 字段都正确地 null 并注明 `0x00000062`。同一次开机 wedge 前的记录里，同一控制返回 `P1` 与非零 heap。若楔形 GSP 以**全零结构**回答 `NV_OK`，则 `publish_live` 标称的 `advancing` 是错的——正是本项目禁止的假零。**不在此下结论**：健康且**空闲**的基线从未记录过，空闲读数本就可能是 0。**重启后第一件事**（不加任何负载）读一次 `get-status --macos-rm`：若非零，则楔形确实在清零。**在拿到该读数之前不改代码**——此处猜测本身就是另一种假值。已写入整合计划 §6。
+
+**未发出**：任何性能 SET、提权、驱动/EFI/boot-args 改动、重启、PR 操作。本轮新发的 GPU 请求只有三次只读：`get-settings`、两次 `get-status`。
