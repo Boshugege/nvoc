@@ -1029,6 +1029,42 @@ pub struct PowerLimitReport {
     pub notes: Vec<String>,
 }
 
+/// One sensor of the legacy thermal entry.
+///
+/// `min_c`/`max_c` are the entry's per-sensor physical range and `controller`
+/// its controller attribution; both keep the entry's key names and stay null
+/// here, with the reason in `unavailable`.
+#[derive(Debug, Clone, Serialize)]
+pub struct TempSensorView {
+    /// The driver's own target type for this sensor, from its measured
+    /// decoding: 1=GPU, 2=MEMORY, 4=POWER_SUPPLY, 8=BOARD.
+    pub target: &'static str,
+    /// The RUSD field the reading comes from, so the provenance is visible and
+    /// the pairing is by name rather than by position.
+    pub field: &'static str,
+    pub current_c: Option<f64>,
+    pub min_c: Option<f64>,
+    pub max_c: Option<f64>,
+    pub controller: Option<&'static str>,
+    pub unavailable: BTreeMap<String, String>,
+}
+
+/// The legacy thermal entry carries a per-sensor physical range. This backend's
+/// snapshot does not: the RUSD temperature sections publish a reading only.
+///
+/// The range itself is **readable**, and this is a measured amount rather than
+/// a guess: `NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2` (`0x20800513`) answered
+/// NV_OK and reported sensor 0 with range [0,127] (target type 1=GPU, provider
+/// 0), so what is missing is the client wire-up of that read, not a bound the
+/// driver never publishes.
+pub const THERMAL_RANGE_UNREAD_REASON: &str = "the live reading comes from the RUSD temperature section, which publishes a reading and no bound; the per-sensor range is readable (measured: 0x20800513 EXECUTE_V2 reported sensor 0 range [0,127], target type 1=GPU, provider 0) but this snapshot does not wire that read in yet, so this end is a missing client read rather than a missing driver value";
+
+/// The entry's `controller` names which controller acts on the sensor. The
+/// public thermal read reports a provider index (measured: 0) whose relation to
+/// this field is not established, so it stays null instead of being mapped by
+/// guesswork.
+pub const THERMAL_CONTROLLER_UNREAD_REASON: &str = "the RUSD temperature sections carry the reading only; the public thermal read reports a provider index (measured: 0) whose relation to this entry's controller field is not established, so it is left null rather than mapped by guesswork";
+
 impl DeviceStatus {
     /// What this snapshot can say about the fans, and what it cannot.
     pub fn fan_report(&self) -> FanReport {
@@ -1126,6 +1162,63 @@ impl DeviceStatus {
             unavailable,
             notes,
         }
+    }
+
+    /// One view of the legacy thermal entry: the live reading of every sensor
+    /// this backend knows about, and a reason for every field it cannot fill.
+    ///
+    /// The per-sensor keys are the entry's own (`target`, `current_c`, `min_c`,
+    /// `max_c`, `controller`); `field` and `unavailable` are additive, because a
+    /// null has to say *which* null it is -- "not read in this snapshot" and
+    /// "this driver never published it" are different answers and a bare null
+    /// cannot tell them apart.
+    ///
+    /// The target names come from the driver's own decoding of its thermal
+    /// targets (measured: type 1=GPU, 2=MEMORY, 4=POWER_SUPPLY, 8=BOARD), and
+    /// the pairing is by field name: the driver's type order is not the RUSD
+    /// field order (4 is the power-supply type where the block's fourth section
+    /// is the board), so a positional mapping would mislabel two of them.
+    pub fn legacy_temp_sensor_report(&self) -> Vec<TempSensorView> {
+        [
+            ("gpu", "temperature_c", self.temperature_c),
+            ("memory", "temperature_memory_c", self.temperature_memory_c),
+            ("board", "temperature_board_c", self.temperature_board_c),
+            (
+                "power_supply",
+                "temperature_power_supply_c",
+                self.temperature_power_supply_c,
+            ),
+        ]
+        .into_iter()
+        .map(|(target, field, current_c)| {
+            let mut unavailable = BTreeMap::from([
+                ("min_c".to_string(), THERMAL_RANGE_UNREAD_REASON.to_string()),
+                ("max_c".to_string(), THERMAL_RANGE_UNREAD_REASON.to_string()),
+                (
+                    "controller".to_string(),
+                    THERMAL_CONTROLLER_UNREAD_REASON.to_string(),
+                ),
+            ]);
+            if current_c.is_none() {
+                unavailable.insert(
+                    "current_c".to_string(),
+                    self.unavailable
+                        .get(field)
+                        .cloned()
+                        .unwrap_or_else(|| format!("{field} was not read in this snapshot")),
+                );
+            }
+            TempSensorView {
+                target,
+                field,
+                current_c,
+                min_c: None,
+                max_c: None,
+                controller: None,
+                unavailable,
+            }
+        })
+        .collect()
     }
 }
 
@@ -3807,6 +3900,58 @@ mod tests {
         let report = status_from_snapshot(&s).power_limit_report();
         assert_eq!(report.current_watt, Some(0.0));
         assert!(!report.unavailable.contains_key("current_watt"));
+    }
+
+    #[test]
+    fn the_legacy_temp_view_reports_each_sensor_and_the_fields_it_cannot_fill() {
+        // Healthy fixture: four plausible sensors. The readings are reported
+        // with the driver's own target names and field provenance, and the
+        // range/controller ends say why they are null instead of being filled
+        // with a made-up bound.
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        let views = status_from_snapshot(&s).legacy_temp_sensor_report();
+        assert_eq!(views.len(), 4);
+        assert_eq!(views[0].target, "gpu");
+        assert_eq!(views[0].field, "temperature_c");
+        assert_eq!(views[0].current_c, Some(50.0));
+        assert_eq!(views[1].current_c, Some(49.0));
+        assert_eq!(views[2].current_c, Some(46.0));
+        assert_eq!(views[3].target, "power_supply");
+        assert_eq!(views[3].current_c, Some(45.0));
+        for view in &views {
+            assert_eq!(view.min_c, None);
+            assert_eq!(view.max_c, None);
+            assert_eq!(view.controller, None);
+            assert_eq!(view.unavailable["min_c"], THERMAL_RANGE_UNREAD_REASON);
+            assert_eq!(view.unavailable["max_c"], THERMAL_RANGE_UNREAD_REASON);
+            assert_eq!(
+                view.unavailable["controller"],
+                THERMAL_CONTROLLER_UNREAD_REASON
+            );
+            // The measured candidate is named, so "not wired in" cannot be
+            // misread as "the driver publishes no bound".
+            assert!(view.unavailable["min_c"].contains("0x20800513"));
+            assert!(!view.unavailable.contains_key("current_c"));
+        }
+
+        // An implausible sensor is null with that field's own reason -- never
+        // 0 C, which would read as a real freezing reading -- while its
+        // neighbours keep their numbers.
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        s.telemetry.sample.temperature_fx256[1] = 200 * 256;
+        let status = status_from_snapshot(&s);
+        let views = status.legacy_temp_sensor_report();
+        assert_eq!(views[1].current_c, None);
+        assert_ne!(views[1].current_c, Some(0.0));
+        assert_eq!(
+            views[1].unavailable["current_c"],
+            status.unavailable["temperature_memory_c"]
+        );
+        assert!(views[1].unavailable["current_c"].contains("implausible"));
+        assert_eq!(views[0].current_c, Some(50.0));
+        assert_eq!(views[3].current_c, Some(45.0));
     }
 
     #[test]

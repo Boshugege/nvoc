@@ -32,11 +32,17 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             // as "the backend has no power limit", which is not true; the two
             // range ends it has no source for come back null with the reason.
             | Command::GetPublicPowerLimit
+            // The legacy thermal view is allowed for the same reason as the two
+            // above: this backend does publish live sensor readings, so refusing
+            // a three-sensor read wholesale would read as "no thermal data on
+            // this path". The sensor it has answers; the parts it cannot fill
+            // (per-sensor range, controller) come back null with the reason.
+            | Command::GetLegacyTempSensor
     ) {
         Ok(())
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, get-fan-info, get-public-power-limit. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
             command.name()
         )))
     }
@@ -129,6 +135,14 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         run(&target, nvoc_core::QueryMacosRmStatus)?.output.power_limit_report(),
                     )?
                 }
+                // The legacy three-sensor thermal view. The array root and the
+                // per-sensor keys are the entry's own; the readings come from
+                // the RUSD temperature sections (live values only), and every
+                // field this backend cannot fill carries its reason, so a null
+                // never has to be read as a measured zero.
+                Command::GetLegacyTempSensor => serde_json::to_value(
+                    run(&target, nvoc_core::QueryMacosRmStatus)?.output.legacy_temp_sensor_report(),
+                )?,
                 // Decoded by the shared `QueryThrottleReasons` operation (core
                 // serves it from the RM snapshot on macOS), so this surface and
                 // pynvoc's `query_throttle_reasons` cannot drift apart. NVML
@@ -298,6 +312,33 @@ mod tests {
         let rated = validate(Command::GetRatedTdp).unwrap_err().to_string();
         assert!(rated.contains("unavailable on macOS RM"), "{rated}");
         assert!(rated.contains("get-public-power-limit"), "{rated}");
+    }
+
+    #[test]
+    fn the_legacy_thermal_view_is_allowed_while_the_threshold_entries_stay_refused() {
+        // Stage 11 item 5, temperature family. The backend publishes live
+        // sensor readings, so the legacy thermal *view* answers from them; the
+        // entries that ask for something this backend never reads stay refused,
+        // with the reason living in the allow-list rather than in a fabricated
+        // number.
+        assert!(validate(Command::GetLegacyTempSensor).is_ok());
+        for command in [
+            // Thresholds (slowdown/shutdown/max) and the temp-limit range
+            // (min/default/max + curve) are policy reads: the RUSD section
+            // carries the reading, not the policy.
+            Command::GetTemperatureThresholds,
+            Command::GetPublicTempLimit,
+            Command::GetTempSim,
+            Command::SetTempLimit,
+            Command::ResetTempLimit,
+        ] {
+            let error = validate(command).unwrap_err().to_string();
+            assert!(error.contains("unavailable on macOS RM"), "{error}");
+        }
+        let allowed = validate(Command::GetTemperatureThresholds)
+            .unwrap_err()
+            .to_string();
+        assert!(allowed.contains("get-legacy-temp-sensor"), "{allowed}");
     }
 
     #[test]
