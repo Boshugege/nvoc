@@ -38,6 +38,13 @@ block additionally gets `mask_consistency()`: the header names the same ten rows
 as both row-bits (0x3ff) and domain bits (0x38007f), so the tool checks its two
 halves against the rows actually present instead of trusting prose.
 
+`0x2080901d` stays out of that list on purpose.  Its only measured structure is a
+repetition inside the first 184 bytes of an `0xA5` diff, which constrains the
+record interior without deciding where a record ends; `check_measured_repetition()`
+re-derives that repetition from `fixtures/tu116-1d-32680-A5.txt` (md5 checked, so
+the bytes cannot drift) and prints both candidate predictions for the third
+occurrence, which is the observation that would settle it.
+
 Usage:
     probe-macos-rm-idle --clkctl-hex > clkctl-hex.txt
     python3 tools/decode-clk-containers.py clkctl-hex.txt [more.txt ...]
@@ -46,9 +53,12 @@ Usage:
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
 import struct
 import sys
+from pathlib import Path
 
 # id -> (paramSize, header, stride).  paramSize is the GSP table value.
 GEOMETRY = {
@@ -77,28 +87,43 @@ VERIFIED = {
 
 # 0x2080901D sits in GEOMETRY but NOT in VERIFIED, so its (40, 1020) split is
 # arithmetic only -- and the arithmetic has four solutions, not one: 40+32*1020,
-# 168+32*1016, 296+32*1012 and 424+32*1008 all equal 32680.  The 2026-10-17
-# 0xA5 run supplies the first *measured* structure for this id: its changed-dword
-# list repeats 128 bytes apart between the group at +36..+56 and the group at
-# +164..+184 (three dwords byte-identical, two differing in a single byte), which
-# is what a per-domain record table looks like.  Two consequences worth keeping
-# straight:
-#   * a 128-byte period cannot tile any of the four arithmetic splits (1012-1020
-#     bytes is 7x128 + 116..124), so a 128 B stride would be evidence the
-#     arithmetic alone could not produce;
-#   * both observed groups are consecutive under (header 36, stride 128), while
-#     under (40, 1020) the first group lands in the head and the second at
-#     rec0+124.
-# The discriminating observation is therefore the *third* group, and it is
-# pre-registered here: a full payload with an 0xA5 background decides it.
+# 168+32*1016, 296+32*1012 and 424+32*1008 all equal 32680.  Three things are
+# true of the 2026-10-17 0xA5 run, and they are worth keeping apart:
+#   * measured: inside its printed window the twelve changed dwords +12..+56
+#     reappear at +140..+184, one 128-byte shift later (a byte-identical copy of
+#     the whole 12-dword run -- the values still carry 0xA5 bytes, so the driver
+#     writes sub-dword fields).  That is a repetition, not yet a stride.
+#   * arithmetic: a 128-byte period cannot tile any of the four splits above
+#     (1012..1020 B is 7*128 + 116..124).  If the records really are 128 B apart,
+#     the size admits exactly one split, 40 + 255*128 -- 255 records, not the 32
+#     domains 0x2080901b carries, which is why the measurement and not this
+#     sentence has to decide.
+#   * unobserved: the printer stops after 40 changed dwords (the summary says 352
+#     of 8170, first @0, last @3376), so nothing past +184 is in the artifact and
+#     the (40, 1020) reading cannot be excluded from it.
+# The discriminating observation is therefore the *third* occurrence, and it is
+# pre-registered below as a distance from the second one, so no group-start
+# convention has to be agreed first.  check_measured_repetition() re-derives the
+# measured line above from the committed fixture; the rest stays on the record.
 MEASURED_REPETITION = {
     0x2080901D: {
         "artifact": "stage-gsp-clkctl-20261017T092536Z/clkctl-offsweep-run1-A5.txt",
-        "group_starts": (36, 164),
-        "observed_stride": 128,
-        "prediction_if_stride_128": "a third group at +292",
-        "prediction_if_head_1020": "the next group starts at +1060 (40 + 1020)",
-        "pending": "a full 0x2080901d payload with an 0xA5 background",
+        "fixture": "probe-macos-rm/fixtures/tu116-1d-32680-A5.txt",
+        "fixture_md5": "bdb3db742ae9bd44990efbffa6eda8e0",
+        "subblock_start": 12,
+        "subblock_dwords": 12,
+        "second_occurrence": 140,
+        "observed_shift": 128,
+        "window_ends_at": 184,
+        "summary": "352/8170 dwords changed (first @0 last @3376)",
+        "prediction_if_period_128": "a third occurrence at +268 (the second, +140, plus 128)",
+        "prediction_if_stride_1020": "a third occurrence at +1160 (the second, +140, plus 1020)",
+        "also_recorded": (
+            "an earlier reading of this same window named the group starts (36, 164) -- the "
+            "same repetition seen 24 bytes further into the record; the convention-free "
+            "statement is the +140 one.  Still pending: a full 0x2080901d payload with an "
+            "0xA5 background, which is what would settle the stride"
+        ),
     },
 }
 
@@ -676,7 +701,12 @@ def cross_check_rust_field_map(verbose=True) -> bool:
         "RANGE_MAX": const("clk_ctrl_entry", "RANGE_MAX"),
         "APPLIED": const("clk_ctrl_entry", "APPLIED"),
     }
-    assert slots == {"OFFSET_KHZ": 44, "RANGE_MIN": 48, "RANGE_MAX": 52, "APPLIED": 56}, slots
+    assert slots == {
+        "OFFSET_KHZ": 44,
+        "RANGE_MIN": 48,
+        "RANGE_MAX": 52,
+        "APPLIED": 56,
+    }, slots
     # The five printed candidate slots are those four plus the next one, moved by
     # the one measured field delta -- so the tool cannot drift from the map.
     delta = 0x24
@@ -692,7 +722,9 @@ def cross_check_rust_field_map(verbose=True) -> bool:
     ), "v1_marshalable no longer covers 3/8/9 -- the V1 naming would stop applying"
     # And the VALUES[2] counter-citation is a different generation: its base and
     # stride are not this family's, and its value block starts past them.
-    assert const("clk_ctrl_entry_v2", "STRIDE") == 772, const("clk_ctrl_entry_v2", "STRIDE")
+    assert const("clk_ctrl_entry_v2", "STRIDE") == 772, const(
+        "clk_ctrl_entry_v2", "STRIDE"
+    )
     assert const("clk_ctrl_entry_v2", "BASE") == 292, const("clk_ctrl_entry_v2", "BASE")
     assert const("clk_ctrl_entry", "STRIDE") == 72
     if verbose:
@@ -700,6 +732,108 @@ def cross_check_rust_field_map(verbose=True) -> bool:
             "  rust field map: V1 offset slot"
             f" {slots['OFFSET_KHZ']} -> RM rec+{slots['OFFSET_KHZ'] - delta}"
             f" ; V2 stride {const('clk_ctrl_entry_v2', 'STRIDE')} is another generation"
+        )
+    return True
+
+
+FIXTURE_ENV = "NVOC_CLKCTL_FIXTURES"
+
+
+def fixture_path(rel: str) -> Path | None:
+    """Resolve a fixture, preferring a local override over the committed copy.
+
+    The committed fixture is what makes a measurement checkable away from the
+    machine that produced it, so a missing file is reported, never assumed.
+    """
+    candidates = []
+    if os.environ.get(FIXTURE_ENV):
+        candidates.append(Path(os.environ[FIXTURE_ENV]) / Path(rel).name)
+    root = Path(__file__).resolve().parents[2]
+    candidates.append(root / rel)
+    candidates.append(Path(rel))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def parse_a5_diff(text: str, mid: int) -> dict[int, int]:
+    """Changed dwords the 0xA5 background diff printed for one command id.
+
+    The printer emits `+OFFSET:a5a5a5a5>VALUE` groups after the id's summary
+    line, so the lines are filtered by id first -- both batteries in the capture
+    use the same diff format.
+    """
+    changed: dict[int, int] = {}
+    for line in text.splitlines():
+        if f"{mid:#010x}" not in line:
+            continue
+        for match in re.finditer(r"\+(\d+):[0-9a-f]{8}>([0-9a-f]{8})", line):
+            changed[int(match.group(1))] = int(match.group(2), 16)
+    return changed
+
+
+def check_measured_repetition(verbose: bool = False) -> bool:
+    """Re-derive the 0x2080901d repetition from the fixture, and keep it scoped.
+
+    Asserts only what the artifact shows: the twelve dwords +12..+56 reappear
+    verbatim one 128-byte shift later at +140..+184, the printed window ends at
+    +184, and the summary's last changed dword (+3376) is far outside that window
+    -- which is why the record stride is still unclaimed.  Returns False (with a
+    printed SKIP) when the fixture is absent, so a missing artifact can never
+    look like a passing check.
+    """
+    rep = MEASURED_REPETITION[0x2080901D]
+    path = fixture_path(rep["fixture"])
+    if path is None:
+        print(
+            f"SKIP measured repetition: no fixture at {rep['fixture']}"
+            f" (set {FIXTURE_ENV} to the directory holding it; the captured copy is"
+            f" outputs/{rep['artifact']})"
+        )
+        return False
+    data = path.read_bytes()
+    digest = hashlib.md5(data).hexdigest()
+    assert digest == rep["fixture_md5"], (
+        f"fixture drifted: {digest} != {rep['fixture_md5']}"
+    )
+    text = data.decode("utf-8", errors="replace")
+    changed = parse_a5_diff(text, 0x2080901D)
+    assert changed, "no 0x2080901d diff lines in the fixture"
+    assert rep["summary"] in text, (
+        "the summary line this entry quotes is not in the fixture"
+    )
+
+    start, count, second = (
+        rep["subblock_start"],
+        rep["subblock_dwords"],
+        rep["second_occurrence"],
+    )
+    assert second == start + rep["observed_shift"], "the shift and the offsets disagree"
+    run = [start + 4 * i for i in range(count)]
+    copy_run = [off + rep["observed_shift"] for off in run]
+    assert copy_run == [second + 4 * i for i in range(count)]
+    missing = [off for off in run + copy_run if off not in changed]
+    assert not missing, f"the fixture does not show the repetition at {missing}"
+    # The window is the printer's first-40 slice, not the whole diff.
+    assert max(changed) == rep["window_ends_at"] == run[-1] + rep["observed_shift"], (
+        sorted(changed)
+    )
+    last_changed = int(re.search(r"last @(\d+)", rep["summary"]).group(1))
+    assert max(changed) < last_changed, (
+        "the printed window would contain the whole diff"
+    )
+    for key in ("prediction_if_period_128", "prediction_if_stride_1020"):
+        assert str(rep["observed_shift"] if "128" in key else 1020) in rep[key]
+    assert (32680 - 40) % 128 == 0 and (32680 - 40) // 128 == 255, (
+        "the 128 B split arithmetic moved"
+    )
+    if verbose:
+        print(
+            f"  measured repetition: 0x2080901d dwords +{run[0]}..+{run[-1]} reappear at"
+            f" +{copy_run[0]}..+{copy_run[-1]} (shift {rep['observed_shift']}); window ends at"
+            f" +{max(changed)} while the diff reaches +{last_changed}, so the stride stays open:"
+            f" {rep['prediction_if_period_128']} vs {rep['prediction_if_stride_1020']}"
         )
     return True
 
@@ -715,11 +849,12 @@ def selftest() -> int:
         for head in range(0, 2048)
         if (32680 - head) % 32 == 0 and (32680 - head) // 32 in (1008, 1012, 1016, 1020)
     ]
-    assert sorted(solutions) == [(40, 1020), (168, 1016), (296, 1012), (424, 1008)], solutions
+    assert sorted(solutions) == [(40, 1020), (168, 1016), (296, 1012), (424, 1008)], (
+        solutions
+    )
     for head, stride in solutions:
         assert stride % 128 != 0, (head, stride)
-    rep = MEASURED_REPETITION[0x2080901D]
-    assert rep["group_starts"][1] - rep["group_starts"][0] == rep["observed_stride"]
+    measured = check_measured_repetition(verbose=True)
     # Synthetic 0x20809025 payload: mask 0x7, three NAFLL-style records with the
     # values this TU116 actually returned (1638400 kHz, -18750/+18750 kHz).
     header, stride = GEOMETRY[0x20809025][1:]
@@ -852,7 +987,45 @@ def selftest() -> int:
     assert "type unknown" in "\n".join(write_set_check(odd, 60, 64))
     assert write_set_model(0x1, rows=((1, 0x0B0B),) + RECORDED_ROWS[1:]) == (None, None)
     cross_check_rust_field_map()
-    print("selftest ok: geometry + round-trip + field decode + write-set model + rust field map")
+    # The committed fixture is the whole point of the check above, so a missing
+    # file is a failure here even though check_measured_repetition() treats it as
+    # a printed SKIP when the tool runs away from the repo.
+    assert measured, (
+        "the committed 0x2080901d fixture is missing; run without --selftest to skip it"
+    )
+    # Negative path: the check has to fail when the bytes stop supporting the
+    # claim -- once at the hash gate, and once at the repetition itself (the hash
+    # is repointed for that second half, because a mutant is not the fixture).
+    import tempfile
+
+    rep = MEASURED_REPETITION[0x2080901D]
+    original = fixture_path(rep["fixture"])
+    assert original is not None
+    bytes_at_start = original.read_bytes()
+    mutant = bytes_at_start.decode().replace("+140:", "+140X:")
+    assert mutant != bytes_at_start.decode(), "the mutation did not change anything"
+    with tempfile.TemporaryDirectory() as tmp:
+        Path(tmp, Path(rep["fixture"]).name).write_text(mutant)
+        os.environ[FIXTURE_ENV] = tmp
+        try:
+            try:
+                check_measured_repetition()
+                raise AssertionError("the hash gate did not fire on a mutated fixture")
+            except AssertionError as err:
+                assert "fixture drifted" in str(err), err
+            rep["fixture_md5"] = hashlib.md5(mutant.encode()).hexdigest()
+            try:
+                check_measured_repetition()
+                raise AssertionError("a missing repetition was not caught")
+            except AssertionError as err:
+                assert "does not show the repetition" in str(err), err
+        finally:
+            rep["fixture_md5"] = hashlib.md5(bytes_at_start).hexdigest()
+            os.environ.pop(FIXTURE_ENV, None)
+    print(
+        "selftest ok: geometry + round-trip + field decode + write-set model + rust field map"
+        " + measured 1d repetition"
+    )
     return 0
 
 

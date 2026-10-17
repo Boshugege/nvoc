@@ -1,0 +1,81 @@
+== probe-macos-rm ==
+[OK] V0.1    open-ctl                           status 0x00000000 (NV_OK)  ctl connection opened (fd 3, service NVAccel)
+[OK] V0.2    open-dev                           status 0x00000000 (NV_OK)  device connection opened (fd 4, service NVAccel)
+[OK] V0.3    card-info                          status 0x00000000 (NV_OK)  gpu_id 0x100  reg 0xf6000000/16MB  fb 0x7f80000000/256MB  irq 1
+[OK] V0.4    register-fd                        status 0x00000000 (NV_OK)  device connection bound to ctl fd
+[OK] V0.5    version-check                      status 0x00000000 (NV_OK)  reply 1, driver reports "610.57.04"
+[OK] V1.1    alloc-root-client                  status 0x00000000 (NV_OK)  handle 0xc1d004e6
+[OK] V1.2    get-attached-ids                   status 0x00000000 (NV_OK)  attached gpuIds 0x100 0xffffffff
+[OK] V1.3    attach-ids                         status 0x00000000 (NV_OK)  gpuId 0x100
+[OK] V1.4    alloc-device                       status 0x00000000 (NV_OK)  handle 0xcafe0001
+[OK] V1.5    alloc-subdevice                    status 0x00000000 (NV_OK)  handle 0xcafe0002
+[OK] V1.6    gpu-classlist-v2                   status 0x00000000 (NV_OK)  95 classes (NVK-proven path)
+[OK] V1.7    client-access-rights               status 0x00000000 (NV_OK)  mask raw 0x0000000f 0x00000000 0x0d1f5010 0x00000001
+[OK] V1.8    gpu-id-info-v2                     status 0x00000000 (NV_OK)  flags 0x9 devInst 0 boardId 0x100 numa -1
+[SKIP] V1.9    memory-smoke                       status 0x00000000 (NV_OK)  idle-only build: memory smoke disabled
+[OK] V2.1    fb-get-info-v2                     status 0x00000000 (NV_OK)  ram 4096MB usable 3887MB bar1 256MB avail 151MB l2 1024KB heap 3804160KB mappable 0KB ramtype 0x11 (NVK-proven path)
+[OK] V2.2    fb-stats-get                       status 0x00000000 (NV_OK)  raw[0..1]=0x00000000 0x00000001
+[OK] V2.8    perf-current-pstate                status 0x00000000 (NV_OK)  P1
+[OK] V2.3    perf-get-powerstate                status 0x00000000 (NV_OK)  powerState 0 (0=AC, 1=battery)
+[OK] V2.4    rated-tdp-get-control              status 0x00000000 (NV_OK)  raw[0..2]=0x00000000 0x00000000 0x00000000 (client/input/vpstate echo)
+[REJECTED] V2.5    edpp-limit-info                    status 0x00000056 (NV_ERR_NOT_SUPPORTED)  -
+[OK] V2.6    gpumon-util-samples-v2             status 0x00000000 (NV_OK)  tracker 46560 count 72 buffer 55872 bytes (ring interpretation pending; use RUSD for utilization)
+[REJECTED] V2.7    pmumon-clk-samples                 status 0x00000056 (NV_ERR_NOT_SUPPORTED)  -
+[OK] V2.13   bios-sku-info                      status 0x00000000 (NV_OK)  board 0x178 sku "250" mod "0" project "G166"
+[OK] V2.14   bus-get-pci-info                   status 0x00000000 (NV_OK)  deviceId 0x218710de subsys 0x401a1458 rev 0xa1 ext 0x2187
+[REJECTED] V2.15   perf-level-info-v2                 status 0x0000001f (NV_ERR_INVALID_ARGUMENT)  capacity 0 -> 0x0 (0 domains returned); capacity 1 -> 0x1f (driver exposes no clock-domain list)
+[SKIP] V2.16   i2c-read-buffer                    status 0x00000000 (NV_OK)  idle-only build: I2C reachability probe disabled
+[SKIP] V2.legacy legacy-probes                      status 0x00000000 (NV_OK)  idle-only build: legacy command probes disabled
+[OK] V2.12   rusd-page                          status 0x00000000 (NV_OK)  NV00DE 0xcafe0003 mapped at 0x10d28e000 len 4KB — poll mask 0x5b (field validity checked separately)
+[OK] V2.12b  rusd-readout                       status 0x00000000 (NV_OK)  temp[gpu=50.75C] pstate 1 gpc 1530000 mem 6000984 sm 0 kHz inst 11413 avg -1 mW limit 100000 tgp 11443 mW fan 0 rpm
+[REJECTED] V2.clkctl gc 2108 A5 seed+0=0xFF             status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+0 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)  cmd 0x2080901b size 2108 seed@+4=0x000000ff -> NV_OK, 106/527 dwords changed (first @0 last @564)
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +0:a5a5a5a5>a5a5a5ff +8:a5a5a5a5>01010000 +12:a5a5a5a5>a5a50000 +16:a5a5a5a5>00000000
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +20:a5a5a5a5>00000000 +24:a5a5a5a5>00000000 +28:a5a5a5a5>00000000 +32:a5a5a5a5>00000000
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +36:a5a5a5a5>00000000 +40:a5a5a5a5>00000000 +44:a5a5a5a5>00000000 +48:a5a5a5a5>00000000
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +52:a5a5a5a5>00000000 +56:a5a5a5a5>a5a5a500 +60:a5a5a5a5>a5a50808 +68:a5a5a5a5>00000000
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +72:a5a5a5a5>00000000 +76:a5a5a5a5>00000000 +80:a5a5a5a5>00000000 +84:a5a5a5a5>00000000
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +88:a5a5a5a5>00000000 +92:a5a5a5a5>00000000 +96:a5a5a5a5>00000000 +100:a5a5a5a5>00000000
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +104:a5a5a5a5>00000000 +112:a5a5a5a5>00000000 +116:a5a5a5a5>00000000 +124:a5a5a5a5>a5a50909
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +132:a5a5a5a5>00000000 +136:a5a5a5a5>00000000 +140:a5a5a5a5>00000000 +144:a5a5a5a5>00000000
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +148:a5a5a5a5>00000000 +152:a5a5a5a5>00000000 +156:a5a5a5a5>00000000 +160:a5a5a5a5>00000000
+[OK] V2.clkctl gc 2108 A5 seed+4=0xFF             status 0x00000000 (NV_OK)    +164:a5a5a5a5>00000000 +168:a5a5a5a5>00000000 +176:a5a5a5a5>00000000 +180:a5a5a5a5>00000000
+[REJECTED] V2.clkctl gc 2108 A5 seed+8=0xFF             status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+8 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+12=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+12 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+16=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+16 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+20=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+20 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+24=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+24 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+28=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+28 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+32=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+32 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+36=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+36 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+40=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+40 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+44=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+44 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+48=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+48 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+52=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+52 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+56=0xFF            status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+56 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 2108 A5 seed+0=all              status 0x00000025 (NV_ERR_INVALID_DATA)  cmd 0x2080901b size 2108 seed@+0 -> 0x00000025 (NV_ERR_INVALID_DATA)
+[REJECTED] V2.clkctl gc 0x2080901a @2052                status 0x0000001f (NV_ERR_INVALID_ARGUMENT)  cmd 0x2080901a size 2052 seed@+-1 -> 0x0000001f (NV_ERR_INVALID_ARGUMENT)
+[REJECTED] V2.clkctl gc 0x2080901c @808                 status 0x00000065 (NV_ERR_TIMEOUT)  cmd 0x2080901c size 808 seed@+-1 -> 0x00000065 (NV_ERR_TIMEOUT)
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)  cmd 0x2080901d size 32680 seed@+-1=0x00000000 -> NV_OK, 352/8170 dwords changed (first @0 last @3376)
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +0:a5a5a5a5>a5a5a5ff +4:a5a5a5a5>07ffffff +8:a5a5a5a5>00000000 +12:a5a5a5a5>00000000
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +16:a5a5a5a5>00000000 +20:a5a5a5a5>00000000 +24:a5a5a5a5>00000000 +28:a5a5a5a5>00000000
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +32:a5a5a5a5>00000000 +36:a5a5a5a5>a5000104 +40:a5a5a5a5>a5a50808 +44:a5a5a5a5>032aa501
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +48:a5a5a5a5>a5a50000 +52:a5a5a5a5>ff1f00a5 +56:a5a5a5a5>00850085 +60:a5a5a5a5>ffffffff
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +64:a5a5a5a5>ffffffff +68:a5a5a5a5>ffffffff +72:a5a5a5a5>ffffffff +76:a5a5a5a5>a501ffff
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +80:a5a5a5a5>00000000 +84:a5a5a5a5>00000000 +88:a5a5a5a5>00000000 +92:a5a5a5a5>ffffffff
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +96:a5a5a5a5>0000ffff +100:a5a5a5a5>00000000 +108:a5a5a5a5>ffffa5a5 +112:a5a5a5a5>ffffffff
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +140:a5a5a5a5>0004a5a5 +144:a5a5a5a5>00ff0093 +148:a5a5a5a5>99ff0000 +152:a5a5a5a5>00ff0000
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +156:a5a5a5a5>ffff0000 +160:a5a5a5a5>ffffffff +164:a5a5a5a5>a5a5ffff +168:a5a5a5a5>a5a50808
+[OK] V2.clkctl gc 0x2080901d @32680               status 0x00000000 (NV_OK)    +172:a5a5a5a5>032aa501 +176:a5a5a5a5>a5a50000 +180:a5a5a5a5>ff2100a5 +184:a5a5a5a5>00860086
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)  cmd 0x20809025 size 7188 seed@+-1=0x00000000 -> NV_OK, 34/1797 dwords changed (first @0 last @504)
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +0:a5a5a5a5>a5a5a5ff +4:a5a5a5a5>00000007 +12:a5a5a5a5>00000064 +16:a5a5a5a5>a5a50100
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +20:a5a5a5a5>01030101 +24:a5a5a5a5>00000001 +28:a5a5a5a5>00190000 +32:a5a5a5a5>00000000
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +36:a5a5a5a5>00000000 +40:a5a5a5a5>ffffb6c2 +44:a5a5a5a5>0000493e +48:a5a5a5a5>a5ff0100
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +52:a5a5a5a5>a5000000 +56:a5a5a5a5>a5a50000 +244:a5a5a5a5>01040101 +248:a5a5a5a5>00000001
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +252:a5a5a5a5>00190000 +256:a5a5a5a5>00000000 +260:a5a5a5a5>00000000 +264:a5a5a5a5>ffffb6c2
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +268:a5a5a5a5>0000493e +272:a5a5a5a5>a5ff0100 +276:a5a5a5a5>a5000000 +280:a5a5a5a5>a5a50000
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +468:a5a5a5a5>01050101 +472:a5a5a5a5>00000001 +476:a5a5a5a5>00190000 +480:a5a5a5a5>00000000
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +484:a5a5a5a5>00000000 +488:a5a5a5a5>ffffb6c2 +492:a5a5a5a5>0000493e +496:a5a5a5a5>a5ff0100
+[OK] V2.clkctl gc 0x20809025 @7188                status 0x00000000 (NV_OK)    +500:a5a5a5a5>a5000000 +504:a5a5a5a5>a5a50000
+[REJECTED] V2.clkctl gc 0x20809026 @5332                status 0x00000065 (NV_ERR_TIMEOUT)  cmd 0x20809026 size 5332 seed@+-1 -> 0x00000065 (NV_ERR_TIMEOUT)
+== done (rc 0) ==
