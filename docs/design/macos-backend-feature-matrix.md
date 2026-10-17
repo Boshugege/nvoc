@@ -1271,3 +1271,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (3) **验证** ✔：`cargo metadata` rc0；Linux 上 vulkan-only 路径 rc0 且 `cudarc` 命中 **0**；external 路径 rc0；默认路径 rc0；fmt／clippy `-D warnings` rc0；两路单测 **66 passed 0 failed**；**真机 macOS** `OGKM=… --no-default-features --features stressor-bundled-vulkan` **65 passed 0 failed**（含写入门控测试真实执行 ok）⇒ **macOS 非 CUDA 捆绑构建链已实测可用** ✔；该 stressor 的 **Vulkan 实际运行仍"已实现待实测"**（wedge ✗）。
 (4) **自造缺陷修复** ✗：`macos_write_gate_follows_the_backend_capability`（本分支 `9ff687f`，我自己引入）断言 `refused == mutates` ⇒ 非 macOS 上恒失败（本机三路 feature 均复现），macOS 上又是同义反复 ⇒ 现改为：门控无效时提前返回、先钉"命令集合非空会改设置"、macOS 上断言四条命令均要求提权（真机实测通过）✔。
 (5) **设备访问** ✔：本轮仅 wedge 轮询一次（`0x62`，uptime `1 day, 4 hrs`，同一 boot）；真机 `cargo test` 为**纯单元测试、不访问设备** ⇒ 未重启、未写入、无性能操作。
+
+### 本轮追加七十一（2026-10-18，`RATED_TDP` 请求结构核对：**不是缺字段，是种子与预期答案同值**）
+
+(1) **选择依据** ✔：功能表自己写的下一步是"重发＋查请求结构是否缺字段"✔。
+(2) **命令在公开树里有声明** ✔（与 CLK 族相反 ⇒ 必须逐条查，不能一概而论 ✗）：`ctrl2080perf.h:399` 定义 `0x2080206e` ✔；`:405-418` 给出权威结构 `{client[in], input[in/out], vPstateType[in]}` ✔，文档＝"retrieves the current requested RATED_TDP action" ✔ ⇒ **唯一输出字段是 `input`** ✔；驱动分发表亦见 `g_subdevice_nvoc.c:11139` ✔；动作枚举 `DEFAULT=0/FORCE_EXCEED=1/FORCE_LIMIT=2/FORCE_LOCK=3/FORCE_FLOOR=4` ✔；status 命令 `0x2080206d`（探针早已发送 ✔）。
+(3) **不是缺字段** ✗ ⇒ 请求三个字段齐全、12 B 即整结构 ✔；**缺陷是种子**：探针 `memset` 后只填 client ⇒ `input=0=DEFAULT`，而未被限速的 client 正确答案**本就是 0** ⇒ 输出里的"echo"与功能表的"仅输入回显"都是**假设而非测量** ✗。
+(4) **已加入可证伪只读用例** ✔：保留零种子对照遍，新增 `input=FORCE_LIMIT(2)` 播种遍 ✔；预注册预测＝上一个答 `DEFAULT(0)` 的 client 在此仍应为 0，若恰回 2 才是真回显 ✔（同会话对照排除"所有 client 恰好都 FORCE_LIMIT" ✔）；`GET_CONTROL` 不仲裁不 latch，SET `0x2080206f` **仍未发送** ✗。
+(5) **验证范围** ✔：真机 macOS `OGKM=… sh build.sh` ⇒ **`built probe-macos-rm-idle (profile idle)`** ✔；**未运行** ✗（GSP `0x62`）⇒ **已实现待实测** ✔。分类：结构/字段/枚举＝已定位（公开头文件 ✔）；数值＝已实现待实测；写＝待授权 ✔。
+(6) **设备访问** ✔：本轮仅一次 wedge 轮询（`0x62`，uptime `1 day, 4:13`，同一 boot）；真机编译不访问设备 ⇒ 未重启、未写入、无性能操作。

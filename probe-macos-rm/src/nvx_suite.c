@@ -740,6 +740,37 @@ static void item_rated_tdp_reads(nvx_ctx *c)
                  (NvU32)p.vPstateType);
     }
 
+    /* Same call, discriminating seed. The header documents the parameter
+     * struct as {client[in], input[in/out], vPstateType[in]}: `input` is the
+     * only output field, and the command's contract is "retrieves the current
+     * requested RATED_TDP action". Zeroing the struct therefore seeds
+     * input = NV2080_CTRL_PERF_RATED_TDP_ACTION_DEFAULT (0), which is also the
+     * value a correct answer returns for any client that is not being forced --
+     * so "the reply echoed my input" was an assumption the zero seed cannot
+     * falsify. This pass seeds FORCE_LIMIT(2) instead and reports whether the
+     * driver replaced it. PREDICTION, registered before the run: if the driver
+     * fills in the current action, the clients that answered DEFAULT(0) above
+     * must answer 0 here as well, not 2; a reply of exactly 2 for those clients
+     * means the field really is an echo. A rejection here (or in the STATUS
+     * call below) is also a result. Read-only: GET_CONTROL neither arbitrates
+     * nor latches, and its SET twin 0x2080206f is still never sent. */
+    for (NvU32 cl = 0; cl < NV2080_CTRL_PERF_RATED_TDP_CLIENT_NUM_CLIENTS; ++cl) {
+        NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS p;
+        memset(&p, 0, sizeof p);
+        p.client = (NV2080_CTRL_PERF_RATED_TDP_CLIENT)cl;
+        p.input = NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_LIMIT;
+        NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL, &p);
+        nvx_emit(c, "V2.rtdp", "rated-tdp-get-control seed=FORCE_LIMIT(2)", st,
+                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "client %s(%u): seeded 2 -> action %s(%u) vPstate %u%s",
+                 rated_tdp_client_name(cl), cl,
+                 rated_tdp_action_name((NvU32)p.input), (NvU32)p.input,
+                 (NvU32)p.vPstateType,
+                 (NvU32)p.input == 2u
+                     ? "  [unchanged: either an echo or every client is FORCE_LIMIT]"
+                     : "  [driver replaced the seed -> input is a real output]");
+    }
+
     /* Negative control: indices outside [0,NUM_CLIENTS) must be rejected by the
      * RM, which proves the accepted calls above are validated rather than a
      * blanket NV_OK. Still read-only. */

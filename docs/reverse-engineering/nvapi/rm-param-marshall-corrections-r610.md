@@ -1292,3 +1292,24 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 `auto-optimizer/src/main.rs` 的 `macos_write_gate_follows_the_backend_capability`（由**本分支 `9ff687f`（我自己的提交）**引入 ✗）断言 `refused == mutates`，而 `refused = cfg!(target_os="macos") && mutates && !write_supported` ✗ ⇒ **非 macOS 主机上 `refused` 恒为 false**，断言必然失败（本机 Linux 上三种 feature 路都复现 ✗），尽管注释自称"在其他 target 上是空转的" ✗；而在 macOS 上该断言又退化为**同义反复** ✗（由公式本身构造出相等 ✗）⇒ 两头都没证明什么 ✔。
 修法 ✔：门控无法生效时**提前返回** ✔；先钉住"被固定的命令集合中至少有一条会改设置"（防止命令表过期导致空转通过 ✔）；在 macOS 上改为断言**非平凡事实**——四条命令都要求提权 ✔。真机 macOS 上该测试**真实执行并通过** ✔（见 36.3 表 ✔）。
 **设备访问**：本轮仅 wedge 轮询一次（`0x00000062`，uptime `1 day, 4 hrs`）；真机那次 `cargo test` 是**纯单元测试、不访问设备** ✔ ⇒ 无写入、无性能操作 ✔。
+
+## 37. `RATED_TDP` 请求结构核对：不是"缺字段"，是**种子与预期答案同值**（2026-10-18）
+
+**选择依据** ✔：功能表把 `RATED_TDP` 记为"命令 NV_OK 但载荷仅输入回显 ⇒ 尚未取得数值"，并写明下一步＝"重发＋**查请求结构是否缺字段**"✔；本轮就把这句话查清 ✔（纯静态＋真机编译 ✔，不新增设备访问 ✗）。
+
+### 37.1 这条命令**在公开树里有声明**（与 CLK 族相反，所以必须逐条查而不是一概而论）✔
+- `src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080perf.h:399`：`#define NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL (0x2080206e)` ✔；
+- 同文件 `:405-418` 给出权威结构 ✔：`typedef struct NV2080_CTRL_PERF_RATED_TDP_CONTROL_PARAMS { NV2080_CTRL_PERF_RATED_TDP_CLIENT client; /*[in]*/ NV2080_CTRL_PERF_RATED_TDP_ACTION input; /*[in/out]*/ NV2080_CTRL_PERF_RATED_TDP_VPSTATE_TYPE vPstateType; /*[in]*/ }` ✔，命令文档为"This command **retrieves the current requested RATED_TDP action** corresponding to the specified client" ✔ ⇒ **唯一输出字段是 `input`** ✔；
+- 该 id 也出现在驱动自带的分发表 `src/nvidia/generated/g_subdevice_nvoc.c:11139` ✔（`methodId=0x2080206e` ✔）；
+- 动作枚举 ✔：`DEFAULT=0 / FORCE_EXCEED=1 / FORCE_LIMIT=2 / FORCE_LOCK=3 / FORCE_FLOOR=4` ✔；`STATUS_PARAMS_MESSAGE_ID = 0x6D` ⇒ status 命令 `0x2080206d` ✔（探针**早已发送** ✔）。
+⇒ 结论 ✔：请求**没有缺字段**（三个声明字段都在 ✔、12 B 即整结构 ✔）；缺的是**能区分"真输出"与"回显"的种子** ✗。
+### 37.2 真正的混淆：`memset` 种子 = `0` = `ACTION_DEFAULT`
+探针两处都用 `memset(&p, 0, sizeof p)` 再只填 `client` ✔（`nvx_suite.c:512-514` ✔、`:731-734` ✔）⇒ 种子 `input = 0 = ACTION_DEFAULT` ✔ —— 而**未被强制限速的 client 的正确答案本来就是 0** ✗ ⇒ 输出串里那句 `(client/input/vpstate echo)`（`:517` ✔）以及功能表"仅输入回显"都是**假设，不是测量** ✗。这正是本轮要纠的错 ✔。
+### 37.3 已加入的**可证伪**只读用例（预注册预测）✔
+在 `item_rated_tdp_reads` 内、零种子那一遍之后，**保留原遍**并**新增**一�遍 ✔：对每个 client 以 `input = FORCE_LIMIT(2)` 播种 ✔，并把结果分类打印 ✔。
+**预注册预测**（写进代码注释，先于运行登记 ✔）：若驱动真的填当前动作，则**上一遍答 `DEFAULT(0)` 的 client 在这里必须仍答 0** ✔；若这些 client 回来**恰好是 2**，则该字段确为回显 ✔；因为两遍在同一会话内，这同时排除了"所有 client 恰好都是 FORCE_LIMIT"的解释 ✔。零种子一遍因此**不是冗余**，而是这次判断的对照 ✔。
+**只读性** ✔：`GET_CONTROL` 既不做仲裁也不 latch；SET 孪生 `0x2080206f` **仍未发送** ✗ ✔。
+### 37.4 验证范围与状态 ✔
+- 真机 macOS 编译 ✔：`OGKM=… sh build.sh` ⇒ **`built probe-macos-rm-idle (profile idle)`** ✔（按交接文档 §7.0 只认这一行 ✔）。
+- **未运行** ✗：GSP 仍 `0x62` ✔（本轮仅一次 wedge 轮询：`0x00000062`，uptime `1 day, 4:13`，同一 boot ✔）⇒ 新用例属**已实现待实测** ✔。
+- 分类 ✔：结构/字段/枚举＝**已定位（公开头文件直接给出 ✔，非推断）**；各 client 当前动作与 RATED_TDP 数值＝**已实现待实测**；写＝**待授权** ✔。
