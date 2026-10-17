@@ -65,6 +65,7 @@ int nvx_stage2(nvx_ctx *c);                    /* read-only battery        */
 int nvx_stage2_tierb_read(nvx_ctx *c);
 /* Explicit, read-only RATED_TDP GET probe: the one public perf-side read pair
  * (NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL). Never sends its SET twin. */
+int nvx_stage2_anchor_read(nvx_ctx *c);
 int nvx_stage2_rated_tdp_read(nvx_ctx *c);
 /* Gated write: RATED_TDP arbitration SET with mandatory pre-record, readback
  * and restore-on-exit. Only reachable as `--write --rated-tdp-set C:A`; it is

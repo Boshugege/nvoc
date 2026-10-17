@@ -107,6 +107,12 @@ static void usage(void)
         "                   status); never sends the SET twin\n"
         "  --pm-read        read-only internal PM/PFM GETs (PM1 state, V/P-state\n"
         "                   mapping, boost-sync info; SET twins are not sent)\n"
+        "  --anchor-read    four documented GETs at measured sizes that decide\n"
+        "                   whether the legacy forward still reaches the GSP at\n"
+        "                   all: 0x2080b201@2444 (NV_OK through the wedge),\n"
+        "                   0x2080b202@3232 (0x62), 0x2080a0ff@776 (0x56 = the\n"
+        "                   forward is alive, 0x62 = it is not), and\n"
+        "                   0x2080ffff@776 (must be 0x1b).  GET only, no scan\n"
         "  --thermal-read   read-only THERMAL_SYSTEM_EXECUTE_V2 GET batch\n"
         "                   (sensor count/readings/ranges; public opcodes)\n"
         "  --service S      pin the user client: nvrm | nvaccel | auto (default\n"
@@ -168,6 +174,7 @@ int main(int argc, char **argv)
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
     int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
+    int anchor_read = 0;
     int clklevel_read = 0, clkdom_read = 0, clkctl_read = 0, clkctl_hex = 0;
     int clkctl_offsweep = 0, clkvf_read = 0;
     int clkdoc_read = 0;
@@ -197,6 +204,7 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--tierb-read")) tierb_read = 1;
         else if (!strcmp(argv[i], "--rated-tdp-read")) rated_tdp_read = 1;
+        else if (!strcmp(argv[i], "--anchor-read")) anchor_read = 1;
         else if (!strcmp(argv[i], "--thermal-read")) thermal_read = 1;
         else if (!strcmp(argv[i], "--pm-read")) pm_read = 1;
         else if (!strcmp(argv[i], "--perf-read")) perf_read = 1;
@@ -314,6 +322,11 @@ int main(int argc, char **argv)
     if (rated_tdp_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_rated_tdp_read(&g_ctx) != 0) rc = 1;
+    }
+
+    if (anchor_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_anchor_read(&g_ctx) != 0) rc = 1;
     }
 
     if (thermal_read) {

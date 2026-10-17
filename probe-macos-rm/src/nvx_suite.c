@@ -790,6 +790,102 @@ int nvx_stage2_rated_tdp_read(nvx_ctx *c)
     return 0;
 }
 
+static void item_anchor_reads(nvx_ctx *c);
+
+int nvx_stage2_anchor_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.anchor", "anchor-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_anchor_reads(c);
+    return 0;
+}
+
+/* Documented-anchor battery (--anchor-read).
+ *
+ * Four ids at sizes this host has already measured, so this is not a size or
+ * id scan.  It answers the one question the other batteries cannot answer
+ * while the clock/perf families return 0x62: is `RmGssLegacyRpcCmd` still
+ * *reaching the GSP* at all?
+ *
+ *   0x2080b201 @2444  VOLT rails INFO    -- still NV_OK through the wedge
+ *   0x2080b202 @3232  VOLT rails STATUS  -- 0x62 through the wedge
+ *   0x2080a0ff @776   non-privileged id that does not exist
+ *       0x56 => the forward reached the GSP and the GSP answered "no such
+ *               method"  (forward path ALIVE)
+ *       0x62 => the forward itself is failing, so *no* private id can be
+ *               GSP-answered right now (forward path DEAD) -- and then
+ *               0x2080b201's NV_OK cannot have come from the GSP either
+ *   0x2080ffff @776   privileged bits, unprivileged caller
+ *       0x1b => the host privilege gate, before any forward (expected)
+ *
+ * All four are GET-only, all four have been sent before, and three of them
+ * are the anchors the rest of the suite already relies on.  Nothing here is a
+ * write and nothing here is new ground. */
+static void item_anchor_reads(nvx_ctx *c)
+{
+    static const struct { const char *name; NvU32 cmd; NvU32 size; } a[] = {
+        { "anchor volt rails INFO   0x2080b201", 0x2080b201u, 2444 },
+        { "anchor volt rails STATUS 0x2080b202", 0x2080b202u, 3232 },
+        { "anchor unknown non-priv  0x2080a0ff", 0x2080a0ffu,  776 },
+        { "anchor privileged bit    0x2080ffff", 0x2080ffffu,  776 },
+    };
+    static unsigned char buf[3232];
+    NvU32 got[4] = { 0, 0, 0, 0 };
+    const unsigned n = (unsigned)(sizeof a / sizeof a[0]);
+
+    for (unsigned i = 0; i < n; ++i) {
+        memset(buf, 0, a[i].size);
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  a[i].cmd, buf, a[i].size);
+        got[i] = st;
+        /* Count non-zero dwords so a "NV_OK but nothing written" answer is
+         * visible as such (that is how the b201 anchor is told apart from a
+         * stub that returns NV_OK with an untouched block). */
+        unsigned nz = 0, first = 0, last = 0;
+        for (unsigned off = 0; off + 4 <= a[i].size; off += 4) {
+            NvU32 w;
+            memcpy(&w, buf + off, sizeof w);   /* buf is byte-aligned BSS */
+            if (w != 0) {
+                if (!nz) first = off;
+                last = off;
+                ++nz;
+            }
+        }
+        nvx_emit(c, "V2.anchor", a[i].name, st,
+                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "cmd 0x%08x size %u -> %s; %u non-zero dword(s), first @%u last @%u",
+                 a[i].cmd, a[i].size, nvx_status_name(st), nz, first, last);
+    }
+
+    /* Verdict: the whole point of sending the 0xa0ff anchor next to b201. */
+    if (got[2] == 0x00000056u) {
+        nvx_emit(c, "V2.anchor", "anchor verdict", got[2], NVX_V_OK,
+                 "forward path ALIVE: 0x2080a0ff returned 0x56 (the GSP answered "
+                 "'no such method'), so 0x62 is GSP-internal state -- the "
+                 "0x2080b201 NV_OK is compatible with a GSP-served id whose "
+                 "own handler is not in the faulted subsystem");
+    } else if (got[2] == 0x00000062u) {
+        nvx_emit(c, "V2.anchor", "anchor verdict", got[2], NVX_V_REJECTED,
+                 "forward path DEAD: 0x2080a0ff also returned 0x62, so no "
+                 "private id is GSP-answered right now -- and therefore the "
+                 "0x2080b201 NV_OK did NOT come from the GSP: that id is "
+                 "answered on the host (re-opens doc section 7)");
+    } else {
+        nvx_emit(c, "V2.anchor", "anchor verdict", got[2], NVX_V_REJECTED,
+                 "UNEXPECTED anchor answer for 0x2080a0ff; record it as-is, "
+                 "no model is promoted");
+    }
+    if (got[3] != 0x0000001bu) {
+        nvx_emit(c, "V2.anchor", "anchor privilege check", got[3], NVX_V_REJECTED,
+                 "0x2080ffff did NOT return 0x1b: the host privilege gate did "
+                 "not fire as documented -- re-read section 2.1 before trusting "
+                 "any privilege reasoning");
+    }
+}
+
+
 /* Thermal System V2 read probe (--thermal-read).
  *
  * NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2 (0x20800513) is a public, in-tree
