@@ -115,6 +115,15 @@ static void usage(void)
         "  --clkdom-read   read-only retry of the clock-domain controls with\n"
         "                   the NVAPI (version|size) magic removed from the RM\n"
         "                   param block; short derived size list, GET only\n"
+        "  --clkctl-read   read-only clock-domain offset/range read at the\n"
+        "                   GSP-verified paramSize (0x2080901b@2108), with the\n"
+        "                   written-dword map and the 60 + 32*64 record decode\n"
+        "  --clkctl-hex    full-byte hex dump of the read-only domain blocks\n"
+        "                   (0x20809019@12336, 0x20809025@7188) for offline\n"
+        "                   record-layout decode\n"
+        "  --clkctl-offsweep  bounded GET probe: 0xA5 background + per-header-\n"
+        "                   dword 0xFF seed to locate the 0x2080901b mask field,\n"
+        "                   plus the neighbouring CLK ids at their GSP sizes\n"
         "  --clklevel-read  read-only PERF_GET_LEVEL_INFO_V2 (0x2080200b\n"
         "                   @780) across levels/overclock flag; decodes\n"
         "                   per-domain current/default/min/max kHz\n"
@@ -150,7 +159,8 @@ int main(int argc, char **argv)
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
     int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
-    int clklevel_read = 0, clkdom_read = 0, clkvf_read = 0;
+    int clklevel_read = 0, clkdom_read = 0, clkctl_read = 0, clkctl_hex = 0;
+    int clkctl_offsweep = 0, clkvf_read = 0;
     int clkdoc_read = 0;
     int clkobj_read = 0;
     int clk_track_sec = 0;
@@ -183,6 +193,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--perf-read")) perf_read = 1;
         else if (!strcmp(argv[i], "--clklevel-read")) clklevel_read = 1;
         else if (!strcmp(argv[i], "--clkdom-read")) clkdom_read = 1;
+        else if (!strcmp(argv[i], "--clkctl-read")) clkctl_read = 1;
+        else if (!strcmp(argv[i], "--clkctl-hex")) clkctl_hex = 1;
+        else if (!strcmp(argv[i], "--clkctl-offsweep")) clkctl_offsweep = 1;
         else if (!strcmp(argv[i], "--reg-read")) reg_read = 1;
         else if (!strcmp(argv[i], "--clkvf-read")) clkvf_read = 1;
         else if (!strcmp(argv[i], "--clkdoc-read")) clkdoc_read = 1;
@@ -322,6 +335,18 @@ int main(int argc, char **argv)
     if (clkdom_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_clkdom_read(&g_ctx) != 0) rc = 1;
+    }
+    if (clkctl_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_clkctl_read(&g_ctx) != 0) rc = 1;
+    }
+    if (clkctl_hex) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_clkctl_hex(&g_ctx) != 0) rc = 1;
+    }
+    if (clkctl_offsweep) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_clkctl_offsweep(&g_ctx) != 0) rc = 1;
     }
 
     if (clkvf_read) {

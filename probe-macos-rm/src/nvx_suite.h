@@ -93,6 +93,21 @@ int nvx_stage2_clk_level_read(nvx_ctx *c);
  * marshalling-corrections note.  A short, explicitly-derived size list, not a
  * scan; every case is a GET and SET ids are refused. */
 int nvx_stage2_clkdom_read(nvx_ctx *c);
+/* Read-only clock-domain offset/range read at the GSP-verified paramSize
+ * (0x2080901b @2108, from the TU116 GSP firmware's own export table), with the
+ * written-dword map and the 60 + 32*64 record decode printed next to it. */
+int nvx_stage2_clkctl_read(nvx_ctx *c);
+/* Full-buffer hex dump (16 bytes per line) of the two most informative
+ * read-only domain blocks -- domains-get-info 0x20809019@12336 and
+ * freq-ctrl-info 0x20809025@7188 -- so the record layout can be decoded
+ * offline without guessing at strides.  GET only; SET ids are refused. */
+int nvx_stage2_clkctl_hex(nvx_ctx *c);
+/* Bounded, derived-size probe of the clock-domain value containers: a
+ * 0xA5A5A5A5 background makes EVERY driver-written dword visible (a zero
+ * background hides writes of zero), then the 60-byte header is swept one
+ * dword at a time with a 0xFF seed to locate the input mask field, and the
+ * neighbouring CLK commands' GSP-table sizes are read once each.  GET only. */
+int nvx_stage2_clkctl_offsweep(nvx_ctx *c);
 /* Explicit, read-only private ClockClient / VfPoints / PerfVfe GET census:
  * the read half of the same wires the Windows backend uses for clock-domain
  * and V/F reads. Scans candidate paramSize values (the driver answers

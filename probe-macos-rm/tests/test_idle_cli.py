@@ -86,6 +86,21 @@ int nvx_stage2_clkdom_read(nvx_ctx *c) {
     puts("FAKE clkdom");
     return 0;
 }
+int nvx_stage2_clkctl_read(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE clkctl");
+    return 0;
+}
+int nvx_stage2_clkctl_hex(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE clkctl-hex");
+    return 0;
+}
+int nvx_stage2_clkctl_offsweep(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE clkctl-offsweep");
+    return 0;
+}
 int nvx_stage2_clk_read(nvx_ctx *c) {
     if (!chain || !c->hSubdevice) abort();
     puts("FAKE clkvf");
@@ -263,6 +278,27 @@ class IdleCli(unittest.TestCase):
         asked = self.run_cli("--stages", "0", "--reg-read")
         self.assertEqual(asked.returncode, 0, asked.stderr)
         self.assertEqual(asked.stdout.count("FAKE regread"), 1)
+
+    def test_clkctl_reads_are_explicit_opt_in(self):
+        """The GSP-verified clock-domain offset read is opt-in and off by default."""
+        default = self.run_cli("--stages", "0")
+        self.assertNotIn("clkctl", default.stdout)
+        asked = self.run_cli("--stages", "0", "--clkctl-read")
+        self.assertIn("FAKE clkctl", asked.stdout)
+
+    def test_clkctl_hex_dump_is_explicit_opt_in(self):
+        """The domain-block hex dump is opt-in and off by default."""
+        default = self.run_cli("--stages", "0")
+        self.assertNotIn("clkctl-hex", default.stdout)
+        asked = self.run_cli("--stages", "0", "--clkctl-hex")
+        self.assertIn("FAKE clkctl-hex", asked.stdout)
+
+    def test_clkctl_offsweep_is_explicit_opt_in(self):
+        """The bounded value-container probe is opt-in and off by default."""
+        default = self.run_cli("--stages", "0")
+        self.assertNotIn("clkctl-offsweep", default.stdout)
+        asked = self.run_cli("--stages", "0", "--clkctl-offsweep")
+        self.assertIn("FAKE clkctl-offsweep", asked.stdout)
 
     def test_clkdom_reads_are_explicit_opt_in(self):
         plain = self.run_cli("--stages", "012")

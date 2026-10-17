@@ -1317,6 +1317,483 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
     return 0;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* GSP-side clock-domain offset read (--clkctl-read)                   */
+/* ------------------------------------------------------------------ */
+/* RESPONDER IDENTIFIED (2026-10-17)
+ * ---------------------------------
+ * The private clock/voltage ids (0x20809061, 0x2080B201, ...) answer NV_OK
+ * even though the loaded NVRM's own NVOC export table has no row for them and
+ * the literal id appears nowhere in the host binaries.  The path is:
+ *
+ *   NVRMUserClient::esc(NV_ESC_RM_CONTROL)            (kexts/NVRM/NVRM.cpp)
+ *     -> rm_ioctl -> escape.c:793 case NV_ESC_RM_CONTROL
+ *     -> Nv04ControlWithSecInfo -> _nv04ControlWithSecInfo
+ *     -> RmDeprecatedGetControlHandler(pArgs)         (entry_points.c:498)
+ *        - rmDeprecatedControlTable rows = host NVOC ids only
+ *        - else IsGssLegacyCall(cmd) = !!(cmd & RM_GSS_LEGACY_MASK)
+ *          with RM_GSS_LEGACY_MASK = 0x00008000
+ *          (rmapi_deprecated.h:41) and IS_GSP_CLIENT(pGpu)
+ *     -> RmGssLegacyRpcCmd()                          (rmapi_gss_legacy_control.c)
+ *        "We no longer support these in RM, but ... just forward all of them
+ *         to GSP and let it deal with what is or isn't valid."
+ *        The only local checks are ptr/size null-consistency, the privileged
+ *        bit (0xC000) against RS_PRIV_LEVEL_USER_ROOT, then
+ *        pRmApi->Control(pGpu's physical RM API, cmd, params, paramsSize).
+ *
+ * So for this GPU (GSP client) the *responder is the GSP firmware*, and the
+ * paramSize that matters is the GSP's own table entry, not the NVAPI caller
+ * struct.  That explains every earlier observation at once:
+ *   - no host table row and no id literal: the host only inspects bit 0x8000;
+ *   - a *size-dependent* 0x1f: the GSP validates its own param size;
+ *   - 0x2080FFFF -> 0x1b (INSUFFICIENT_PERMISSIONS): 0xFFFF has both legacy
+ *     bits (0xC000 = privileged) and this process is not root;
+ *   - 0x2080A0FF -> 0x56: forwarded, but the GSP has no such method;
+ *   - --service nvrm and nvaccel byte-identical: both reach the same GSP.
+ * Reproduce the check with: probe-macos-rm/tools/extract-gsp-method-table.py
+ * on /Users/Shared/nvfw/nvidia/<ver>/gsp_tu10x.bin (ELF64/RISC-V, .fwimage).
+ *
+ * SIZES (from that table; do not confuse with the NVAPI-layer struct sizes):
+ *   0x20809019 domains-get-info     12336     0x2080901b domains-get-control 2108
+ *   0x20809006 measure-freq             8     0x2080901c                     808
+ *   0x20809061 vfp(582) get-info      776     0x20809062 vfp(582) get-status 648
+ *   0x20809021 vfp get-info         33288     0x20809022 vfp get-status     623112
+ *   0x20809023 vfp get-control      66060     0x20809025 freq-ctrl info      7188
+ *   0x20809026 freq-ctrl status      5332    0x2080b201 rails get-info      2444
+ *   0x2080b202 rails get-status      3232    0x2080b213 rails get-control   1036
+ * nvapi-rs clock.rs:1424 records the NVAPI *caller* struct as 0x964 = 2404
+ * (mask@+8, records @+100 stride 72).  The RM block for the same control is
+ * 2108, which is exactly 60 + 32*64, i.e. the same field offsets projected on
+ * a 64-byte record (type @+0, offset_kHz @+44, range_min @+48, range_max @+52,
+ * applied @+56, mask @+8 kept).  This pass TESTS that projection instead of
+ * asserting it: it prints the driver-written dword map, then the decode.
+ *
+ * Read-only: every case is a documented GET; the SET twins
+ * (0x2080d01c / 0x2080d024 / 0x2080f214) are in nvx_known_set_ids and are
+ * refused before anything is sent.  0x208090a2 (524 B, GET or SET unknown) is
+ * deliberately NOT sent here.
+ */
+typedef struct {
+    const char *name;
+    NvU32 cmd;
+    unsigned size;
+    NvU32 mask;          /* seeded at +8 when mask_off != ~0u */
+    unsigned mask_off;
+    int prefill;         /* 0 = zeroed, 1 = small dword counter          */
+    int repeat_1s;       /* read twice, one second apart                 */
+} clkctl_case;
+
+static const clkctl_case nvx_clkctl[] = {
+    /* The offset/range read: GSP-verified size 2108, not the NVAPI 2404. */
+    { "domains-get-control 2108 mask=0xFF",  0x2080901bu, 2108, 0x000000ffu, 8, 0, 0 },
+    { "domains-get-control 2108 mask=all",   0x2080901bu, 2108, 0xffffffffu, 8, 0, 0 },
+    { "domains-get-control 2108 mask=0",     0x2080901bu, 2108, 0x00000000u, 8, 0, 0 },
+    { "domains-get-control 2108 counter",    0x2080901bu, 2108, 0x000000ffu, 8, 1, 0 },
+    /* The 2108 B answer puts a 0xFF domain mask at dword 0 and overwrites the
+     * +8 seed, so the RM block's own input mask is at +0 -- test that. */
+    { "domains-get-control 2108 in@0=0xFF",  0x2080901bu, 2108, 0x000000ffu, 0, 0, 0 },
+    { "domains-get-control 2108 in@0=all",   0x2080901bu, 2108, 0xffffffffu, 0, 0, 0 },
+    { "domains-get-control 2108 in@0=0x3",   0x2080901bu, 2108, 0x00000003u, 0, 0, 0 },
+    { "domains-get-control 2108 in@0=FF cnt",0x2080901bu, 2108, 0x000000ffu, 0, 1, 0 },
+    /* The a5-background sweep (see --clkctl-offsweep) showed the driver only
+     * fills records when the input mask sits at +4; +0 and +8 are rejected
+     * (0x25 NV_ERR_INVALID_DATA) unless they are zero.  These are the
+     * zero-background repeats of that one derived offset. */
+    { "domains-get-control 2108 in@4=0xFF",  0x2080901bu, 2108, 0x000000ffu, 4, 0, 0 },
+    { "domains-get-control 2108 in@4=all",   0x2080901bu, 2108, 0xffffffffu, 4, 0, 0 },
+    { "domains-get-control 2108 in@4=3",     0x2080901bu, 2108, 0x00000003u, 4, 0, 0 },
+    { "domains-get-control 2108 in@4=FF cnt",0x2080901bu, 2108, 0x000000ffu, 4, 1, 0 },
+    { "domains-get-info 12336",              0x20809019u, 12336, 0, ~0u, 0, 0 },
+    { "measure-freq 8 (x2, 1 s)",            0x20809006u, 8, 0, ~0u, 0, 1 },
+    { "vfp582 get-status 648",               0x20809062u, 648, 0, ~0u, 0, 0 },
+    { "freq-ctrl-info 7188",                 0x20809025u, 7188, 0, ~0u, 0, 0 },
+    { "freq-ctrl-status 5332",               0x20809026u, 5332, 0, ~0u, 0, 0 },
+    /* Anchors: the two ids whose sizes were already confirmed empirically. */
+    { "anchor vfp582 get-info 776",          0x20809061u, 776, 0, ~0u, 0, 0 },
+    { "anchor rails get-info 2444",          0x2080b201u, 2444, 0, ~0u, 0, 0 },
+    { "anchor rails get-control 1036",       0x2080b213u, 1036, 0, ~0u, 0, 0 },
+    /* Negative anchors: same escape, same size, different legacy bits. */
+    { "neg 0x2080a0ff 776 (non-priv, unknown)", 0x2080a0ffu, 776, 0, ~0u, 0, 0 },
+    { "neg 0x2080ffff 776 (privileged bit)",    0x2080ffffu, 776, 0, ~0u, 0, 0 },
+};
+
+/* Classify every dword of the answer against the pre-send image:
+ *   U = untouched (new == seed), Z = cleared (seed != 0, new == 0),
+ *   W = written (new != seed and new != 0).
+ * With a zero pre-seed the block starts all-U, so a W run is exactly what the
+ * handler put there; with the small-counter pre-seed the Z runs show the region
+ * the handler clears.  Output is chunked because nvx_emit's detail field is
+ * 288 bytes -- an un-chunked line would silently truncate the layout.
+ */
+static void clkctl_dump(nvx_ctx *c, const clkctl_case *k, const unsigned char *buf,
+                        const unsigned char *seed)
+{
+    unsigned nd = k->size / 4;
+    unsigned written = 0, cleared = 0, untouched = 0;
+    char cls[4096];              /* one class char per dword (max 3084) */
+    unsigned nd_listed = 0;
+    char woff[200];
+    unsigned wo = 0;
+
+    if (nd > sizeof cls - 1) nd = sizeof cls - 1;
+    for (unsigned d = 0; d < nd; ++d) {
+        NvU32 w, sv;
+        memcpy(&w, buf + 4 * d, 4);
+        memcpy(&sv, seed + 4 * d, 4);
+        char cc = (w == sv) ? 'U' : (w == 0 ? 'Z' : 'W');
+        if (cc == 'U') ++untouched;
+        else if (cc == 'Z') ++cleared;
+        else ++written;
+        cls[d] = cc;
+        if (cc == 'W' && wo < sizeof woff - 8 && nd_listed < 32)
+            wo += (unsigned)snprintf(woff + wo, sizeof woff - wo, " +%u", 4 * d);
+        if (cc == 'W') ++nd_listed;
+    }
+    cls[nd] = 0;
+    woff[wo] = 0;
+    nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_OK,
+             "  dwords %u: U=%u W=%u Z=%u; W offsets:%s%s", nd, untouched,
+             written, cleared, written ? woff : " none",
+             nd_listed > 32 ? " ..." : "");
+    if (!written) return;
+
+    /* The written entries themselves, five per line. */
+    {
+        unsigned line = 0;
+        char t[288];
+        unsigned tn = 0;
+        for (unsigned d = 0; d < nd; ++d) {
+            if (cls[d] != 'W') continue;
+            NvU32 w, sv;
+            memcpy(&w, buf + 4 * d, 4);
+            memcpy(&sv, seed + 4 * d, 4);
+            tn += (unsigned)snprintf(t + tn, 52, "%s+%u:s%08x>w%08x", tn ? " " : "",
+                                     4 * d, sv, w);
+            if (++line == 5) {
+                t[tn] = 0;
+                nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_OK, "  W %s", t);
+                line = 0; tn = 0;
+            }
+        }
+        if (line) {
+            t[tn] = 0;
+            nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_OK, "  W %s", t);
+        }
+    }
+    /* Class map, 120 dwords per line, index-prefixed. */
+    for (unsigned o = 0; o < nd; o += 120) {
+        unsigned n = nd - o < 120 ? nd - o : 120;
+        char t[140];
+        memcpy(t, cls + o, n);
+        t[n] = 0;
+        nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_OK, "  cls[%u..%u) %s", o, o + n, t);
+    }
+    /* Verbatim head, eight dwords per line, first 64 dwords. */
+    {
+        unsigned show = nd < 64 ? nd : 64;
+        for (unsigned o = 0; o < show; o += 8) {
+            char t[80];
+            unsigned tn = 0;
+            unsigned n = show - o < 8 ? show - o : 8;
+            for (unsigned i = 0; i < n; ++i) {
+                NvU32 w; memcpy(&w, buf + 4 * (o + i), 4);
+                tn += (unsigned)snprintf(t + tn, 11, " %08x", w);
+            }
+            t[tn] = 0;
+            nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_OK, "  +%03u:%s", 4 * o, t);
+        }
+    }
+}
+
+/* Build the parameter block for one case (zeroed or small-counter pre-seed),
+ * seed the documented mask field, keep a copy of the pre-send image, and send
+ * exactly one read-only control. */
+static NvU32 clkctl_send(nvx_ctx *c, const clkctl_case *k,
+                        unsigned char *buf, unsigned char *seed)
+{
+    memset(buf, 0, k->size);
+    if (k->prefill) {
+        for (unsigned d = 0; d < k->size / 4; ++d) {
+            NvU32 v = d + 1;
+            memcpy(buf + 4 * d, &v, 4);
+        }
+    }
+    if (k->mask_off != ~0u) memcpy(buf + k->mask_off, &k->mask, 4);
+    if (seed) memcpy(seed, buf, k->size);
+    return nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                          k->cmd, buf, k->size);
+}
+
+int nvx_stage2_clkctl_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.clkctl", "clkctl-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+
+    unsigned buflen = 0;
+    for (unsigned i = 0; i < sizeof nvx_clkctl / sizeof nvx_clkctl[0]; ++i)
+        if (nvx_clkctl[i].size > buflen) buflen = nvx_clkctl[i].size;
+    unsigned char *buf = malloc(buflen), *seed = malloc(buflen);
+    if (!buf || !seed) {
+        nvx_emit(c, "V2.clkctl", "clkctl-read", 0, NVX_V_HARD, "buffer alloc failed");
+        free(buf); free(seed);
+        return -1;
+    }
+
+    for (unsigned i = 0; i < sizeof nvx_clkctl / sizeof nvx_clkctl[0]; ++i) {
+        const clkctl_case *k = &nvx_clkctl[i];
+
+        if (nvx_id_is_known_set(k->cmd)) {
+            nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a documented SET id", k->cmd);
+            continue;
+        }
+
+        NvU32 st = clkctl_send(c, k, buf, seed);
+
+        if (k->repeat_1s) {
+            NvU32 a0 = 0, a1 = 0;
+            if (k->size >= 8) { memcpy(&a0, buf, 4); memcpy(&a1, buf + 4, 4); }
+            sleep(1);
+            NvU32 st2 = clkctl_send(c, k, buf, seed);
+            NvU32 b0 = 0, b1 = 0;
+            if (k->size >= 8) { memcpy(&b0, buf, 4); memcpy(&b1, buf + 4, 4); }
+            nvx_emit(c, "V2.clkctl", k->name, st, st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                     "cmd 0x%08x size %u -> 0x%08x: dwords [%08x %08x] then 1 s "
+                     "later [%08x %08x] (second read 0x%08x)",
+                     k->cmd, k->size, st, a0, a1, b0, b1, st2);
+            continue;
+        }
+
+        if (st != 0) {
+            nvx_emit(c, "V2.clkctl", k->name, st, NVX_V_REJECTED,
+                     "cmd 0x%08x size %u mask@+%d=0x%08x -> 0x%08x (%s)",
+                     k->cmd, k->size, k->mask_off == ~0u ? -1 : (int)k->mask_off,
+                     k->mask, st, nvx_status_name(st));
+            continue;
+        }
+
+        unsigned nz = 0, first = 0, last = 0;
+        for (unsigned o = 0; o < k->size; ++o)
+            if (buf[o]) { ++nz; if (!first) first = o; last = o; }
+        nvx_emit(c, "V2.clkctl", k->name, st, nz ? NVX_V_OK : NVX_V_REJECTED,
+                 "cmd 0x%08x size %u mask@+%d=0x%08x prefill=%d -> NV_OK, %u "
+                 "non-zero bytes, first @%u last @%u",
+                 k->cmd, k->size, k->mask_off == ~0u ? -1 : (int)k->mask_off,
+                 k->mask, k->prefill, nz, first, last);
+        if (!nz) continue;
+
+        clkctl_dump(c, k, buf, seed);
+    }
+
+    free(buf); free(seed);
+    return 0;
+}
+
+/* Whole-buffer hex dump of the read-only domain blocks (--clkctl-hex).
+ * The dword-class map from --clkctl-read says *where* the GSP wrote; this
+ * prints the actual bytes so the record stride and field offsets can be
+ * decoded offline instead of guessed.  16 bytes per line, so the line stays
+ * far inside nvx_emit's 288-byte detail field; only GET ids are sent. */
+int nvx_stage2_clkctl_hex(nvx_ctx *c)
+{
+    static const struct { const char *name; NvU32 cmd; unsigned size; } cases[] = {
+        { "domains-get-info 0x20809019 @12336", 0x20809019u, 12336u },
+        { "freq-ctrl-info   0x20809025 @7188",  0x20809025u, 7188u  },
+    };
+
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.clkctl", "clkctl-hex", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        const char *name = cases[i].name;
+        unsigned size = cases[i].size;
+
+        if (nvx_id_is_known_set(cases[i].cmd)) {
+            nvx_emit(c, "V2.clkctl", name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a documented SET id", cases[i].cmd);
+            continue;
+        }
+
+        unsigned char *buf = calloc(1, size);
+        if (!buf) {
+            nvx_emit(c, "V2.clkctl", name, 0, NVX_V_HARD, "buffer alloc failed");
+            continue;
+        }
+
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  cases[i].cmd, buf, size);
+        if (st != 0) {
+            nvx_emit(c, "V2.clkctl", name, st, NVX_V_REJECTED,
+                     "cmd 0x%08x size %u -> 0x%08x (%s)", cases[i].cmd, size,
+                     st, nvx_status_name(st));
+            free(buf);
+            continue;
+        }
+
+        nvx_emit(c, "V2.clkctl", name, st, NVX_V_OK,
+                 "cmd 0x%08x size %u -> NV_OK, %u-byte hex follows",
+                 cases[i].cmd, size, size);
+        for (unsigned o = 0; o < size; o += 16) {
+            unsigned n = size - o < 16 ? size - o : 16;
+            char t[128];
+            unsigned tn = 0;
+            tn += (unsigned)snprintf(t + tn, sizeof t - tn, "  %05u:", o);
+            for (unsigned b = 0; b < n; ++b)
+                tn += (unsigned)snprintf(t + tn, sizeof t - tn, " %02x", buf[o + b]);
+            t[tn] = 0;
+            nvx_emit(c, "V2.clkctl", name, st, NVX_V_OK, "%s", t);
+        }
+        free(buf);
+    }
+    return 0;
+}
+
+/* Bounded value-container probe (--clkctl-offsweep).
+ *
+ * Two questions left open by --clkctl-read: (a) does the 0x2080901b offset
+ * container carry values at all on this GSP, and (b) is its input mask field
+ * somewhere other than +0/+8?  A zero pre-seed cannot answer either, because a
+ * driver write of zero is classified "untouched".  This probe therefore fills
+ * the block with 0xA5A5A5A5 (every dword non-zero and identifiable), then runs
+ * the 60-byte header one dword at a time with a 0xFF seed, printing exactly
+ * which dwords each run changed and to what.  Every case is a documented GET
+ * from the TU116 GSP's own export table; sizes come from that table (plus the
+ * two accepted anchors at 776/1036), never from a scan.  SET ids refused. */
+typedef struct {
+    const char *name;
+    NvU32 cmd;
+    unsigned size;
+    unsigned seed_off;
+    NvU32 seed;
+} offsweep_case;
+
+static void offsweep_send(nvx_ctx *c, const offsweep_case *k)
+{
+    unsigned char *buf = malloc(k->size), *seed = malloc(k->size);
+    if (!buf || !seed) {
+        nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_HARD, "buffer alloc failed");
+        free(buf); free(seed);
+        return;
+    }
+    for (unsigned d = 0; d < k->size / 4; ++d) {
+        NvU32 v = (k->seed_off == ~0u) ? 0u : 0xA5A5A5A5u;
+        memcpy(buf + 4 * d, &v, 4);
+    }
+    if (k->seed_off != ~0u) memcpy(buf + k->seed_off, &k->seed, 4);
+    memcpy(seed, buf, k->size);
+
+    NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                              k->cmd, buf, k->size);
+    if (st != 0) {
+        nvx_emit(c, "V2.clkctl", k->name, st, NVX_V_REJECTED,
+                 "cmd 0x%08x size %u seed@+%d -> 0x%08x (%s)", k->cmd, k->size,
+                 k->seed_off == ~0u ? -1 : (int)k->seed_off, st,
+                 nvx_status_name(st));
+        free(buf); free(seed);
+        return;
+    }
+
+    unsigned nd = k->size / 4, nch = 0, first = 0, last = 0, listed = 0;
+    for (unsigned d = 0; d < nd; ++d) {
+        NvU32 w, sv;
+        memcpy(&w, buf + 4 * d, 4);
+        memcpy(&sv, seed + 4 * d, 4);
+        if (w != sv) { if (!nch) first = 4 * d; last = 4 * d; ++nch; }
+    }
+    nvx_emit(c, "V2.clkctl", k->name, st, nch ? NVX_V_OK : NVX_V_REJECTED,
+             "cmd 0x%08x size %u seed@+%d=0x%08x -> NV_OK, %u/%u dwords changed"
+             " (first @%u last @%u)", k->cmd, k->size,
+             k->seed_off == ~0u ? -1 : (int)k->seed_off, k->seed, nch, nd,
+             first, last);
+    if (!nch) { free(buf); free(seed); return; }
+
+    /* Changed dwords themselves, four per line: +off: seed>new. */
+    {
+        char t[280];
+        unsigned tn = 0, per = 0;
+        for (unsigned d = 0; d < nd; ++d) {
+            NvU32 w, sv;
+            memcpy(&w, buf + 4 * d, 4);
+            memcpy(&sv, seed + 4 * d, 4);
+            if (w == sv) continue;
+            if (listed >= 600) break;
+            tn += (unsigned)snprintf(t + tn, sizeof t - tn, "%s+%u:%08x>%08x",
+                                     tn ? " " : "", 4 * d, sv, w);
+            if (++per == 4) {
+                t[tn] = 0;
+                nvx_emit(c, "V2.clkctl", k->name, st, NVX_V_OK, "  %s", t);
+                tn = 0; per = 0;
+            }
+            ++listed;
+        }
+        if (per) {
+            t[tn] = 0;
+            nvx_emit(c, "V2.clkctl", k->name, st, NVX_V_OK, "  %s", t);
+        }
+    }
+    free(buf); free(seed);
+}
+
+int nvx_stage2_clkctl_offsweep(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.clkctl", "clkctl-offsweep", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+
+    /* (a) locate the 0x2080901b input-mask field: one run per header dword. */
+    for (unsigned off = 0; off <= 56; off += 4) {
+        char nm[96];
+        snprintf(nm, sizeof nm, "gc 2108 A5 seed+%u=0xFF", off);
+        offsweep_case k = { nm, 0x2080901bu, 2108u, off, 0x000000ffu };
+        if (nvx_id_is_known_set(k.cmd)) {
+            nvx_emit(c, "V2.clkctl", k.name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a documented SET id", k.cmd);
+            continue;
+        }
+        offsweep_send(c, &k);
+    }
+    /* all-ones mask at +0 as a separate datapoint (documented as rejected by
+     * the NVAPI layer; the GSP may still accept it). */
+    {
+        offsweep_case k = { "gc 2108 A5 seed+0=all", 0x2080901bu, 2108u, 0u, 0xffffffffu };
+        offsweep_send(c, &k);
+    }
+
+    /* (b) SAFETY: no further A5-filled ids.  The 2026-10-17 run of this sweep
+     * fed 0xA5A5A5A5 into 0x20809026@5332 (and 0x2080901c@808 came back
+     * 0x65 NV_ERR_TIMEOUT first); the GSP then latched 0x62
+     * NV_ERR_RESET_REQUIRED for EVERY legacy-forwarded id (0x20809019/61 no
+     * longer answer) and stayed that way for the rest of the session.  Only a
+     * driver reload / reboot clears it, both of which are out of bounds here.
+     * So the only ids this probe will ever fill with a non-zero background are
+     * the ones that provably reject bad content safely (0x2080901b -> 0x25),
+     * and the value containers are read with a ZERO background only. */
+    {
+        static const offsweep_case more[] = {
+            { "gc 0x2080901a @2052", 0x2080901au, 2052u, ~0u, 0u },
+            { "gc 0x2080901c @808",  0x2080901cu, 808u,  ~0u, 0u },
+            { "gc 0x2080901d @32680",0x2080901du, 32680u,~0u, 0u },
+            { "gc 0x20809025 @7188", 0x20809025u, 7188u, ~0u, 0u },
+            { "gc 0x20809026 @5332", 0x20809026u, 5332u, ~0u, 0u },
+        };
+        for (unsigned i = 0; i < sizeof more / sizeof more[0]; ++i) {
+            if (nvx_id_is_known_set(more[i].cmd)) {
+                nvx_emit(c, "V2.clkctl", more[i].name, 0, NVX_V_HARD,
+                         "REFUSED: 0x%08x is a documented SET id", more[i].cmd);
+                continue;
+            }
+            offsweep_send(c, &more[i]);
+        }
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Private clock-domain / V-F read-surface census (--clkvf-read)       */
 /* ------------------------------------------------------------------ */
