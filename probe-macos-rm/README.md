@@ -70,6 +70,8 @@ OGKM=/path/to/ogkm python3 tests/test_idle_cli.py
 ./probe-macos-rm-idle --stages 0 --pm-read          # 内部 PM/PFM GET（PM1 状态/V-P-state 映射/boost-sync）；SET 孪生全不发
 ./probe-macos-rm-idle --stages 0 --perf-read        # perf/pmgr 公开读面普查（模块信息、视频引擎 perfmon）+ 不可发送项的显式跳过
 ./probe-macos-rm-idle --stages 0 --clkvf-read       # 私有 ClockClient/VfPoints/PerfVfe **只读**面普查（paramSize 存在性扫描；SET 孪生从不发送）
+  # 该普查含两轮：61 档 paramSize 扫描 + 11 个 `(version<<16|size)` 版本戳 pass；
+  # 另有 `0x2080ffff`/`0x2080a0ff` 两个阴性对照锚定 `0x1f` 的语义
 ```
 
 **写入（门控）**：RATED_TDP 仲裁 SET 已实现为 V3.4，但**不随任何 stage 组运行**，必须显式同时给出

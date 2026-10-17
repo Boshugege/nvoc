@@ -1048,7 +1048,7 @@ static const unsigned nvx_clk_sizes[] = {
     160, 192, 200, 256, 260, 264, 268, 272, 280, 288, 320, 512, 776, 1036,
     1060, 1064, 1092, 1120, 2048, 4096, 4368, 6188, 8448, 9248, 12288, 16384,
     32768, 65536, 67936, 67940, 67944, 77824, 82976, 156064, 156068, 156072,
-    262144, 401600, 623168, 737084, 1050688, 1349156, 4343300,
+    2404, 262144, 401600, 623168, 737084, 1050688, 1349156, 4343300,
 };
 
 static void clk_scan_one(nvx_ctx *c, unsigned char *buf, unsigned char *prev,
@@ -1142,9 +1142,50 @@ static void clk_scan_one(nvx_ctx *c, unsigned char *buf, unsigned char *prev,
                 hp += snprintf(hp, 10, "%s%08x", w ? " " : "", v);
             }
             nvx_emit(c, "V2.clkvf", name, 0, NVX_V_SKIP,
-                     "payload dwords [%u..%u): %s", base, base + n, hex);
+                     "payload dwords [%u..%u) :%s", base, base + n, hex);
         }
     }
+
+    /* Stamped pass. The private clock/VF families stamp their params with
+     * (version << 16 | size) -- 0x10964 is "V1, 2404 B", 0x12420 is "V1,
+     * 9248 B", not a byte count. A zeroed buffer therefore cannot satisfy a
+     * stamp-checking command no matter what size it is, which is the second
+     * half of the 0x1f verdict above. Re-send each documented magic at the
+     * size it encodes, with the magic in the first dword. */
+    static const NvU32 stamps[] = {
+        0x010964u,  /* ClockDomains control V1 (nvapi-rs clock.rs:360)          */
+        0x0261A4u,  /* ClockDomains control V2 (same)                          */
+        0x01182Cu,  /* V/F points INFO, Blackwell (nvapi-rs nvid.rs:757)        */
+        0x012420u,  /* V/F points GET_CONTROL, Blackwell (nvapi-rs nvid.rs:758) */
+        0x474604u,  /* V/F points canonical control stamp (p100 audit, 0x4604)  */
+        0x014420u,  /* old V/F stamps the Windows translator accepts            */
+        0x0620C0u,
+        0x0B3F3Cu,
+        0x149224u,
+        0x01000Cu,  /* generic NV2080 12 B / 36 B stamps                        */
+        0x010024u,
+    };
+    char stamp_text[192] = "";
+    unsigned nstamp_ok = 0;
+    int stamp_off = 0;
+    for (unsigned i = 0; i < sizeof stamps / sizeof stamps[0]; ++i) {
+        unsigned sz = stamps[i] & 0xffffu;
+        if (sz < 4 || sz > 0xffffu) continue;
+        memset(buf, 0, sz);
+        memcpy(buf, &stamps[i], 4);
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  cmd, buf, sz);
+        if (st == 0) ++nstamp_ok;
+        if (st == 0 && stamp_off < (int)sizeof stamp_text - 16)
+            stamp_off += snprintf(stamp_text + stamp_off,
+                                  sizeof stamp_text - (size_t)stamp_off,
+                                  "0x%08x@%u ", stamps[i], sz);
+    }
+    nvx_emit(c, "V2.clkvf", name, nstamp_ok ? 0 : NV_ERR_INVALID_ARGUMENT,
+             nstamp_ok ? NVX_V_OK : NVX_V_SKIP,
+             "stamped pass over %u (version|size) magics: %s",
+             (unsigned)(sizeof stamps / sizeof stamps[0]),
+             nstamp_ok ? stamp_text : "none accepted (still 0x1f)");
 }
 
 static void item_clk_reads(nvx_ctx *c)
