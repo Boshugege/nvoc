@@ -387,3 +387,46 @@ may not share an id namespace and the directory stays the authority for the map.
 Head `+28 = 5` is index-space bits 0 and 2, i.e. exactly the core and memory rows,
 which is an attractive reading but is recorded only as a candidate: no second
 observation yet distinguishes it from a version or a count.
+
+## 6. What the forwarding table's own columns declare (this round)
+
+The write plan for the offset channel has rested on the id arithmetic of the
+twin rule (a write id is a read id with bit 14 set). This section adds the
+table's own statements, measured on the corrected 1118-row dump
+(`outputs/stage-gsp-table-recount-20261017T130832Z/gsp-table.tsv`, re-derivable
+with `probe-macos-rm/tools/summarise-method-table.py`).
+
+Halves, by the category byte that encodes them: 691 public, 335 legacy read
+(`0x80-0xBF`), 92 legacy write (`0xC0-0xFF`). The `flags` column separates those
+two halves by direction:
+
+| half | rows | flag bit `0x08` | flag bit `0x04` | dominant flags |
+| --- | --- | --- | --- | --- |
+| legacy read | 335 | 332 | 2 | `0x0048` (278 rows) |
+| legacy write | 92 | 10 | 82 | `0x0044` (78 rows) |
+
+So the table itself models the read/write pairing the twin rule assumes, and it
+does so where it matters for this project: the whole private clock/volt/thermal
+control surface lives in those halves. The exceptions are printed by id rather
+than waved at, so a driver update surfaces as a number: three read-half rows
+(`0x2080854a`, `0x2080a70f`, `0x2080b703`) and ten write-half rows
+(`0x2080c54d`, `0x2080c601/2/3`, `0x2080d0b3`, `0x2080d501/2`, `0x2080e0cf`,
+`0x2080e802`, `0x2080f310`). The public half mixes directions (`0x00c0`, `0x0048`,
+`0x0008`, `0x0044`), so the bit is a property of the legacy halves, not a
+universal classifier.
+
+The concrete case for the write plan: `0x2080901b` (read, 2108 B, flags `0x0048`)
+and `0x2080d01c` (write, 2108 B, flags `0x0044`) are a **same-size sibling pair**
+with complementary direction bits. That is a third, independent support for
+reading the SET block as the same struct as the GET block -- the id arithmetic,
+the size match, and now the table's direction flag -- and it is why "write the
+coordinate the GET reports" is a defensible plan rather than a hope. Twenty-one
+read ids have a present `|0x4000` twin at all, and only four of those are
+same-size; the offset pair is one of the four.
+
+One negative result is worth as much as the positive one: **`accessRight` is 0
+for all 1118 rows** except a single public row (`0x2080b213`, value 2). It
+therefore does *not* encode the privilege that makes the write path refuse below
+root, and it must not be cited for that. The below-root refusal stays what the
+runtime measurement says it is: a precondition of the forwarding path the root
+owner holds, not a missing method and not a table flag.
