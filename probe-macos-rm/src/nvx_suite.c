@@ -995,6 +995,8 @@ int nvx_stage2_perf_read(nvx_ctx *c)
 }
 
 static int nvx_id_is_known_set(NvU32 cmd);   /* defined with the SET-id list below */
+static int nvx_id_is_known_wedge(NvU32 cmd); /* ids that latch the GSP wedge */
+static int nvx_status_is_wedge_stop(NvU32 st); /* 0x65/0x62 -> abort battery */
 
 /* ------------------------------------------------------------------ */
 /* Registered-control read pass (--reg-read)                           */
@@ -1408,7 +1410,11 @@ static const clkctl_case nvx_clkctl[] = {
     { "measure-freq 8 (x2, 1 s)",            0x20809006u, 8, 0, ~0u, 0, 1 },
     { "vfp582 get-status 648",               0x20809062u, 648, 0, ~0u, 0, 0 },
     { "freq-ctrl-info 7188",                 0x20809025u, 7188, 0, ~0u, 0, 0 },
-    { "freq-ctrl-status 5332",               0x20809026u, 5332, 0, ~0u, 0, 0 },
+    /* 0x20809026@5332 is the id that latched the 2026-10-17 GSP wedge with an
+     * all-zero block.  The case is kept here as documentation of why the
+     * battery refuses it (nvx_known_wedge_ids) -- it must never be re-enabled
+     * as a probe case. */
+    { "freq-ctrl-status 5332 (refused)",      0x20809026u, 5332, 0, ~0u, 0, 0 },
     /* 0x2080901a is 2052 = 4 + 32*64 in the GSP table: the same 64 B record
      * shape as the 0x2080901b control, with a 4-byte instead of 60-byte head.
      * It is the natural "does a value-bearing variant exist" candidate, and it
@@ -1560,8 +1566,24 @@ int nvx_stage2_clkctl_read(nvx_ctx *c)
                      "REFUSED: 0x%08x is a documented SET id", k->cmd);
             continue;
         }
+        if (nvx_id_is_known_wedge(k->cmd)) {
+            nvx_emit(c, "V2.clkctl", k->name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x latched the GSP wedge on 2026-10-17 "
+                     "(all-zero block was enough); single deliberate action "
+                     "only, never part of a battery", k->cmd);
+            continue;
+        }
 
         NvU32 st = clkctl_send(c, k, buf, seed);
+
+        if (nvx_status_is_wedge_stop(st)) {
+            nvx_emit(c, "V2.clkctl", k->name, st, NVX_V_HARD,
+                     "STOP: cmd 0x%08x size %u -> 0x%08x (%s); aborting the "
+                     "remaining reads of this battery (a timeout can latch the "
+                     "GSP legacy path for the whole session)",
+                     k->cmd, k->size, st, nvx_status_name(st));
+            break;
+        }
 
         if (k->repeat_1s) {
             NvU32 a0 = 0, a1 = 0;
@@ -1628,6 +1650,11 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
                      "REFUSED: 0x%08x is a documented SET id", cases[i].cmd);
             continue;
         }
+        if (nvx_id_is_known_wedge(cases[i].cmd)) {
+            nvx_emit(c, "V2.clkctl", name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a known GSP-wedge id", cases[i].cmd);
+            continue;
+        }
 
         unsigned char *buf = calloc(1, size);
         if (!buf) {
@@ -1642,6 +1669,11 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
                      "cmd 0x%08x size %u -> 0x%08x (%s)", cases[i].cmd, size,
                      st, nvx_status_name(st));
             free(buf);
+            if (nvx_status_is_wedge_stop(st)) {
+                nvx_emit(c, "V2.clkctl", name, st, NVX_V_HARD,
+                         "STOP: aborting the remaining hex dumps");
+                break;
+            }
             continue;
         }
 
@@ -1790,12 +1822,19 @@ int nvx_stage2_clkctl_offsweep(nvx_ctx *c)
             { "gc 0x2080901c @808",  0x2080901cu, 808u,  ~0u, 0u },
             { "gc 0x2080901d @32680",0x2080901du, 32680u,~0u, 0u },
             { "gc 0x20809025 @7188", 0x20809025u, 7188u, ~0u, 0u },
-            { "gc 0x20809026 @5332", 0x20809026u, 5332u, ~0u, 0u },
+            /* 0x20809026 @5332 deliberately absent: it is the id that latched
+             * the wedge (see nvx_known_wedge_ids).  It is refused below even
+             * if a future edit re-adds it. */
         };
         for (unsigned i = 0; i < sizeof more / sizeof more[0]; ++i) {
             if (nvx_id_is_known_set(more[i].cmd)) {
                 nvx_emit(c, "V2.clkctl", more[i].name, 0, NVX_V_HARD,
                          "REFUSED: 0x%08x is a documented SET id", more[i].cmd);
+                continue;
+            }
+            if (nvx_id_is_known_wedge(more[i].cmd)) {
+                nvx_emit(c, "V2.clkctl", more[i].name, 0, NVX_V_HARD,
+                         "REFUSED: 0x%08x is a known GSP-wedge id", more[i].cmd);
                 continue;
             }
             offsweep_send(c, &more[i]);
@@ -1845,6 +1884,35 @@ static int nvx_id_is_known_set(NvU32 cmd)
     for (unsigned i = 0; i < sizeof nvx_known_set_ids / sizeof nvx_known_set_ids[0]; ++i)
         if (cmd == nvx_known_set_ids[i]) return 1;
     return 0;
+}
+
+/* Ids whose *request* takes the GSP's legacy path down for the whole session,
+ * independently of the payload.  0x20809026 @5332 (ClkFreqController status)
+ * did exactly that on 2026-10-17 with an all-zero 5332-byte block: the call
+ * returned 0x65 NV_ERR_TIMEOUT and every later legacy-forwarded id answered
+ * 0x62 NV_ERR_RESET_REQUIRED until a reboot (see
+ * docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md §6).
+ * 0x2080901c @808 also timed out, but that one was survivable, so it is not
+ * listed here -- it is simply never sent by a battery either.
+ *
+ * These are refused before the buffer is even built.  A deliberate single
+ * attempt is a separate, explicitly-gated action, not a probe case. */
+static const NvU32 nvx_known_wedge_ids[] = {
+    0x20809026u, /* ClkFreqController GET_STATUS @5332 -- wedged the GSP */
+};
+
+static int nvx_id_is_known_wedge(NvU32 cmd)
+{
+    for (unsigned i = 0; i < sizeof nvx_known_wedge_ids / sizeof nvx_known_wedge_ids[0]; ++i)
+        if (cmd == nvx_known_wedge_ids[i]) return 1;
+    return 0;
+}
+
+/* A 0x65 timeout (or a latched 0x62) means "abort the battery", never "try a
+ * different size": see the boundary in the doc §6. */
+static int nvx_status_is_wedge_stop(NvU32 st)
+{
+    return st == 0x00000065u || st == 0x00000062u;
 }
 
 /* paramSize ladder for one control id. Small alignments first, then the sizes
