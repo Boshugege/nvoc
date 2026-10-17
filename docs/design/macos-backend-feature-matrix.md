@@ -1325,3 +1325,11 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (4) **纠错** ✗：`0x2080D01C = 0x2080901B | 0x4000` 实际得 `0x2080D01B` ⇒ 已修三处面向用户的理由串（`core/src/macos_rm.rs:122`、`:364`、`cli/src/macos_rm.rs:20`）✔，结论（0xC0-0xFF 写半边在 root 以下被 `0x1b` 拒）依据实测 `0x1b` 与 host 表无特权行，不依赖该等式 ✔；同步修 `summarise-method-table.py` 的孪生枚举与文档（现先试相邻 id 再试裸形式 ✔；本机运行 ⇒ 71 对／同尺寸 43）✔。
 (5) **行数卫生** ✗：`gsp-table*.tsv`＝890 行、families capture＝1081 行、交接文档记 1118 行 ⇒ 三个不同 artifact；且 families capture **可证不完整**（304 个 read 行的孪生指向写 id，文件里仅 75 个写行存在）⇒ 引用行数必须写明文件 ✔。
 (6) **验证** ✔：本机 fmt rc0；`cargo test -p nvoc-core -p nvoc-cli -p nvoc-srv` ⇒ 82／94／53 passed、0 failed（36＋8 ignored 为 GPU 相关 ✔）；设备访问仅后台门控重试（attempt 1-4 皆 `0x62`）⇒ 未重启、未写入、无性能 SET ✔。
+
+### 本轮追加七十七（2026-10-18，尺寸列＝`sizeof(PARAMS)`：用开放头文件编译尺寸校准导出表，并据 id 结构定下 `0x2080a06e` 身份）
+
+(1) **校准（真机编译，只读）** ✔：`sizeof(NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS)=1432`，而导出表实测 `0x20800513`＝1432、其 legacy 别名 `0x20808513`＝1432 ⇒ **导出表 size 列就是 `sizeof(PARAMS)`** ✔；别名与公开同胞同结构同尺寸 ✔ ⇒ 与 §42 的"同一 MESSAGE_ID、两个接口 id"一致 ✔。反例警示：12／24／56／8／4 等尺寸在多个族大量重复 ⇒ 尺寸是**佐证**，命名需 id 结构或公开命名支持 ✔。
+(2) **`0x2080a06e` 身份确定** ✔：接口字节 `0xa0 = 0x20|0x80`（PERF 的 legacy non-privileged 别名）＋ 消息 id `0x6e` 与公开 `0x2080206e` 相同，公开 id 即 `NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL` ⇒ 它是**同一 RATED_TDP get-control 的 legacy 别名** ✔（12 B 与 `…_RATED_TDP_GET_CONTROL_PARAMS=12` 一致，作佐证）。⚠️ 写半边 `0x2080e06f` 实测 **8 B** ≠ SDK 的 SET 结构 12 ✗ ⇒ 写半边按自己的行解析，不假设同构 ✔。
+(3) **按尺寸的候选命名** ✔：`0x20801037`(CLK,6024)＝`CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS` 同尺寸 ⇒ 候选 ✔；`0x2080852e`(THERMAL,1432) 与 execute-v2 同尺寸且其孪生不在可写 6 行内 ⇒ 读侧同类候选 ✔；`0x20808513` 由头文件直接命名 ✔。
+(4) **精确边界** ✗：`ctrl2080thermal.h`／`ctrl2080clk.h` 各只有 1 个 `_PARAMS` 类型 ⇒ 38 行 THERMAL 只有 1 行可由开放头文件命名；偏移通道 2108 结构在开放头文件无对应类型（形状已知 `60+32×64` ✔）。`ctrl2080fan.h` ＝ **33 行空壳**（0 define／0 struct）⇒ **风扇族在开放 SDK 无声明**，其仓库内材料是驱动 fan 代码与生成派发表 ✔。生成派发表 641 行里 5 个公开 THERMAL id 仅 `0x20800513` 出现 ⇒ 只覆盖公开半区子集，缺席不等于不存在 ✔。
+(5) **各族状态（独立判定）** ✔：温度读取＝`0x20808513` 已实测 NV_OK（可读／可解释 ✔），范围／原状态／恢复**待一次干净只读跑**；热族其余 37 行 6 行有写孪生 ✔，其余**尚未定位** ✔；风扇族候选 `0x20808540@24`（可写孪生 `0x2080c541@24` ✔），含义**尚未定位** ✔；功耗族 RATED_TDP 别名身份已定 ✔，写仍门控（`SETTINGS_WRITE_SUPPORTED=false`）⇒ **未写入任何值** ✔。

@@ -1423,3 +1423,28 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - 本机（客户端分析，不构建 ✔）：python3 跑修好的工具 ✔；awk 复核 304/304 与 0/304 ✔。
 - Rust 侧 ✔：`cargo fmt --all -- --check` rc 0 ✔；`cargo test -p nvoc-core -p nvoc-cli -p nvoc-srv` ⇒ **82／94／53 passed，0 failed**（GPU 相关 36＋8 ignored ✔）✔。
 - 设备访问 ✔：仅后台门控重试（每 60 s 一次 anchor 只读读 ✔，本轮 attempt 1-4 皆 `0x62` ✗）⇒ 未重启、未写入、无性能 SET ✔。
+
+## 43. 尺寸列＝`sizeof(PARAMS)`：用开放头文件的编译尺寸**校准**导出表，并按此命名可命名的行（2026-10-18）
+
+**选择依据** ✔：原目标要求"从**实际封送逻辑**还原""不得用'头文件搜不到'代替核对"✔。第 42 轮定清了 id 结构，本轮把**尺寸列**也校准到 SDK 类型上，使"按尺寸命名命令"成为有依据的动作而不是猜 ✔。
+### 43.1 校准（真机编译测得，非推断）✔
+- 真机命令（`nvoc-head`，只读、不碰设备 ✔）：写一个只 `#include <ctrl/ctrl2080/ctrl2080*.h>` 的小 C 程序打印 `sizeof`，用 `cc -I$OGKM/src/common/sdk/nvidia/inc` 编译运行 ✔。
+- 结果 ✔：`sizeof(NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS) = 1432` ✔ 而导出表实测 `0x20800513` ＝ **1432**、其 legacy 别名 `0x20808513` 也 ＝ **1432** ✔ ⇒ **导出表的 size 列就是 `sizeof(PARAMS)`** ✔ ✔（两条独立路径一致 ✔）；也印证头文件"同一 MESSAGE_ID、两个接口 id"⇒ 别名与公开同胞**同结构同尺寸** ✔。
+- 由此确立互校法 ✔：SDK／生成表给出的 `paramSize` 与实测 size 可互相校验；**同尺寸不唯一**（12／24／56／8／4 在多个族里大量重复 ✗）⇒ 尺寸是**佐证**，命名仍需 id 结构或公开命名支持 ✔。
+### 43.2 `0x2080a06e` 的身份：不再"尚未定位" ✔
+- 接口字节 `0xa0 = 0x20 | 0x80`（PERF 族的 legacy non-privileged 别名，见 §42）✔，消息 id `0x6e` 与公开 `0x2080206e` **相同**，而公开 id 在 SDK 中被命名为 `NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL`（`ctrl2080perf.h:399`）⇒ **`0x2080a06e` 就是同一 RATED_TDP get-control 的 legacy 别名** ✔ ✔。
+- 佐证 ✔：实测 12 B ＝ `sizeof(NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS) = 12` ✔（但 `NV2080_CTRL_PERF_GET_VID_ENG_PERFMON_SAMPLE_PARAMS` 亦为 12 ✗ ⇒ 单凭尺寸不能命名 ✔）。
+- ⚠️ 其写半边 `0x2080e06f` 实测 **8 B**，与 SDK 的 `NV2080_CTRL_PERF_RATED_TDP_SET_CONTROL_PARAMS = 12` **不一致** ✗ ⇒ **写半边必须按它自己的行解析**，不得假设与读半边同构 ✔（与 §40 该孪生对的注记一致 ✔）。
+### 43.3 按尺寸可命名的候选行 ✔
+- `0x20801037`（CLK，6024）与 `sizeof(NV2080_CTRL_CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES_PARAMS) = 6024` 相同 ⇒ **候选命名**：PMU 监控的时钟域采样 ✔（记为候选，因同尺寸非唯一 ✔）。
+- `0x2080852e`（THERMAL，1432）与 execute-v2 同尺寸，且其孪生 `0x2080c52f` **不在**那 6 个可写行里 ⇒ 读侧同类 ✔（候选 ✔）。
+- `0x20808513`（已实测 NV_OK）＝ `…_THERMAL_SYSTEM_EXECUTE_V2_PHYSICAL` ✔（§42 头文件直接命名 ✔）。
+### 43.4 开放树与生成表的**精确边界**（负面结论也要有依据）✗
+- `ctrl2080thermal.h` 里 `…_PARAMS` 类型只有 **1** 个、`ctrl2080clk.h` 只有 **1** 个 ⇒ 38 行 THERMAL 中只有 1 行能由开放头文件命名 ✔；偏移通道的 2108 结构在开放头文件里**没有**对应类型 ✗（其形状已知：`60 + 32×64` ✔）。
+- `ctrl2080fan.h` ＝ **33 行空壳** ✗（仅 `#pragma once` ＋ `#include <nvtypes.h>`；0 个 `#define`、0 个 `typedef struct`）⇒ **风扇族在开放 SDK 里没有任何声明** ✔ ⇒ 风扇族的"仓库内材料"是**驱动自身的 fan 代码与生成派发表**，不是 SDK 头文件 ✔（精确结论，非"搜不到就算了" ✔）。
+- 生成派发表 `src/nvidia/generated/g_subdevice_nvoc.c`（**641** 行）中，5 个公开 THERMAL id 只有 `0x20800513` 出现 1 次且带 `paramSize=sizeof(NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS)` ✔，另 4 个缺席 ✗ ⇒ 该表**只覆盖公开半区的子集**，缺席不能证明命令不存在 ✔（与 §40 一致 ✔）。
+### 43.5 风扇／热族审计小结（本轮新增部分；各族独立 ✔）
+- **温度传感读取**：`0x20808513`（`…_SYSTEM_EXECUTE_V2_PHYSICAL`）已在本会话实测 **NV_OK** ✔（可读 ✔）；参数结构由开放头文件命名且尺寸校准一致 ✔（可解释 ✔）。范围／原状态／恢复：**待实测**（需一次干净的只读跑 ✔）。
+- **热族其余 37 行**：38 行中 6 行有写孪生 ✔（`…c52d@1440`／`…c531@980`／`…c535@1556`／`…c53d@3100`／`…c541@24`／`…c54d@20448` ✔），其余为只读 ✔；其中 1432／6024 两行获候选命名 ✔，其余 36 行**尚未定位**（开放树无对应类型 ✗）✔。
+- **风扇族**：开放 SDK 无声明（空壳 ✗）；候选为 `0x20808540@24`（legacy 别名，可写孪生 `0x2080c541@24` ✔）；含义与单位**尚未定位** ✔。
+- **功耗族**：`RATED_TDP` get-control 的 legacy 别名身份已定（§43.2 ✔），SET 结构按自身行解析 ✔；`SETTINGS_WRITE_SUPPORTED` 仍为 false ⇒ **未写入任何功耗值** ✔。
