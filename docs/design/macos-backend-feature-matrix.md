@@ -1298,3 +1298,12 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (4) **测试** ✔：新增 `the_shared_reason_names_the_missing_layers_not_a_missing_command`（钉住含 `0x2080d01c`／`privilege`、不含 `"no writable RM control"`）✔；既有能力断言改为与常量相等 ✔。
 (5) **验证** ✔：Linux fmt rc0、clippy `-D warnings` rc0、`cargo test -p nvoc-srv` **53 passed 0 failed**；**测试机 macOS** 同 crate **53 passed 0 failed**（同数）✔；`nvapi-rs/sys/src/nvapi.rs:87` 的 macOS-only `unused variable` 属 vendored 依赖 ⇒ **未动**、仅记录 ✔。
 (6) **设备访问** ✔：仅 wedge 轮询一次（`0x62`，uptime `1 day, 4:19`）；单测不访问设备（空 GPU 列表构造）⇒ 未重启、未写入、无性能操作。
+
+### 本轮追加七十四（2026-10-18，纠错：两张 `flags` 表分属不同命名空间；`0x2080a06e` 定位推进＋可证伪只读用例）
+
+(1) **选择依据** ✔：纠错表上"`0x2080a06e` 是否同命令尚未定位""flag 位 `0x40000` 含义尚未定位"两条一直挂着 ⇒ 本轮改用**驱动自带的生成分发表**（此前未用的证据源）推进 ✔。
+(2) **纠错（新条目）** ✗：分发表 `g_subdevice_nvoc.c` 给 `0x2080206e`＝`flags=0x4a`／`0x2080206f`＝`flags=0x10008`，而 GSP 导出表给 `0x2080206e`＝`0x10008`／`0x2080206f`＝`0x40048` ⇒ 逐条对不上且**取值交叉** ⇒ **两表 flags 不同命名空间** ✔ ⇒ 引用 flag 必须写明哪张表 ✔。
+(3) **分发表可用但有边界** ✔：641 行 ✔；`accessRight` 640×`0x0`＋1×`0x2` ⇒ **不是特权编码** ✔；能给处理函数名与 `paramSize=sizeof(...)` ✔；但 `0x2080901b`/`0x2080d01c`/`0x2080a06e` **均不在其中** ✗ ⇒ 只覆盖公开半区 ⇒ **其缺席不构成"命令不存在"** ✔。
+(4) **`0x2080a06e`** ✔：PERF 族、12 B、`flags 0x48`、孪生 `0x2080e06f` 为 **8 B SET** ✔；message id `0x6e` 与公开 GET 相同 ✔；孪生图标注 **SIZE DIFFERS** ⇒ 是"同一控制消息的另一份声明"，非字节同构孪生 ✔ ⇒ 身份**尚未定位**但已定位比较对象 ✔；已加**可证伪只读用例**（按自身声明 12 B 发送，预测 NV_OK 且三元组相同／`0x1f`／`0x56` 三种结果皆有意义 ✔），SET `0x2080e06f` **未发送** ✗。
+(5) **验证** ✔：真机 `OGKM=… sh build.sh` ⇒ **`built probe-macos-rm-idle (profile idle)`**；**未运行**（`0x62`）⇒ 已实现待实测 ✔。
+(6) **设备访问** ✔：仅 wedge 轮询一次（`0x62`，uptime `1 day, 4:24`，同一 boot）；编译与源码检索不访问设备 ⇒ 未重启、未写入、无性能操作。

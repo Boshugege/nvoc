@@ -790,6 +790,33 @@ static void item_rated_tdp_reads(nvx_ctx *c)
                          : "ACCEPTED -> RM does not validate the client index");
     }
 
+    /* 0x2080A06E: the same message id (0x6e) as the call above, but in the
+     * PERF interface's 0xa0 namespace, 12 bytes, flags 0x48, and paired with an
+     * 8-byte SET twin 0x2080E06F (see the export dump). The public GET above
+     * carries flags 0x10008 and its SET twin 0x2080206f carries 0x40048, so the
+     * 0xa0 row is a *different declaration of the same control message* rather
+     * than a byte-identical twin -- which is why it is probed with its own
+     * declared size instead of being assumed to alias. Never sent before.
+     * PREDICTION, registered before the run: if it is the unprivileged
+     * declaration of the same get-control, it answers NV_OK and returns the same
+     * client/input/vPstate triple the 0x2080206e call returns; 0x1f (invalid
+     * argument) would show the declared-size rule does not hold here, and 0x56
+     * (not supported) would mean this driver builds the a0 row out. Read-only,
+     * and the SET twin 0x2080E06F is still never sent. */
+    {
+        NV2080_CTRL_PERF_RATED_TDP_GET_CONTROL_PARAMS p;
+        memset(&p, 0, sizeof p);
+        p.client = NV2080_CTRL_PERF_RATED_TDP_CLIENT_RM;
+        p.input = NV2080_CTRL_PERF_RATED_TDP_ACTION_FORCE_LIMIT;
+        NvU32 st = SUBCTL(c, 0x2080a06eu, &p);
+        nvx_emit(c, "V2.rtdp?", "0x2080a06e get-control (a0 namespace, 12B)", st,
+                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "client %s(%u): seeded 2 -> action %s(%u) vPstate %u",
+                 rated_tdp_client_name((NvU32)p.client), (NvU32)p.client,
+                 rated_tdp_action_name((NvU32)p.input), (NvU32)p.input,
+                 (NvU32)p.vPstateType);
+    }
+
     /* Cross-check: the arbitrated output plus every client's input in one call. */
     NV2080_CTRL_PERF_RATED_TDP_STATUS_PARAMS s;
     memset(&s, 0, sizeof s);
