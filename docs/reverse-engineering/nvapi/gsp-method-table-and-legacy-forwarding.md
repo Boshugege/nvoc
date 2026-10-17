@@ -181,13 +181,34 @@ read-only GETs were enough to take the GSP's legacy path down for the session,
 without any SET being sent. Any further probe of this family has to treat a
 `0x65 TIMEOUT` as "stop immediately", not "retry with a different size".
 
+### 6.1 The wedge is a live "is this GSP-dispatched?" oracle
+
+`--reg-read` re-sends every *host-table-registered* id at its registered size.
+Run while the wedge was active, it split them cleanly:
+
+| outcome | ids |
+| --- | --- |
+| `0x62 NV_ERR_RESET_REQUIRED` | `0x20802609` pmgr-get-module-info, `0x20801037` clk-pmumon-domains, `0x2080200b` perf-level-info-v2, `0x2080205a`, `0x20802068`, perf-get-vid-eng-perfmon, perf-get-gpumon-util-samples |
+| `NV_OK` | `0x2080122a` kgr-get-gfx-gpc-tpc-info, kgr-get-gpc-mask, fb-get-static-bar1-info |
+| `0x56 NOT_SUPPORTED` | the internal-pm / memsys / timer family |
+| `0x1f INVALID_ARGUMENT` | `0x20800102`, `0x20801201`, `0x20801303` |
+
+The `0x62` set is exactly the set that was `NV_OK` before the wedge and that
+also goes to the GSP — *including* ids that **are** in the host table. So being
+registered in the host NVOC table does **not** mean the host answers a command;
+several registered perf/pmgr/clk rows are GSP-implemented too. A `0x62` sweep
+is therefore a cheap way to tell host-implemented rows from GSP-dispatched
+ones, without touching the firmware.
+
 ## 7. `0x2080b201` is answered *outside* the GSP path
 
 While every GSP-forwarded id above answered `0x62 NV_ERR_RESET_REQUIRED`,
 `0x2080b201 @2444` kept answering `NV_OK` with its usual
-`mask 0xFF + 800000 µV / 756250 µV` payload. So that id is **not** served by
-the GSP legacy forward, despite carrying the `0x8000` legacy bit. It is either
-a host-side handler or a different (non-legacy) transport. This finally gives
+`mask 0xFF + 800000 µV / 756250 µV` payload — while *registered* GSP-backed
+commands like `0x2080200b` and `0x20802609` were `0x62` (see §6.1). So the
+wedge covers the GSP service generally, not just the legacy forward, and
+`0x2080b201` is not served by it at all, despite carrying the `0x8000` legacy
+bit. It is either a host-side handler or a different transport. This finally gives
 the long-standing "unattributed responder" of §4 a definite counter-example:
 at least one accepted private id survives a GSP wedge, and at least one does
 not.
