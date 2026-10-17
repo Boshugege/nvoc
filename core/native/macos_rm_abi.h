@@ -19,6 +19,10 @@
  *     mismatch is rejected instead of writing a partially-filled struct.
  *   - the caller serializes all entry points (nvx_xnu owns a process-global
  *     fd table).
+ *
+ * ABI v3 carries the full read-only RUSD page plus the two live RM controls
+ * (P-state, FB heap usage) through one section table, so the one-shot and the
+ * continuous paths interpret driver telemetry through identical field rules.
  */
 #ifndef NVOC_MACOS_RM_ABI_H
 #define NVOC_MACOS_RM_ABI_H
@@ -26,9 +30,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define NVOC_RM_ABI_VERSION 2u
+#define NVOC_RM_ABI_VERSION 3u
 
-/* Per-field status codes carried in nvoc_rm_sample.field_status. */
+/* Per-section status codes carried in nvoc_rm_sample.field_status. */
+/* The section was copied under a stable, data-valid sequence. */
 #define NVOC_RM_FIELD_OK 0u
 /* The section's RUSD sequence or timestamp changed while it was copied: no
  * coherent value this round. Retrying later is reasonable. */
@@ -37,21 +42,87 @@
  * this platform right now (cl00de.h RUSD_TIMESTAMP_INVALID). Retrying will
  * not help until the driver starts polling that section. */
 #define NVOC_RM_FIELD_UNAVAILABLE 2u
+/* One-shot only: the section was readable but did not publish a new value
+ * inside the initial freshness budget, so the value may predate the query. */
+#define NVOC_RM_FIELD_NOT_FRESH 3u
 
-/* Polled RUSD sections, in the order the Rust side indexes them. */
-#define NVOC_RM_RUSD_FIELDS 6
+/* Polled RUSD sections, in the order the Rust side indexes them. The list is
+ * exactly the NV00DE poll mask nvoc_macos_rm requests (see NVOC_RM_POLL_MASK)
+ * and is limited to sections the 610.57.04 driver actually populates: memEcc
+ * and memRowRemap stay RUSD_TIMESTAMP_INVALID even when POLL_MEMORY is
+ * requested, so they are deliberately not carried. */
+#define NVOC_RM_RUSD_FIELDS 14
 #define NVOC_RM_RUSD_CLOCK 0
-#define NVOC_RM_RUSD_TEMP 1
-#define NVOC_RM_RUSD_POWER 2
-#define NVOC_RM_RUSD_LIMIT 3
-#define NVOC_RM_RUSD_FAN 4
-#define NVOC_RM_RUSD_UTIL 5
+#define NVOC_RM_RUSD_TEMP_GPU 1
+#define NVOC_RM_RUSD_TEMP_MEMORY 2
+#define NVOC_RM_RUSD_TEMP_BOARD 3
+#define NVOC_RM_RUSD_TEMP_POWER_SUPPLY 4
+#define NVOC_RM_RUSD_POWER 5
+#define NVOC_RM_RUSD_POWER_LIMIT 6
+#define NVOC_RM_RUSD_AVG_POWER 7
+#define NVOC_RM_RUSD_POWER_POLICY 8
+#define NVOC_RM_RUSD_THROTTLE 9
+#define NVOC_RM_RUSD_FAN 10
+#define NVOC_RM_RUSD_UTIL 11
+#define NVOC_RM_RUSD_PCI 12
+#define NVOC_RM_RUSD_PROC_UTIL 13
 
+/* Fixed-size value blocks inside nvoc_rm_sample. */
+#define NVOC_RM_CLK_DOMAINS 4      /* graphics, memory, video, sm */
+#define NVOC_RM_TEMP_SENSORS 4     /* gpu, memory, board, power supply */
+#define NVOC_RM_FAN_MAX_COOLERS 16
+#define NVOC_RM_ENGINES 6          /* graphics, framebuffer, nvenc, nvdec, nvjpg, nvofa */
+
+/* Poll mask passed to the NV00DE alloc: every section nvoc_rm_sample carries.
+ * POLL_MEMORY is intentionally absent (see the section list above). */
+#define NVOC_RM_POLL_MASK 0xFBu
+
+/* One coherent read of the mapped page. field_status[i] == NVOC_RM_FIELD_OK
+ * means the value was copied under a stable, data-valid RUSD sequence;
+ * nonzero means that section produced nothing usable this round and its value
+ * fields must be ignored. timestamps[i] is the section's lastModifiedTimestamp
+ * as observed (polled sections carry a host realtime nanosecond stamp) and is
+ * 0 when unknown.
+ *
+ * `pstate`/`pstate_status` and `memory_used_kb`/`memory_used_status` come from
+ * live RM controls re-read on every sample, not from the mapped page; their
+ * values are new whenever the status is 0. */
 typedef struct {
-    uint32_t status, valid, graphics_khz, memory_khz;
-    int32_t temperature_fx256;
-    uint32_t power_mw, limit_mw, fan_rpm, utilization_percent, reserved;
+    uint32_t abi_version;
+    uint32_t field_status[NVOC_RM_RUSD_FIELDS];
     uint64_t timestamps[NVOC_RM_RUSD_FIELDS];
+    /* CLOCK: target (MHz) and actual (kHz) for graphics, memory, video, sm.
+     * A domain the driver does not implement reports 0/0. */
+    uint32_t clk_target_mhz[NVOC_RM_CLK_DOMAINS];
+    uint32_t clk_actual_khz[NVOC_RM_CLK_DOMAINS];
+    /* TEMP_*: fixed-point 8.8 Celsius, same encoding as NvTemp. */
+    int32_t temperature_fx256[NVOC_RM_TEMP_SENSORS];
+    uint32_t power_mw, power_limit_requested_mw, power_limit_mw;
+    uint32_t average_power_mw, power_policy_tgp_mw, throttle_reason_mask;
+    /* FAN: one RUSD section; rpmCurr[] copied verbatim. The driver does not
+     * report how many coolers exist, so callers treat 0 entries as "no
+     * reading" and validate plausible ranges themselves. */
+    uint32_t fan_rpm[NVOC_RM_FAN_MAX_COOLERS];
+    /* UTIL: perfDevUtil percentages. */
+    uint32_t utilization_percent, memory_utilization_percent;
+    /* PROC_UTIL: engine busy percent x100 (cl00de.h units), newest sample. */
+    uint32_t engine_utilization_pct100[NVOC_RM_ENGINES];
+    /* PCI: RUSD_BUS_DATA_PCIE_GEN_INFO copied verbatim (cl00de.h says it
+     * matches NV2080_CTRL_BUS_INFO_INDEX_PCIE_GEN_INFO). Decoded by Rust. */
+    uint32_t pci_gen_info;
+    uint32_t pstate, pstate_status;
+    /* FB_GET_INFO_V2: used video memory (heap size - heap free), kilobytes. */
+    uint32_t memory_used_kb, memory_used_status;
+} nvoc_rm_sample;
+
+/* One-shot telemetry: the mapped-page status plus the same section table the
+ * continuous path uses. `status` is the RUSD allocate/map failure (0 = ok) and
+ * `sample.field_status` distinguishes per-section failures, including
+ * NVOC_RM_FIELD_NOT_FRESH for a section that was readable but stayed on its
+ * mapping-time watermark for the whole wait budget. */
+typedef struct {
+    uint32_t status;
+    nvoc_rm_sample sample;
 } nvoc_rm_telemetry;
 
 typedef struct {
@@ -63,35 +134,27 @@ typedef struct {
     nvoc_rm_telemetry telemetry;
 } nvoc_rm_snapshot;
 
-/* One coherent read of the mapped page. field_status[i] == NVOC_RM_FIELD_OK
- * means the value was copied under a stable, data-valid RUSD sequence;
- * nonzero means that section produced nothing usable this round and the value
- * field must be ignored. timestamps[i] is the section's lastModifiedTimestamp
- * as observed (polled sections carry a host realtime nanosecond stamp, others
- * a cl00de.h sequence number) and is 0 when unknown. */
-typedef struct {
-    uint32_t abi_version;
-    uint32_t field_status[NVOC_RM_RUSD_FIELDS];
-    uint32_t graphics_khz, memory_khz;
-    int32_t temperature_fx256;
-    uint32_t power_mw, limit_mw, fan_rpm, utilization_percent;
-    uint32_t pstate, pstate_status;
-    uint64_t timestamps[NVOC_RM_RUSD_FIELDS];
-} nvoc_rm_sample;
-
 /* Opaque: defined in macos_rm.c. Rust only ever holds a pointer. */
 typedef struct nvoc_rm_session nvoc_rm_session;
 
-_Static_assert(sizeof(nvoc_rm_telemetry) == 88, "nvoc_rm_telemetry ABI drift");
-_Static_assert(sizeof(nvoc_rm_snapshot) == 360, "nvoc_rm_snapshot ABI drift");
-_Static_assert(sizeof(nvoc_rm_sample) == 112, "nvoc_rm_sample ABI drift");
+_Static_assert(sizeof(nvoc_rm_sample) == 368, "nvoc_rm_sample ABI drift");
+_Static_assert(sizeof(nvoc_rm_telemetry) == 376, "nvoc_rm_telemetry ABI drift");
+_Static_assert(sizeof(nvoc_rm_snapshot) == 648, "nvoc_rm_snapshot ABI drift");
 
 _Static_assert(offsetof(nvoc_rm_snapshot, telemetry) == 272, "snapshot.telemetry offset drift");
 _Static_assert(offsetof(nvoc_rm_snapshot, driver) == 108, "snapshot.driver offset drift");
-_Static_assert(offsetof(nvoc_rm_telemetry, timestamps) == 40, "telemetry.timestamps offset drift");
-_Static_assert(offsetof(nvoc_rm_sample, graphics_khz) == 28, "sample.graphics_khz offset drift");
-_Static_assert(offsetof(nvoc_rm_sample, pstate) == 56, "sample.pstate offset drift");
+_Static_assert(offsetof(nvoc_rm_telemetry, sample) == 8, "telemetry.sample offset drift");
 _Static_assert(offsetof(nvoc_rm_sample, timestamps) == 64, "sample.timestamps offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, clk_target_mhz) == 176, "sample.clk_target_mhz offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, clk_actual_khz) == 192, "sample.clk_actual_khz offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, temperature_fx256) == 208, "sample.temperature_fx256 offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, power_mw) == 224, "sample.power_mw offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, fan_rpm) == 248, "sample.fan_rpm offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, utilization_percent) == 312, "sample.utilization_percent offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, engine_utilization_pct100) == 320, "sample.engine_utilization_pct100 offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, pci_gen_info) == 344, "sample.pci_gen_info offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, pstate) == 348, "sample.pstate offset drift");
+_Static_assert(offsetof(nvoc_rm_sample, memory_used_kb) == 356, "sample.memory_used_kb offset drift");
 
 /* One-shot read: open a chain, capture identity, optionally wait for fresh
  * telemetry, release everything. `telemetry` is a boolean. */
@@ -122,17 +185,23 @@ uint32_t nvoc_macos_rm_session_close(nvoc_rm_session *session, char *error, size
 
 /* Layout fingerprint for the cross-language ABI test (Rust mirrors it in
  * core/src/macos_rm.rs::abi_layout). Slots, in order:
- *   0  sizeof(nvoc_rm_snapshot)          1  sizeof(nvoc_rm_sample)
- *   2  sizeof(nvoc_rm_telemetry)         3  offsetof(snapshot, telemetry)
- *   4  offsetof(snapshot, driver)        5  offsetof(telemetry, timestamps)
- *   6  offsetof(telemetry, temperature_fx256)
- *   7  offsetof(sample, graphics_khz)    8  offsetof(sample, pstate)
- *   9  offsetof(sample, timestamps)     10  NVOC_RM_ABI_VERSION
- *  11  NVOC_RM_RUSD_FIELDS              12  NVOC_RM_FIELD_OK
- *  13  NVOC_RM_FIELD_UNSTABLE           14  NVOC_RM_FIELD_UNAVAILABLE
- *  15-20  NVOC_RM_RUSD_CLOCK/TEMP/POWER/LIMIT/FAN/UTIL
+ *   0  sizeof(nvoc_rm_snapshot)             1  sizeof(nvoc_rm_sample)
+ *   2  sizeof(nvoc_rm_telemetry)            3  offsetof(snapshot, telemetry)
+ *   4  offsetof(snapshot, driver)           5  offsetof(telemetry, sample)
+ *   6  offsetof(sample, timestamps)         7  offsetof(sample, temperature_fx256)
+ *   8  offsetof(sample, clk_target_mhz)     9  offsetof(sample, clk_actual_khz)
+ *  10  offsetof(sample, power_mw)          11  offsetof(sample, fan_rpm)
+ *  12  offsetof(sample, engine_utilization_pct100)
+ *  13  offsetof(sample, pci_gen_info)      14  offsetof(sample, pstate)
+ *  15  offsetof(sample, memory_used_kb)    16  NVOC_RM_ABI_VERSION
+ *  17  NVOC_RM_RUSD_FIELDS                 18  NVOC_RM_FIELD_OK
+ *  19  NVOC_RM_FIELD_UNSTABLE              20  NVOC_RM_FIELD_UNAVAILABLE
+ *  21  NVOC_RM_FIELD_NOT_FRESH             22  NVOC_RM_CLK_DOMAINS
+ *  23  NVOC_RM_TEMP_SENSORS                24  NVOC_RM_FAN_MAX_COOLERS
+ *  25  NVOC_RM_ENGINES                     26  NVOC_RM_POLL_MASK
+ *  27-40  NVOC_RM_RUSD_CLOCK .. NVOC_RM_RUSD_PROC_UTIL (14 section indices)
  * Fills up to `count` slots and returns the number this build has. */
-#define NVOC_RM_LAYOUT_SLOTS 21
+#define NVOC_RM_LAYOUT_SLOTS 41
 size_t nvoc_macos_rm_abi_layout(uint64_t *out, size_t count);
 
 #endif

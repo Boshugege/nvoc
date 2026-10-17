@@ -32,13 +32,49 @@ pub struct DeviceInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceStatus {
     pub pstate: Option<u32>,
+    /// Actual (effective) clock of each public domain the driver reports.
     pub graphics_clock_khz: Option<u32>,
     pub memory_clock_khz: Option<u32>,
+    pub video_clock_khz: Option<u32>,
+    pub sm_clock_khz: Option<u32>,
+    /// Target clock the driver currently requests for the same domains.
+    pub graphics_target_clock_mhz: Option<u32>,
+    pub memory_target_clock_mhz: Option<u32>,
+    pub video_target_clock_mhz: Option<u32>,
+    pub sm_target_clock_mhz: Option<u32>,
     pub temperature_c: Option<f64>,
+    pub temperature_memory_c: Option<f64>,
+    pub temperature_board_c: Option<f64>,
+    pub temperature_power_supply_c: Option<f64>,
+    /// Instantaneous GPU (die) power draw in mW.
     pub power_mw: Option<u32>,
+    /// Current enforced power limit (the live TGP wall) in mW.
     pub power_limit_mw: Option<u32>,
+    /// Power limit the driver was asked for, which clamping may exceed.
+    pub power_limit_requested_mw: Option<u32>,
+    /// Driver's own average GPU power window, when it publishes one.
+    pub average_power_mw: Option<u32>,
+    /// Total GPU power from the power-policy block (nvml's "power policy").
+    pub power_policy_tgp_mw: Option<u32>,
+    /// Raw clkThrottleInfo.reasonMask (cl00de.h RUSD_CLK_THROTTLE_REASON_*).
+    pub throttle_reason_mask: Option<u32>,
+    /// Decoded names of the active throttle reasons.
+    pub throttle_reasons: Vec<String>,
+    /// Highest live fan reading in rpm (0 means "stopped", not "unknown").
     pub fan_rpm: Option<u32>,
+    /// One entry per live cooler the driver reports.
+    pub fan_rpms: Vec<u32>,
     pub utilization_percent: Option<u32>,
+    pub memory_utilization_percent: Option<u32>,
+    /// Busy percent per engine, keyed the way the driver names them (gr, fb,
+    /// nvenc, nvdec, nvjpg, nvofa).
+    pub engine_utilization_percent: BTreeMap<String, f64>,
+    /// Negotiated / maximum PCI Express generation, decoded from
+    /// RUSD_BUS_DATA_PCIE_GEN_INFO.
+    pub pcie_link_gen: Option<u32>,
+    pub pcie_max_link_gen: Option<u32>,
+    /// Video memory in use (FB_GET_INFO_V2 heap size - heap free).
+    pub memory_used_bytes: Option<u64>,
     /// RUSD per-section update timestamp, or even sequence for non-polled data.
     pub rusd_timestamps: BTreeMap<String, u64>,
     pub unavailable: BTreeMap<String, String>,
@@ -114,13 +150,44 @@ impl crate::GpuOperation for QueryMacosRmStatus {
 /// Version of the private C ABI in core/native/macos_rm_abi.h. Bump both
 /// sides together: the C header pins the same number and the hardware test
 /// compares the two fingerprints.
-const ABI_VERSION: u32 = 2;
+const ABI_VERSION: u32 = 3;
 
 /// Slots returned by [`abi_layout`] and by the native
 /// nvoc_macos_rm_abi_layout(): sizes, field offsets, the ABI version and the
 /// per-field status codes Rust matches on. Keeping them identical is what the
 /// C header's `_Static_assert`s and the hardware test enforce.
-pub const ABI_LAYOUT_SLOTS: usize = 21;
+pub const ABI_LAYOUT_SLOTS: usize = 41;
+
+/// RUSD section indices and value-block sizes, matching macos_rm_abi.h (the
+/// header is the source of truth; the layout fingerprint and the compile-time
+/// asserts below keep the two sides identical).
+const RUSD_FIELDS: usize = 14;
+const SEC_CLOCK: usize = 0;
+const SEC_TEMP_GPU: usize = 1;
+const SEC_TEMP_MEMORY: usize = 2;
+const SEC_TEMP_BOARD: usize = 3;
+const SEC_TEMP_POWER_SUPPLY: usize = 4;
+const SEC_POWER: usize = 5;
+const SEC_POWER_LIMIT: usize = 6;
+const SEC_AVG_POWER: usize = 7;
+const SEC_POWER_POLICY: usize = 8;
+const SEC_THROTTLE: usize = 9;
+const SEC_FAN: usize = 10;
+const SEC_UTIL: usize = 11;
+const SEC_PCI: usize = 12;
+const SEC_PROC_UTIL: usize = 13;
+const CLK_DOMAINS: usize = 4;
+const TEMP_SENSORS: usize = 4;
+const FAN_MAX_COOLERS: usize = 16;
+const ENGINES: usize = 6;
+/// cl00de.h NV00DE_RUSD_POLL_* mask the native layer requests.
+const POLL_MASK: u32 = 0xFB;
+
+/// Field status codes reported by the native side (macos_rm_abi.h).
+const FIELD_OK: u32 = 0;
+const FIELD_UNSTABLE: u32 = 1;
+const FIELD_UNAVAILABLE: u32 = 2;
+const FIELD_NOT_FRESH: u32 = 3;
 
 /// Private stable C ABI, not an NVIDIA RM structure. NVIDIA layouts live only
 // in native/macos_rm.c, compiled against the driver's matching OGKM headers.
@@ -160,20 +227,38 @@ struct Snapshot {
 #[derive(Default)]
 struct Telemetry {
     status: u32,
-    valid: u32,
-    graphics_khz: u32,
-    memory_khz: u32,
-    temperature_fx256: i32,
-    power_mw: u32,
-    limit_mw: u32,
-    fan_rpm: u32,
-    utilization_percent: u32,
-    reserved: u32,
-    timestamps: [u64; 6],
+    sample: RawSample,
 }
 
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const _: () = assert!(std::mem::size_of::<Snapshot>() == 360);
+/// Raw per-field telemetry exactly as produced by the native layer: one
+/// section status + timestamp table plus the value blocks. Every field is a
+/// plain integer so the C/Rust layouts can be size-checked, and the driver's
+/// own units are preserved (kHz, MHz, mW, 8.8 fixed-point C, percent x100).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct RawSample {
+    abi_version: u32,
+    field_status: [u32; RUSD_FIELDS],
+    timestamps: [u64; RUSD_FIELDS],
+    clk_target_mhz: [u32; CLK_DOMAINS],
+    clk_actual_khz: [u32; CLK_DOMAINS],
+    temperature_fx256: [i32; TEMP_SENSORS],
+    power_mw: u32,
+    power_limit_requested_mw: u32,
+    power_limit_mw: u32,
+    average_power_mw: u32,
+    power_policy_tgp_mw: u32,
+    throttle_reason_mask: u32,
+    fan_rpm: [u32; FAN_MAX_COOLERS],
+    utilization_percent: u32,
+    memory_utilization_percent: u32,
+    engine_utilization_pct100: [u32; ENGINES],
+    pci_gen_info: u32,
+    pstate: u32,
+    pstate_status: u32,
+    memory_used_kb: u32,
+    memory_used_status: u32,
+}
 
 fn text(bytes: &[u8]) -> String {
     let end = bytes
@@ -232,60 +317,7 @@ fn device_from_snapshot(s: &Snapshot) -> Device {
 }
 
 fn status_from_snapshot(s: &Snapshot) -> DeviceStatus {
-    let t = &s.telemetry;
-    let mut unavailable = BTreeMap::new();
-    let mut rusd_timestamps = BTreeMap::new();
-    let mut valid = |field: &str, section: usize, sane: bool| {
-        let reason = if t.status != 0 {
-            Some(format!(
-                "RUSD allocation/mapping failed: 0x{:08x}",
-                t.status
-            ))
-        } else if t.valid & (1 << section) == 0 {
-            Some("RUSD field unavailable, unstable or did not update within 1.5 s".into())
-        } else if !sane {
-            Some("RUSD field reported an invalid value".into())
-        } else {
-            None
-        };
-        if let Some(reason) = reason {
-            unavailable.insert(field.into(), reason);
-            false
-        } else {
-            rusd_timestamps.insert(field.into(), t.timestamps[section]);
-            true
-        }
-    };
-    let graphics_clock_khz =
-        valid("graphics_clock_khz", 0, t.graphics_khz != u32::MAX).then_some(t.graphics_khz);
-    let memory_clock_khz =
-        valid("memory_clock_khz", 0, t.memory_khz != u32::MAX).then_some(t.memory_khz);
-    let temperature_c = valid(
-        "temperature_c",
-        1,
-        (-50 * 256..=150 * 256).contains(&t.temperature_fx256),
-    )
-    .then_some(f64::from(t.temperature_fx256) / 256.0);
-    let power_mw = valid("power_mw", 2, t.power_mw != u32::MAX).then_some(t.power_mw);
-    let power_limit_mw = valid("power_limit_mw", 3, t.limit_mw != u32::MAX).then_some(t.limit_mw);
-    let fan_rpm = valid("fan_rpm", 4, t.fan_rpm != u32::MAX).then_some(t.fan_rpm);
-    let utilization_percent = valid("utilization_percent", 5, t.utilization_percent <= 100)
-        .then_some(t.utilization_percent);
-    if s.pstate_status != 0 {
-        unavailable.insert("pstate".into(), query_error(s.pstate_status));
-    }
-    DeviceStatus {
-        pstate: (s.pstate_status == 0).then_some(s.pstate),
-        graphics_clock_khz,
-        memory_clock_khz,
-        temperature_c,
-        power_mw,
-        power_limit_mw,
-        fan_rpm,
-        utilization_percent,
-        rusd_timestamps,
-        unavailable,
-    }
+    interpret_oneshot(&s.telemetry.sample, s.telemetry.status)
 }
 
 /// nvx_xnu owns a process-global fd table, so every native call (one-shot and
@@ -398,15 +430,6 @@ fn read_snapshot(_telemetry: bool) -> Result<Snapshot, Error> {
 // freshness/update interpretation that decides field validity.
 // ---------------------------------------------------------------------------
 
-/// RUSD section indices, matching the enum in core/native/macos_rm.c.
-const RUSD_FIELDS: usize = 6;
-const FIELD_CLOCK: usize = 0;
-const FIELD_TEMP: usize = 1;
-const FIELD_POWER: usize = 2;
-const FIELD_LIMIT: usize = 3;
-const FIELD_FAN: usize = 4;
-const FIELD_UTIL: usize = 5;
-
 /// A polled section that has not advanced for this long is reported as
 /// unavailable instead of repeating its last value forever. The driver's
 /// measured poll cadence is 500 ms (see
@@ -419,27 +442,8 @@ pub const MONITOR_STALE_AFTER: Duration = Duration::from_secs(5);
 /// is emitted, matching the one-shot query's freshness guarantee.
 const INITIAL_FRESH_BUDGET: Duration = Duration::from_millis(1500);
 
-/// Raw per-field telemetry exactly as produced by the native session. Every
-/// field is a plain integer so the C/Rust layouts can be size-checked.
-#[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct RawSample {
-    abi_version: u32,
-    field_status: [u32; RUSD_FIELDS],
-    graphics_khz: u32,
-    memory_khz: u32,
-    temperature_fx256: i32,
-    power_mw: u32,
-    limit_mw: u32,
-    fan_rpm: u32,
-    utilization_percent: u32,
-    pstate: u32,
-    pstate_status: u32,
-    timestamps: [u64; RUSD_FIELDS],
-}
-
 /// The Rust half of the C/Rust layout fingerprint. Slot meanings match
-/// NVOC_RM_LAYOUT_* in core/native/macos_rm_abi.h and the assertions in
+/// NVOC_RM_LAYOUT_SLOTS in core/native/macos_rm_abi.h and the assertions in
 /// core/tests/macos_rm_abi.c; `native_abi_layout()` returns the C half.
 pub fn abi_layout() -> [u64; ABI_LAYOUT_SLOTS] {
     [
@@ -448,22 +452,42 @@ pub fn abi_layout() -> [u64; ABI_LAYOUT_SLOTS] {
         std::mem::size_of::<Telemetry>() as u64,
         std::mem::offset_of!(Snapshot, telemetry) as u64,
         std::mem::offset_of!(Snapshot, driver) as u64,
-        std::mem::offset_of!(Telemetry, timestamps) as u64,
-        std::mem::offset_of!(Telemetry, temperature_fx256) as u64,
-        std::mem::offset_of!(RawSample, graphics_khz) as u64,
-        std::mem::offset_of!(RawSample, pstate) as u64,
+        std::mem::offset_of!(Telemetry, sample) as u64,
         std::mem::offset_of!(RawSample, timestamps) as u64,
+        std::mem::offset_of!(RawSample, temperature_fx256) as u64,
+        std::mem::offset_of!(RawSample, clk_target_mhz) as u64,
+        std::mem::offset_of!(RawSample, clk_actual_khz) as u64,
+        std::mem::offset_of!(RawSample, power_mw) as u64,
+        std::mem::offset_of!(RawSample, fan_rpm) as u64,
+        std::mem::offset_of!(RawSample, engine_utilization_pct100) as u64,
+        std::mem::offset_of!(RawSample, pci_gen_info) as u64,
+        std::mem::offset_of!(RawSample, pstate) as u64,
+        std::mem::offset_of!(RawSample, memory_used_kb) as u64,
         ABI_VERSION as u64,
         RUSD_FIELDS as u64,
         FIELD_OK as u64,
         FIELD_UNSTABLE as u64,
         FIELD_UNAVAILABLE as u64,
-        FIELD_CLOCK as u64,
-        FIELD_TEMP as u64,
-        FIELD_POWER as u64,
-        FIELD_LIMIT as u64,
-        FIELD_FAN as u64,
-        FIELD_UTIL as u64,
+        FIELD_NOT_FRESH as u64,
+        CLK_DOMAINS as u64,
+        TEMP_SENSORS as u64,
+        FAN_MAX_COOLERS as u64,
+        ENGINES as u64,
+        POLL_MASK as u64,
+        SEC_CLOCK as u64,
+        SEC_TEMP_GPU as u64,
+        SEC_TEMP_MEMORY as u64,
+        SEC_TEMP_BOARD as u64,
+        SEC_TEMP_POWER_SUPPLY as u64,
+        SEC_POWER as u64,
+        SEC_POWER_LIMIT as u64,
+        SEC_AVG_POWER as u64,
+        SEC_POWER_POLICY as u64,
+        SEC_THROTTLE as u64,
+        SEC_FAN as u64,
+        SEC_UTIL as u64,
+        SEC_PCI as u64,
+        SEC_PROC_UTIL as u64,
     ]
 }
 
@@ -471,16 +495,23 @@ pub fn abi_layout() -> [u64; ABI_LAYOUT_SLOTS] {
 /// change on either side fails the build instead of silently mis-reading
 /// driver memory.
 const _: () = {
-    assert!(std::mem::size_of::<Snapshot>() == 360);
-    assert!(std::mem::size_of::<RawSample>() == 112);
-    assert!(std::mem::size_of::<Telemetry>() == 88);
+    assert!(std::mem::size_of::<Snapshot>() == 648);
+    assert!(std::mem::size_of::<RawSample>() == 368);
+    assert!(std::mem::size_of::<Telemetry>() == 376);
     assert!(std::mem::offset_of!(Snapshot, telemetry) == 272);
     assert!(std::mem::offset_of!(Snapshot, driver) == 108);
-    assert!(std::mem::offset_of!(Telemetry, timestamps) == 40);
-    assert!(std::mem::offset_of!(Telemetry, temperature_fx256) == 16);
-    assert!(std::mem::offset_of!(RawSample, graphics_khz) == 28);
-    assert!(std::mem::offset_of!(RawSample, pstate) == 56);
+    assert!(std::mem::offset_of!(Telemetry, sample) == 8);
     assert!(std::mem::offset_of!(RawSample, timestamps) == 64);
+    assert!(std::mem::offset_of!(RawSample, clk_target_mhz) == 176);
+    assert!(std::mem::offset_of!(RawSample, clk_actual_khz) == 192);
+    assert!(std::mem::offset_of!(RawSample, temperature_fx256) == 208);
+    assert!(std::mem::offset_of!(RawSample, power_mw) == 224);
+    assert!(std::mem::offset_of!(RawSample, fan_rpm) == 248);
+    assert!(std::mem::offset_of!(RawSample, utilization_percent) == 312);
+    assert!(std::mem::offset_of!(RawSample, engine_utilization_pct100) == 320);
+    assert!(std::mem::offset_of!(RawSample, pci_gen_info) == 344);
+    assert!(std::mem::offset_of!(RawSample, pstate) == 348);
+    assert!(std::mem::offset_of!(RawSample, memory_used_kb) == 356);
 };
 
 /// Opaque native session handle; only ever touched through the extern ABI.
@@ -519,11 +550,6 @@ impl DeviceSample {
         self.advancing_sections
     }
 }
-
-/// Field status codes reported by the native side (macos_rm_abi.h).
-const FIELD_OK: u32 = 0;
-const FIELD_UNSTABLE: u32 = 1;
-const FIELD_UNAVAILABLE: u32 = 2;
 
 /// Consecutive samples with no section advancing at all before the session is
 /// considered dead and the caller is asked to reconnect. One quiet field is
@@ -586,10 +612,25 @@ struct SectionCheck {
     /// re-initialised the page. The value is still new, but the timeline
     /// restarted and no absolute age may be derived from it.
     epoch_reset: bool,
+    /// Whole-subsystem reason (the RUSD page could not be allocated/mapped)
+    /// that replaces the per-section text when set.
+    override_reason: Option<String>,
+}
+
+/// Which wait produced a `NeverRefreshed` verdict, so the reason text names the
+/// right budget: the one-shot query waits once before answering, the monitor
+/// keeps waiting for the whole session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FreshnessScope {
+    InitialQuery,
+    Session,
 }
 
 impl SectionCheck {
-    fn reason(&self, stale_ms: u64) -> String {
+    fn reason(&self, stale_ms: u64, scope: FreshnessScope) -> String {
+        if let Some(reason) = &self.override_reason {
+            return reason.clone();
+        }
         match self.state {
             FieldState::Unsupported => {
                 "RUSD section has no valid timestamp (driver does not publish it)".into()
@@ -597,10 +638,15 @@ impl SectionCheck {
             FieldState::Unstable => {
                 "RUSD section changed while it was copied (unstable sequence)".into()
             }
-            FieldState::NeverRefreshed => format!(
-                "no RUSD update since this session opened ({} ms)",
-                self.silent_ms
-            ),
+            FieldState::NeverRefreshed => match scope {
+                FreshnessScope::InitialQuery => {
+                    "no RUSD update within the initial freshness budget".into()
+                }
+                FreshnessScope::Session => format!(
+                    "no RUSD update since this session opened ({} ms)",
+                    self.silent_ms
+                ),
+            },
             FieldState::Stale => format!(
                 "no RUSD update for {} ms (staleness window {} ms)",
                 self.silent_ms, stale_ms
@@ -629,6 +675,7 @@ fn track_section(
                 state: FieldState::Unsupported,
                 silent_ms: silent_ns / 1_000_000,
                 epoch_reset: false,
+                override_reason: None,
             };
         }
         _ => {
@@ -636,6 +683,7 @@ fn track_section(
                 state: FieldState::Unstable,
                 silent_ms: silent_ns / 1_000_000,
                 epoch_reset: false,
+                override_reason: None,
             };
         }
     }
@@ -644,6 +692,7 @@ fn track_section(
             state: FieldState::Unsupported,
             silent_ms: silent_ns / 1_000_000,
             epoch_reset: false,
+            override_reason: None,
         };
     }
     if ts != tracker.ts {
@@ -657,6 +706,7 @@ fn track_section(
             state: FieldState::Advancing,
             silent_ms: 0,
             epoch_reset,
+            override_reason: None,
         };
     }
     let state = if !tracker.seen_change {
@@ -670,6 +720,7 @@ fn track_section(
         state,
         silent_ms: silent_ns / 1_000_000,
         epoch_reset: false,
+        override_reason: None,
     }
 }
 
@@ -691,20 +742,21 @@ impl SampleFields {
         name: &str,
         check: &SectionCheck,
         ts: u64,
-        sane: bool,
+        value: ValueCheck,
         stale_ms: u64,
+        scope: FreshnessScope,
     ) -> bool {
         self.freshness.insert(name.into(), check.state);
         if check.epoch_reset {
             self.epoch_resets.push(name.into());
         }
         if !check.state.publishes_value() {
-            self.unavailable.insert(name.into(), check.reason(stale_ms));
+            self.unavailable
+                .insert(name.into(), check.reason(stale_ms, scope));
             return false;
         }
-        if !sane {
-            self.unavailable
-                .insert(name.into(), "RUSD field reported an invalid value".into());
+        if let Some(reason) = value.reason() {
+            self.unavailable.insert(name.into(), reason.into());
             return false;
         }
         self.timestamps.insert(name.into(), ts);
@@ -712,17 +764,444 @@ impl SampleFields {
         true
     }
 
-    /// Publish a whole section at once (the clock section feeds two fields).
+    /// Note a section's advancement for the whole-page "went silent" health
+    /// check (the clock section feeds eight value fields but is one section).
     fn note_section(&mut self, check: &SectionCheck) {
         if check.state.is_advancing() {
             self.advancing_sections += 1;
         }
     }
+
+    /// Record a field that comes from a live RM control rather than a RUSD
+    /// section: it is new whenever its query succeeded.
+    fn publish_live(&mut self, name: &str, status: u32) -> bool {
+        if status == 0 {
+            self.freshness.insert(name.into(), FieldState::Advancing);
+            self.updated.insert(name.into(), true);
+            true
+        } else {
+            self.freshness.insert(name.into(), FieldState::Unsupported);
+            self.unavailable.insert(name.into(), query_error(status));
+            false
+        }
+    }
 }
 
-/// Interpret one raw native sample. Pure and deterministic so the freshness,
-/// staleness, zero-value, epoch-reset and partial-missing rules are CPU
-/// testable.
+/// Whether a present value may be published. Separated from the freshness
+/// check because "the driver does not report this" and "the driver reported
+/// something impossible" are different conditions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueCheck {
+    Ok,
+    /// Out of the plausible range for the field, e.g. a fan at 294 118 rpm
+    /// from an unpopulated RUSD slot. Never published as a measurement.
+    Invalid,
+    /// The driver reports no value for this sub-field (a clock domain it does
+    /// not implement, a temperature sensor with no sensor fitted).
+    NotReported,
+}
+
+impl ValueCheck {
+    fn reason(self) -> Option<&'static str> {
+        match self {
+            ValueCheck::Ok => None,
+            ValueCheck::Invalid => Some("RUSD field reported an implausible value"),
+            ValueCheck::NotReported => Some("driver reports no value for this field"),
+        }
+    }
+}
+
+/// Plausibility bounds. A value outside these is treated as "the driver
+/// published garbage" instead of being shown as a reading: the fan array in
+/// particular carries unpopulated slots that read as huge rpm counts.
+const MAX_FAN_RPM: u32 = 20_000;
+const MAX_CLOCK_KHZ: u32 = 20_000_000; // 20 GHz, far above any real GPU clock
+const MAX_TARGET_MHZ: u32 = 20_000;
+const MAX_POWER_MW: u32 = 2_000_000; // 2 kW
+const TEMP_MIN_FX256: i32 = -50 * 256;
+const TEMP_MAX_FX256: i32 = 150 * 256;
+
+fn temperature_sane(fx256: i32) -> bool {
+    (TEMP_MIN_FX256..=TEMP_MAX_FX256).contains(&fx256)
+}
+
+/// cl00de.h RUSD_CLK_THROTTLE_REASON_*, bit order preserved.
+const THROTTLE_REASONS: [(u32, &str); 9] = [
+    (1 << 0, "gpu_idle"),
+    (1 << 1, "application_clock_setting"),
+    (1 << 2, "sw_power_cap"),
+    (1 << 3, "hw_slowdown"),
+    (1 << 4, "sync_boost"),
+    (1 << 5, "sw_thermal_slowdown"),
+    (1 << 6, "hw_thermal_slowdown"),
+    (1 << 7, "hw_power_brakes_slowdown"),
+    (1 << 8, "display_clock_setting"),
+];
+
+fn decode_throttle_reasons(mask: u32) -> Vec<String> {
+    THROTTLE_REASONS
+        .iter()
+        .filter(|(bit, _)| mask & bit != 0)
+        .map(|(_, name)| (*name).to_owned())
+        .collect()
+}
+
+/// Engine names in the order NVOC_RM_ENGINES carries them (gr, fb, nvenc,
+/// nvdec, nvjpg, nvofa), matching RUSD_PROC_UTIL's own field names.
+const ENGINE_NAMES: [&str; ENGINES] = ["gr", "fb", "nvenc", "nvdec", "nvjpg", "nvofa"];
+
+/// RUSD_BUS_DATA_PCIE_GEN_INFO bit fields, mirroring
+/// NV2080_CTRL_BUS_INFO_PCIE_LINK_CAP_* in ctrl2080bus.h.
+const PCIE_GEN_INFO_GEN_SHIFT: u32 = 12;
+const PCIE_GEN_INFO_CURR_LEVEL_SHIFT: u32 = 16;
+
+/// Decode the PCIe generation fields. `None` means the driver left the whole
+/// word at 0, i.e. it does not report the link at all.
+fn decode_pci_gen_info(info: u32) -> (Option<u32>, Option<u32>) {
+    if info == 0 {
+        return (None, None);
+    }
+    let capable_gen = (info >> PCIE_GEN_INFO_GEN_SHIFT) & 0xf;
+    let current = (info >> PCIE_GEN_INFO_CURR_LEVEL_SHIFT) & 0xf;
+    (Some(current + 1), Some(capable_gen + 1))
+}
+
+/// Turn one raw sample into the published status. `checks[i]` is section i's
+/// verdict; the same function serves the one-shot query (verdicts derived
+/// directly from the native field statuses) and the continuous monitor
+/// (verdicts from per-section advancement tracking).
+fn publish_all(
+    fields: &mut SampleFields,
+    raw: &RawSample,
+    checks: &[SectionCheck; RUSD_FIELDS],
+    scope: FreshnessScope,
+    stale_ms: u64,
+) -> DeviceStatus {
+    // ---- CLOCK: four public domains, one section -------------------------
+    let clock = &checks[SEC_CLOCK];
+    fields.note_section(clock);
+    let clock_ts = raw.timestamps[SEC_CLOCK];
+    let mut actual_khz = [None; CLK_DOMAINS];
+    let mut target_mhz = [None; CLK_DOMAINS];
+    for (domain, index) in [("graphics", 0usize), ("memory", 1), ("video", 2), ("sm", 3)] {
+        let actual = raw.clk_actual_khz[index];
+        let target = raw.clk_target_mhz[index];
+        // A domain the driver does not implement reports 0/0. Publishing that
+        // as "0 MHz" would look like a stopped clock.
+        let value = if actual == 0 && target == 0 {
+            ValueCheck::NotReported
+        } else if actual > MAX_CLOCK_KHZ || target > MAX_TARGET_MHZ {
+            ValueCheck::Invalid
+        } else {
+            ValueCheck::Ok
+        };
+        let name = format!("{domain}_clock_khz");
+        if fields.publish(&name, clock, clock_ts, value, stale_ms, scope) {
+            actual_khz[index] = Some(actual);
+        }
+        let name = format!("{domain}_target_clock_mhz");
+        if fields.publish(&name, clock, clock_ts, value, stale_ms, scope) {
+            target_mhz[index] = Some(target);
+        }
+    }
+
+    // ---- temperatures: one section per sensor ----------------------------
+    let mut temperature = [None; TEMP_SENSORS];
+    for (index, (section, name)) in [
+        (SEC_TEMP_GPU, "temperature_c"),
+        (SEC_TEMP_MEMORY, "temperature_memory_c"),
+        (SEC_TEMP_BOARD, "temperature_board_c"),
+        (SEC_TEMP_POWER_SUPPLY, "temperature_power_supply_c"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let check = &checks[section];
+        fields.note_section(check);
+        let fx256 = raw.temperature_fx256[index];
+        let value = if temperature_sane(fx256) {
+            ValueCheck::Ok
+        } else {
+            ValueCheck::Invalid
+        };
+        if fields.publish(name, check, raw.timestamps[section], value, stale_ms, scope) {
+            temperature[index] = Some(f64::from(fx256) / 256.0);
+        }
+    }
+
+    // ---- power block ------------------------------------------------------
+    let power = &checks[SEC_POWER];
+    fields.note_section(power);
+    let power_value = |value: u32| {
+        if value <= MAX_POWER_MW {
+            ValueCheck::Ok
+        } else {
+            ValueCheck::Invalid
+        }
+    };
+    let power_mw = fields
+        .publish(
+            "power_mw",
+            power,
+            raw.timestamps[SEC_POWER],
+            power_value(raw.power_mw),
+            stale_ms,
+            scope,
+        )
+        .then_some(raw.power_mw);
+
+    let limit = &checks[SEC_POWER_LIMIT];
+    fields.note_section(limit);
+    let power_limit_mw = fields
+        .publish(
+            "power_limit_mw",
+            limit,
+            raw.timestamps[SEC_POWER_LIMIT],
+            power_value(raw.power_limit_mw),
+            stale_ms,
+            scope,
+        )
+        .then_some(raw.power_limit_mw);
+    let power_limit_requested_mw = fields
+        .publish(
+            "power_limit_requested_mw",
+            limit,
+            raw.timestamps[SEC_POWER_LIMIT],
+            power_value(raw.power_limit_requested_mw),
+            stale_ms,
+            scope,
+        )
+        .then_some(raw.power_limit_requested_mw);
+
+    let average = &checks[SEC_AVG_POWER];
+    fields.note_section(average);
+    let average_power_mw = fields
+        .publish(
+            "average_power_mw",
+            average,
+            raw.timestamps[SEC_AVG_POWER],
+            power_value(raw.average_power_mw),
+            stale_ms,
+            scope,
+        )
+        .then_some(raw.average_power_mw);
+
+    let policy = &checks[SEC_POWER_POLICY];
+    fields.note_section(policy);
+    let power_policy_tgp_mw = fields
+        .publish(
+            "power_policy_tgp_mw",
+            policy,
+            raw.timestamps[SEC_POWER_POLICY],
+            power_value(raw.power_policy_tgp_mw),
+            stale_ms,
+            scope,
+        )
+        .then_some(raw.power_policy_tgp_mw);
+
+    // ---- clock throttle reasons -----------------------------------------
+    let throttle = &checks[SEC_THROTTLE];
+    fields.note_section(throttle);
+    let throttle_reason_mask = fields
+        .publish(
+            "throttle_reason_mask",
+            throttle,
+            raw.timestamps[SEC_THROTTLE],
+            ValueCheck::Ok,
+            stale_ms,
+            scope,
+        )
+        .then_some(raw.throttle_reason_mask);
+
+    // ---- fans: one section, 16 slots the driver may leave unpopulated ----
+    let fan = &checks[SEC_FAN];
+    fields.note_section(fan);
+    let fan_ts = raw.timestamps[SEC_FAN];
+    let mut fan_rpms: Vec<u32> = Vec::new();
+    let mut implausible = false;
+    for rpm in raw.fan_rpm.iter().copied() {
+        if rpm == 0 {
+            continue; // an empty cooler slot, or a stopped fan
+        }
+        if rpm > MAX_FAN_RPM {
+            implausible = true;
+            continue;
+        }
+        fan_rpms.push(rpm);
+    }
+    // Every non-zero slot was nonsense: the section itself is not usable.
+    let fan_value = if implausible && fan_rpms.is_empty() {
+        ValueCheck::Invalid
+    } else {
+        ValueCheck::Ok
+    };
+    let fan_max = fan_rpms.iter().copied().max().unwrap_or(0);
+    let fan_rpm = fields
+        .publish("fan_rpm", fan, fan_ts, fan_value, stale_ms, scope)
+        .then_some(fan_max);
+    let fan_rpms = fields
+        .publish("fan_rpms", fan, fan_ts, fan_value, stale_ms, scope)
+        .then_some(fan_rpms);
+
+    // ---- device utilization ----------------------------------------------
+    let util = &checks[SEC_UTIL];
+    fields.note_section(util);
+    let percent = |value: u32| {
+        if value <= 100 {
+            ValueCheck::Ok
+        } else {
+            ValueCheck::Invalid
+        }
+    };
+    let utilization_percent = fields
+        .publish(
+            "utilization_percent",
+            util,
+            raw.timestamps[SEC_UTIL],
+            percent(raw.utilization_percent),
+            stale_ms,
+            scope,
+        )
+        .then_some(raw.utilization_percent);
+    let memory_utilization_percent = fields
+        .publish(
+            "memory_utilization_percent",
+            util,
+            raw.timestamps[SEC_UTIL],
+            percent(raw.memory_utilization_percent),
+            stale_ms,
+            scope,
+        )
+        .then_some(raw.memory_utilization_percent);
+
+    // ---- per-engine utilization (procUtil, percent x100) -----------------
+    let proc = &checks[SEC_PROC_UTIL];
+    fields.note_section(proc);
+    let engine_sane = raw
+        .engine_utilization_pct100
+        .iter()
+        .all(|pct100| *pct100 <= 100 * 100);
+    let mut engine_utilization_percent = BTreeMap::new();
+    if fields.publish(
+        "engine_utilization_percent",
+        proc,
+        raw.timestamps[SEC_PROC_UTIL],
+        if engine_sane {
+            ValueCheck::Ok
+        } else {
+            ValueCheck::Invalid
+        },
+        stale_ms,
+        scope,
+    ) {
+        for (name, pct100) in ENGINE_NAMES.iter().zip(raw.engine_utilization_pct100) {
+            engine_utilization_percent.insert((*name).to_owned(), f64::from(pct100) / 100.0);
+        }
+    }
+
+    // ---- PCIe link --------------------------------------------------------
+    let pci = &checks[SEC_PCI];
+    fields.note_section(pci);
+    let (pcie_link_gen, pcie_max_link_gen) = decode_pci_gen_info(raw.pci_gen_info);
+    let pci_value = if pcie_link_gen.is_some() {
+        ValueCheck::Ok
+    } else {
+        ValueCheck::NotReported
+    };
+    let pcie_link_gen = fields
+        .publish(
+            "pcie_link_gen",
+            pci,
+            raw.timestamps[SEC_PCI],
+            pci_value,
+            stale_ms,
+            scope,
+        )
+        .then_some(pcie_link_gen)
+        .flatten();
+    let pcie_max_link_gen = fields
+        .publish(
+            "pcie_max_link_gen",
+            pci,
+            raw.timestamps[SEC_PCI],
+            pci_value,
+            stale_ms,
+            scope,
+        )
+        .then_some(pcie_max_link_gen)
+        .flatten();
+
+    // ---- live RM controls (not RUSD sections) ----------------------------
+    let pstate = fields
+        .publish_live("pstate", raw.pstate_status)
+        .then_some(raw.pstate);
+    let memory_used_bytes = fields
+        .publish_live("memory_used_bytes", raw.memory_used_status)
+        .then_some(u64::from(raw.memory_used_kb) * 1024);
+
+    DeviceStatus {
+        pstate,
+        graphics_clock_khz: actual_khz[0],
+        memory_clock_khz: actual_khz[1],
+        video_clock_khz: actual_khz[2],
+        sm_clock_khz: actual_khz[3],
+        graphics_target_clock_mhz: target_mhz[0],
+        memory_target_clock_mhz: target_mhz[1],
+        video_target_clock_mhz: target_mhz[2],
+        sm_target_clock_mhz: target_mhz[3],
+        temperature_c: temperature[0],
+        temperature_memory_c: temperature[1],
+        temperature_board_c: temperature[2],
+        temperature_power_supply_c: temperature[3],
+        power_mw,
+        power_limit_mw,
+        power_limit_requested_mw,
+        average_power_mw,
+        power_policy_tgp_mw,
+        throttle_reason_mask,
+        throttle_reasons: throttle_reason_mask
+            .map(decode_throttle_reasons)
+            .unwrap_or_default(),
+        fan_rpm,
+        fan_rpms: fan_rpms.unwrap_or_default(),
+        utilization_percent,
+        memory_utilization_percent,
+        engine_utilization_percent,
+        pcie_link_gen,
+        pcie_max_link_gen,
+        memory_used_bytes,
+        rusd_timestamps: std::mem::take(&mut fields.timestamps),
+        unavailable: std::mem::take(&mut fields.unavailable),
+    }
+}
+
+/// One-shot interpretation: the native side already resolved freshness while
+/// waiting for the initial sample, so its per-section status maps directly to
+/// a verdict.
+fn interpret_oneshot(raw: &RawSample, map_status: u32) -> DeviceStatus {
+    let mut fields = SampleFields::default();
+    let override_reason =
+        (map_status != 0).then(|| format!("RUSD allocation/mapping failed: 0x{map_status:08x}"));
+    let checks = std::array::from_fn(|index| SectionCheck {
+        state: match raw.field_status[index] {
+            // A section the native layer called readable must carry the stamp
+            // it was read under; no stamp means nothing usable was captured.
+            FIELD_OK if map_status == 0 && raw.timestamps[index] != 0 => FieldState::Advancing,
+            FIELD_OK => FieldState::Unsupported,
+            FIELD_UNAVAILABLE => FieldState::Unsupported,
+            FIELD_NOT_FRESH => FieldState::NeverRefreshed,
+            _ => FieldState::Unstable,
+        },
+        silent_ms: 0,
+        epoch_reset: false,
+        override_reason: override_reason.clone(),
+    });
+    publish_all(&mut fields, raw, &checks, FreshnessScope::InitialQuery, 0)
+}
+
+/// Interpret one raw native sample for the continuous monitor. Pure and
+/// deterministic so the freshness, staleness, zero-value, epoch-reset,
+/// plausibility and partial-missing rules are CPU testable.
 fn interpret_sample(
     trackers: &mut [FieldTracker; RUSD_FIELDS],
     raw: &RawSample,
@@ -732,154 +1211,18 @@ fn interpret_sample(
     let stale_ns = u64::try_from(stale_after.as_nanos()).unwrap_or(u64::MAX);
     let stale_ms = stale_ns / 1_000_000;
     let mut fields = SampleFields::default();
-
-    let clock = track_section(
-        &mut trackers[FIELD_CLOCK],
-        raw.field_status[FIELD_CLOCK],
-        raw.timestamps[FIELD_CLOCK],
-        now_ns,
-        stale_ns,
-    );
-    fields.note_section(&clock);
-    let graphics_clock_khz = fields
-        .publish(
-            "graphics_clock_khz",
-            &clock,
-            raw.timestamps[FIELD_CLOCK],
-            raw.graphics_khz != u32::MAX,
-            stale_ms,
+    let checks = std::array::from_fn(|index| {
+        track_section(
+            &mut trackers[index],
+            raw.field_status[index],
+            raw.timestamps[index],
+            now_ns,
+            stale_ns,
         )
-        .then_some(raw.graphics_khz);
-    let memory_clock_khz = fields
-        .publish(
-            "memory_clock_khz",
-            &clock,
-            raw.timestamps[FIELD_CLOCK],
-            raw.memory_khz != u32::MAX,
-            stale_ms,
-        )
-        .then_some(raw.memory_khz);
-
-    let temp = track_section(
-        &mut trackers[FIELD_TEMP],
-        raw.field_status[FIELD_TEMP],
-        raw.timestamps[FIELD_TEMP],
-        now_ns,
-        stale_ns,
-    );
-    fields.note_section(&temp);
-    let temperature_c = fields
-        .publish(
-            "temperature_c",
-            &temp,
-            raw.timestamps[FIELD_TEMP],
-            (-50 * 256..=150 * 256).contains(&raw.temperature_fx256),
-            stale_ms,
-        )
-        .then_some(f64::from(raw.temperature_fx256) / 256.0);
-
-    let power = track_section(
-        &mut trackers[FIELD_POWER],
-        raw.field_status[FIELD_POWER],
-        raw.timestamps[FIELD_POWER],
-        now_ns,
-        stale_ns,
-    );
-    fields.note_section(&power);
-    let power_mw = fields
-        .publish(
-            "power_mw",
-            &power,
-            raw.timestamps[FIELD_POWER],
-            raw.power_mw != u32::MAX,
-            stale_ms,
-        )
-        .then_some(raw.power_mw);
-
-    let limit = track_section(
-        &mut trackers[FIELD_LIMIT],
-        raw.field_status[FIELD_LIMIT],
-        raw.timestamps[FIELD_LIMIT],
-        now_ns,
-        stale_ns,
-    );
-    fields.note_section(&limit);
-    let power_limit_mw = fields
-        .publish(
-            "power_limit_mw",
-            &limit,
-            raw.timestamps[FIELD_LIMIT],
-            raw.limit_mw != u32::MAX,
-            stale_ms,
-        )
-        .then_some(raw.limit_mw);
-
-    let fan = track_section(
-        &mut trackers[FIELD_FAN],
-        raw.field_status[FIELD_FAN],
-        raw.timestamps[FIELD_FAN],
-        now_ns,
-        stale_ns,
-    );
-    fields.note_section(&fan);
-    let fan_rpm = fields
-        .publish(
-            "fan_rpm",
-            &fan,
-            raw.timestamps[FIELD_FAN],
-            raw.fan_rpm != u32::MAX,
-            stale_ms,
-        )
-        .then_some(raw.fan_rpm);
-
-    let util = track_section(
-        &mut trackers[FIELD_UTIL],
-        raw.field_status[FIELD_UTIL],
-        raw.timestamps[FIELD_UTIL],
-        now_ns,
-        stale_ns,
-    );
-    fields.note_section(&util);
-    let utilization_percent = fields
-        .publish(
-            "utilization_percent",
-            &util,
-            raw.timestamps[FIELD_UTIL],
-            raw.utilization_percent <= 100,
-            stale_ms,
-        )
-        .then_some(raw.utilization_percent);
-
-    // P-state is a live RM control re-read on every sample, not a RUSD
-    // section, so it is new whenever the query succeeds.
-    let pstate = if raw.pstate_status == 0 {
-        fields
-            .freshness
-            .insert("pstate".into(), FieldState::Advancing);
-        Some(raw.pstate)
-    } else {
-        fields
-            .freshness
-            .insert("pstate".into(), FieldState::Unsupported);
-        fields
-            .unavailable
-            .insert("pstate".into(), query_error(raw.pstate_status));
-        None
-    };
-
+    });
+    let status = publish_all(&mut fields, raw, &checks, FreshnessScope::Session, stale_ms);
     DeviceSample {
-        status: DeviceStatus {
-            pstate,
-            graphics_clock_khz,
-            memory_clock_khz,
-            temperature_c,
-            power_mw,
-            power_limit_mw,
-            fan_rpm,
-            utilization_percent,
-            rusd_timestamps: fields.timestamps,
-            unavailable: fields.unavailable,
-        },
+        status,
         updated: fields.updated,
         freshness: fields.freshness,
         epoch_reset: fields.epoch_resets,
@@ -887,15 +1230,23 @@ fn interpret_sample(
     }
 }
 
-/// RUSD sections in the order reported by
-/// [`MacosRmSession::initial_freshness`] and by the native field indices.
+/// RUSD sections in the order reported by [`MacosRmSession::initial_settled`]
+/// and by the native field indices.
 pub const MONITOR_SECTIONS: [&str; RUSD_FIELDS] = [
     "clock",
-    "temperature",
+    "temperature_gpu",
+    "temperature_memory",
+    "temperature_board",
+    "temperature_power_supply",
     "power",
     "power_limit",
+    "average_power",
+    "power_policy",
+    "throttle",
     "fan",
     "utilization",
+    "pci",
+    "proc_util",
 ];
 
 /// A persistent read-only RM session: the connection chain and the mapped RUSD
@@ -911,10 +1262,12 @@ pub struct MacosRmSession {
     trackers: [FieldTracker; RUSD_FIELDS],
     start: Instant,
     stale_after: Duration,
-    /// Per section: did it publish a new value inside the open budget? A
-    /// section that did not is reported as `never_refreshed` until it does,
-    /// instead of being presented as a fresh reading.
-    initial_fresh: [bool; RUSD_FIELDS],
+    /// Per section: did the open wait reach a final verdict? True means the
+    /// section published a new value inside the budget, or the driver reports
+    /// it as unpublished (there is nothing to wait for). A `false` entry is a
+    /// polled section that had not produced a new value yet, so the first
+    /// samples report it as `never_refreshed` instead of showing old data.
+    initial_settled: [bool; RUSD_FIELDS],
     /// Consecutive samples in which no RUSD section advanced.
     silent_samples: u32,
 }
@@ -932,8 +1285,8 @@ impl MacosRmSession {
     ///
     /// A timed-out wait is not an open failure: the affected sections are
     /// reported as [`FieldState::NeverRefreshed`] until they publish, and
-    /// [`initial_freshness`](Self::initial_freshness) says which ones are
-    /// still waiting.
+    /// [`initial_settled`](Self::initial_settled) says which ones are still
+    /// waiting.
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     pub fn open_with(
         stale_after: Duration,
@@ -989,10 +1342,10 @@ impl MacosRmSession {
             }),
             start: Instant::now(),
             stale_after,
-            initial_fresh: [false; RUSD_FIELDS],
+            initial_settled: [false; RUSD_FIELDS],
             silent_samples: 0,
         };
-        session.initial_fresh = session.wait_initial_freshness(initial_budget, cancelled);
+        session.initial_settled = session.wait_initial_settled(initial_budget, cancelled);
         Ok(session)
     }
 
@@ -1021,12 +1374,14 @@ impl MacosRmSession {
         )
     }
 
-    /// Per section (see [`MONITOR_SECTIONS`]): did it publish a new value
-    /// during the open wait? A `false` entry means the driver had not
-    /// published a new value inside the budget, so the first samples report
-    /// that section as `never_refreshed` instead of showing old data as fresh.
-    pub fn initial_freshness(&self) -> [bool; RUSD_FIELDS] {
-        self.initial_fresh
+    /// Per section (see [`MONITOR_SECTIONS`]): did the open wait reach a final
+    /// verdict for it? `false` means the section is polled but had not
+    /// published a new value inside the budget, so the first samples report it
+    /// as `never_refreshed` instead of showing old data as fresh. Sections the
+    /// driver does not publish settle immediately: there is nothing to wait
+    /// for, and they are reported as `unsupported`, not as a pending wait.
+    pub fn initial_settled(&self) -> [bool; RUSD_FIELDS] {
+        self.initial_settled
     }
 
     /// One coherent, read-only sample. Session-level failures (dead fds, a
@@ -1135,38 +1490,44 @@ impl MacosRmSession {
     }
 
     /// Best-effort wait until every polled section advanced past the
-    /// mapping-time baseline, so the first emitted sample is known new. The
+    /// mapping-time baseline, so the first emitted sample is known new. A
+    /// section the driver reports as unavailable settles at once: it is not
+    /// "about to publish", it simply has no data on this platform. The
     /// trackers are deliberately left untouched: the first real `sample()`
     /// re-observes the same advancement and reports it as `advancing`.
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    fn wait_initial_freshness(
+    fn wait_initial_settled(
         &mut self,
         budget: Duration,
         cancelled: &dyn Fn() -> bool,
     ) -> [bool; RUSD_FIELDS] {
-        let mut fresh = [false; RUSD_FIELDS];
+        let mut settled = [false; RUSD_FIELDS];
         let deadline = Instant::now() + budget;
         loop {
             if cancelled() {
-                return fresh;
+                return settled;
             }
             match self.raw_sample() {
                 Ok(raw) => {
-                    for (index, seen) in fresh.iter_mut().enumerate() {
-                        if raw.field_status[index] == FIELD_OK
+                    for (index, seen) in settled.iter_mut().enumerate() {
+                        // Either the driver has no data for this section at all,
+                        // or it published a timestamp this session has not seen
+                        // yet. Both mean the section is settled for this open.
+                        let unavailable = raw.field_status[index] == FIELD_UNAVAILABLE;
+                        let advanced = raw.field_status[index] == FIELD_OK
                             && raw.timestamps[index] != 0
-                            && raw.timestamps[index] != self.trackers[index].ts
-                        {
+                            && raw.timestamps[index] != self.trackers[index].ts;
+                        if unavailable || advanced {
                             *seen = true;
                         }
                     }
                 }
                 // A session-level failure is reported by the first real sample
                 // and handled by the caller's reconnect path; do not mask it.
-                Err(_) => return fresh,
+                Err(_) => return settled,
             }
-            if fresh.iter().all(|seen| *seen) || Instant::now() >= deadline {
-                return fresh;
+            if settled.iter().all(|seen| *seen) || Instant::now() >= deadline {
+                return settled;
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1201,6 +1562,53 @@ mod tests {
         unsafe { std::mem::zeroed() }
     }
 
+    /// A raw sample in which every section is readable and carries the same
+    /// stamps. Tests move the stamps to model advancing, quiet and resetting
+    /// sections, and overwrite values to model missing or implausible readings.
+    fn raw_sample() -> RawSample {
+        RawSample {
+            abi_version: ABI_VERSION,
+            timestamps: [1_000; RUSD_FIELDS],
+            clk_target_mhz: [1_530, 6_000, 1_410, 1_800],
+            clk_actual_khz: [1_530_000, 6_000_984, 1_410_000, 1_800_000],
+            temperature_fx256: [12_800, 12_544, 11_776, 11_520], // 50/49/46/45 C
+            power_mw: 11_412,
+            power_limit_requested_mw: 100_000,
+            power_limit_mw: 100_000,
+            average_power_mw: 11_000,
+            power_policy_tgp_mw: 11_500,
+            throttle_reason_mask: 0,
+            fan_rpm: [1_200, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            utilization_percent: 7,
+            memory_utilization_percent: 3,
+            engine_utilization_pct100: [700, 300, 0, 0, 0, 0],
+            pci_gen_info: 0x0022_2000, // ASPM L0S+L1, gen/curr/gpu_gen = Gen3
+            pstate: 1,
+            memory_used_kb: 200_000,
+            ..RawSample::default()
+        }
+    }
+
+    /// Fields this sample marked as new, in BTreeMap (sorted) order.
+    fn updated_fields(sample: &DeviceSample) -> Vec<&str> {
+        sample
+            .updated
+            .iter()
+            .filter(|(_, updated)| **updated)
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Trackers seeded the way session_open() seeds them: with the mapping-time
+    /// watermark the first sample must advance past.
+    fn trackers_at(baseline: u64) -> [FieldTracker; RUSD_FIELDS] {
+        [FieldTracker {
+            ts: baseline,
+            changed_ns: 0,
+            seen_change: false,
+        }; RUSD_FIELDS]
+    }
+
     #[test]
     fn typed_queries_reject_targets_without_rm_before_native_access() {
         let target = crate::GpuTarget::without_backends(GpuId(0x100), 0);
@@ -1215,11 +1623,12 @@ mod tests {
     fn missing_data_serializes_as_null_while_valid_p0_is_preserved() {
         let mut s = snapshot();
         let value = serde_json::to_value(status_from_snapshot(&s)).unwrap();
+        // A zeroed section table means "nothing was read", never "0 MHz".
         assert_eq!(value["pstate"], 0);
         assert!(value["graphics_clock_khz"].is_null());
         assert!(value["temperature_c"].is_null());
         assert!(value["unavailable"]["power_mw"].is_string());
-        s.pstate_status = 0x56;
+        s.telemetry.sample.pstate_status = 0x56;
         let value = serde_json::to_value(status_from_snapshot(&s)).unwrap();
         assert!(value["pstate"].is_null());
         assert!(
@@ -1233,43 +1642,125 @@ mod tests {
     #[test]
     fn telemetry_keeps_zero_readings_and_converts_signed_fixed_point_temperature() {
         let mut s = snapshot();
-        s.telemetry.valid = 0x3f;
-        s.telemetry.timestamps = [123; 6];
-        s.telemetry.graphics_khz = 1_530_000;
-        s.telemetry.memory_khz = 6_000_984;
-        s.telemetry.temperature_fx256 = -128;
-        s.telemetry.power_mw = 11_357;
+        s.telemetry.sample = raw_sample();
+        s.telemetry.sample.temperature_fx256[0] = -128; // -0.5 C
         let status = status_from_snapshot(&s);
         assert_eq!(status.graphics_clock_khz, Some(1_530_000));
         assert_eq!(status.memory_clock_khz, Some(6_000_984));
+        assert_eq!(status.video_clock_khz, Some(1_410_000));
+        assert_eq!(status.sm_clock_khz, Some(1_800_000));
         assert_eq!(status.temperature_c, Some(-0.5));
-        assert_eq!(status.power_mw, Some(11_357));
-        assert_eq!(status.fan_rpm, Some(0));
-        assert_eq!(status.utilization_percent, Some(0));
+        assert_eq!(status.temperature_memory_c, Some(49.0));
+        assert_eq!(status.power_mw, Some(11_412));
+        assert_eq!(status.fan_rpm, Some(1_200));
+        assert_eq!(status.utilization_percent, Some(7));
+        assert_eq!(status.memory_used_bytes, Some(200_000 * 1024));
         assert!(status.unavailable.is_empty());
-        assert_eq!(status.rusd_timestamps["temperature_c"], 123);
+        assert_eq!(status.rusd_timestamps["temperature_c"], 1_000);
+    }
+
+    #[test]
+    fn zero_valued_and_implausible_fields_are_reported_not_measured() {
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        // SM/board clocks a driver does not implement read back as 0/0.
+        s.telemetry.sample.clk_target_mhz[3] = 0;
+        s.telemetry.sample.clk_actual_khz[3] = 0;
+        // A fan slot the driver never populated reads as an absurd rpm count.
+        s.telemetry.sample.fan_rpm = [294_118, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        // An impossible temperature and an over-100 utilization are rejected.
+        s.telemetry.sample.temperature_fx256[1] = 1_000 * 256;
+        s.telemetry.sample.utilization_percent = 101;
+        let status = status_from_snapshot(&s);
+        assert!(status.sm_clock_khz.is_none());
+        assert!(status.sm_target_clock_mhz.is_none());
+        assert!(
+            status.unavailable["sm_clock_khz"].contains("reports no value"),
+            "{:?}",
+            status.unavailable
+        );
+        assert!(status.fan_rpm.is_none());
+        assert!(status.fan_rpms.is_empty());
+        assert!(status.unavailable["fan_rpm"].contains("implausible"));
+        assert!(status.temperature_memory_c.is_none());
+        assert!(status.unavailable["temperature_memory_c"].contains("implausible"));
+        assert!(status.utilization_percent.is_none());
+        assert!(status.unavailable["utilization_percent"].contains("implausible"));
+        // Fields that were fine are untouched.
+        assert_eq!(status.graphics_clock_khz, Some(1_530_000));
+        assert_eq!(status.temperature_c, Some(50.0));
+    }
+
+    #[test]
+    fn throttle_reasons_and_pcie_generation_are_decoded() {
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        s.telemetry.sample.throttle_reason_mask = (1 << 0) | (1 << 2) | (1 << 6);
+        let status = status_from_snapshot(&s);
+        assert_eq!(status.throttle_reason_mask, Some(0b1000101));
+        assert_eq!(
+            status.throttle_reasons,
+            ["gpu_idle", "sw_power_cap", "hw_thermal_slowdown"]
+        );
+        assert_eq!(status.pcie_link_gen, Some(3));
+        assert_eq!(status.pcie_max_link_gen, Some(3));
+
+        // A zero reason mask is "nothing throttling", not "no data".
+        s.telemetry.sample.throttle_reason_mask = 0;
+        assert!(status_from_snapshot(&s).throttle_reasons.is_empty());
+
+        // The whole gen-info word at 0 means the driver does not report a link.
+        assert_eq!(decode_pci_gen_info(0), (None, None));
+        assert_eq!(decode_pci_gen_info(0x0000_1000), (Some(1), Some(2)));
+    }
+
+    #[test]
+    fn engine_utilization_is_normalized_from_percent_x100() {
+        let mut s = snapshot();
+        s.telemetry.sample = raw_sample();
+        s.telemetry.sample.engine_utilization_pct100 = [9_148, 25, 0, 0, 0, 0];
+        let status = status_from_snapshot(&s);
+        assert_eq!(status.engine_utilization_percent["gr"], 91.48);
+        assert_eq!(status.engine_utilization_percent["fb"], 0.25);
+        assert_eq!(status.engine_utilization_percent["nvdec"], 0.0);
+
+        s.telemetry.sample.engine_utilization_pct100[0] = 10_001;
+        let status = status_from_snapshot(&s);
+        assert!(status.engine_utilization_percent.is_empty());
+        assert!(status.unavailable["engine_utilization_percent"].contains("implausible"));
     }
 
     #[test]
     fn stale_failed_and_invalid_fields_never_become_measurements() {
         let mut s = snapshot();
-        s.telemetry.valid = 0x3f;
+        s.telemetry.sample = raw_sample();
+        // The whole RUSD page failed to allocate/map: every section says so.
         s.telemetry.status = 0x1f;
+        for status in s.telemetry.sample.field_status.iter_mut() {
+            *status = FIELD_UNAVAILABLE;
+        }
         let status = status_from_snapshot(&s);
         assert!(status.temperature_c.is_none());
         assert!(status.rusd_timestamps.is_empty());
         assert!(status.unavailable["temperature_c"].contains("0000001f"));
+        // Live controls fail on their own status, not the page status.
+        s.telemetry.sample.memory_used_status = 0x57;
+        let status = status_from_snapshot(&s);
+        assert!(status.memory_used_bytes.is_none());
+        assert!(status.unavailable["memory_used_bytes"].contains("00000057"));
+
+        // A section that stayed on its mapping-time watermark is called out
+        // with the one-shot wording, not the monitor's "session opened".
         s.telemetry.status = 0;
-        s.telemetry.valid &= !(1 << 2);
-        s.telemetry.temperature_fx256 = i32::MAX;
-        s.telemetry.utilization_percent = 101;
+        s.telemetry.sample.field_status[SEC_POWER] = FIELD_NOT_FRESH;
+        s.telemetry.sample.timestamps[SEC_POWER] = 0;
         let status = status_from_snapshot(&s);
         assert!(status.power_mw.is_none());
-        assert!(status.temperature_c.is_none());
-        assert!(status.utilization_percent.is_none());
-        assert!(status.unavailable["power_mw"].contains("did not update"));
-        assert!(status.unavailable["temperature_c"].contains("invalid value"));
-        assert!(!status.rusd_timestamps.contains_key("power_mw"));
+        assert!(
+            status.unavailable["power_mw"].contains("initial freshness budget"),
+            "{:?}",
+            status.unavailable
+        );
     }
 
     #[test]
@@ -1288,43 +1779,18 @@ mod tests {
         assert!(device.info().unavailable["memory"].contains("0000001f"));
     }
 
-    /// A raw sample in which every section is readable and carries the same
-    /// stamps. Tests move the stamps to model advancing, quiet and resetting
-    /// sections.
-    fn raw_sample() -> RawSample {
-        RawSample {
-            abi_version: ABI_VERSION,
-            timestamps: [1_000; RUSD_FIELDS],
-            graphics_khz: 1_530_000,
-            memory_khz: 6_000_984,
-            temperature_fx256: 12_800, // 50.0 C
-            power_mw: 11_412,
-            limit_mw: 100_000,
-            pstate: 1,
-            ..RawSample::default()
-        }
-    }
-
-    /// Trackers seeded the way session_open() seeds them: with the mapping-time
-    /// watermark the first sample must advance past.
-    fn trackers_at(baseline: u64) -> [FieldTracker; RUSD_FIELDS] {
-        [FieldTracker {
-            ts: baseline,
-            changed_ns: 0,
-            seen_change: false,
-        }; RUSD_FIELDS]
-    }
-
     #[test]
     fn monitor_keeps_valid_zero_readings_and_marks_the_first_sample_updated() {
         let mut trackers = trackers_at(0);
         let sample = interpret_sample(&mut trackers, &raw_sample(), 0, MONITOR_STALE_AFTER);
-        assert_eq!(sample.status.fan_rpm, Some(0));
-        assert_eq!(sample.status.utilization_percent, Some(0));
         assert_eq!(sample.status.temperature_c, Some(50.0));
         assert_eq!(sample.status.pstate, Some(1));
         assert!(sample.status.unavailable.is_empty());
-        assert_eq!(sample.updated.len(), 7);
+        assert_eq!(sample.advancing_sections(), RUSD_FIELDS);
+        // 8 clock + 4 temperature + 2 limit + power + avg + policy + throttle
+        // + fan_rpm + fan_rpms + 2 utilization + engines + 2 pcie + the two
+        // live RM controls (pstate, memory_used_bytes).
+        assert_eq!(sample.updated.len(), 27);
         assert!(sample.updated.values().all(|value| *value));
         assert_eq!(sample.status.rusd_timestamps["temperature_c"], 1_000);
     }
@@ -1340,8 +1806,8 @@ mod tests {
         let sample = interpret_sample(&mut trackers, &raw, 1_000_000_000, MONITOR_STALE_AFTER);
         assert!(sample.status.unavailable.is_empty());
         assert_eq!(sample.status.temperature_c, Some(50.0));
-        assert_eq!(sample.updated.len(), 7);
-        assert!(sample.updated.values().all(|value| !*value));
+        assert_eq!(sample.advancing_sections(), 0);
+        assert_eq!(updated_fields(&sample), ["memory_used_bytes", "pstate"]);
 
         // Unchanged past the staleness window: reported unavailable, never as
         // a repeated or zero value.
@@ -1368,10 +1834,10 @@ mod tests {
     fn monitor_treats_unstable_or_invalid_fields_as_unavailable() {
         let mut trackers = [FieldTracker::default(); RUSD_FIELDS];
         let mut raw = raw_sample();
-        raw.field_status[FIELD_TEMP] = 1;
-        raw.timestamps[FIELD_TEMP] = 0;
+        raw.field_status[SEC_TEMP_GPU] = FIELD_UNSTABLE;
+        raw.timestamps[SEC_TEMP_GPU] = 0;
         raw.utilization_percent = 101;
-        raw.graphics_khz = u32::MAX;
+        raw.clk_actual_khz[0] = u32::MAX;
         let sample = interpret_sample(&mut trackers, &raw, 0, MONITOR_STALE_AFTER);
         assert!(sample.status.temperature_c.is_none());
         assert!(sample.status.utilization_percent.is_none());
@@ -1383,7 +1849,7 @@ mod tests {
             sample.status.unavailable
         );
         assert!(
-            sample.status.unavailable["utilization_percent"].contains("invalid value"),
+            sample.status.unavailable["utilization_percent"].contains("implausible"),
             "{:?}",
             sample.status.unavailable
         );
@@ -1394,8 +1860,8 @@ mod tests {
         // condition from one that raced, and neither is a measurement.
         let mut trackers = trackers_at(0);
         let mut raw = raw_sample();
-        raw.field_status[FIELD_POWER] = FIELD_UNAVAILABLE;
-        raw.timestamps[FIELD_POWER] = 0;
+        raw.field_status[SEC_POWER] = FIELD_UNAVAILABLE;
+        raw.timestamps[SEC_POWER] = 0;
         let sample = interpret_sample(&mut trackers, &raw, 0, MONITOR_STALE_AFTER);
         assert!(sample.status.power_mw.is_none());
         assert_eq!(sample.freshness["power_mw"], FieldState::Unsupported);
@@ -1423,6 +1889,7 @@ mod tests {
             "power_limit_mw",
             "fan_rpm",
             "utilization_percent",
+            "pcie_link_gen",
         ] {
             assert_eq!(
                 sample.freshness[field],
@@ -1436,9 +1903,11 @@ mod tests {
                 sample.status.unavailable
             );
         }
-        // P-state is a live control read, not a RUSD section.
+        // Live controls are RM queries, not RUSD sections, so they are new on
+        // every successful sample.
         assert_eq!(sample.freshness["pstate"], FieldState::Advancing);
         assert_eq!(sample.status.pstate, Some(1));
+        assert_eq!(sample.status.memory_used_bytes, Some(200_000 * 1024));
 
         // The first advance publishes values and marks them new.
         let mut newer = raw;
@@ -1453,15 +1922,15 @@ mod tests {
         let sample = interpret_sample(&mut trackers, &newer, 700_000_000, MONITOR_STALE_AFTER);
         assert_eq!(sample.freshness["temperature_c"], FieldState::Unchanged);
         assert_eq!(sample.status.temperature_c, Some(50.0));
-        assert!(sample.updated.values().all(|updated| !*updated));
+        assert_eq!(updated_fields(&sample), ["memory_used_bytes", "pstate"]);
         assert!(sample.status.unavailable.is_empty());
     }
 
     #[test]
     fn monitor_treats_a_backwards_stamp_as_new_data_from_a_reset_epoch() {
         let mut trackers = trackers_at(9_000);
-        trackers[FIELD_TEMP].seen_change = true;
-        trackers[FIELD_TEMP].changed_ns = 0;
+        trackers[SEC_TEMP_GPU].seen_change = true;
+        trackers[SEC_TEMP_GPU].changed_ns = 0;
         let mut raw = raw_sample();
         raw.timestamps = [1_000; RUSD_FIELDS];
         let sample = interpret_sample(&mut trackers, &raw, 500_000_000, MONITOR_STALE_AFTER);
@@ -1484,10 +1953,10 @@ mod tests {
         let mut raw = raw_sample();
         // Temperature moved backwards (a reset epoch), power is unpublished and
         // the fan still sits on the mapping-time watermark.
-        raw.timestamps[FIELD_TEMP] = 1_000;
-        raw.field_status[FIELD_POWER] = FIELD_UNAVAILABLE;
-        raw.timestamps[FIELD_POWER] = 0;
-        raw.timestamps[FIELD_FAN] = 9_000;
+        raw.timestamps[SEC_TEMP_GPU] = 1_000;
+        raw.field_status[SEC_POWER] = FIELD_UNAVAILABLE;
+        raw.timestamps[SEC_POWER] = 0;
+        raw.timestamps[SEC_FAN] = 9_000;
         let sample = interpret_sample(&mut trackers, &raw, 10_000_000, MONITOR_STALE_AFTER);
         let value = serde_json::to_value(&sample).unwrap();
         assert_eq!(value["freshness"]["temperature_c"], "advancing");
@@ -1501,6 +1970,10 @@ mod tests {
         assert!(value["advancing_sections"].is_null());
         assert!(value["temperature_c"].is_number());
         assert!(value["power_mw"].is_null());
+        assert_eq!(value["engine_utilization_percent"]["gr"], 7.0);
+        // The fan section still sits on the open watermark, so it has no
+        // reading to publish.
+        assert!(value["fan_rpms"].as_array().unwrap().is_empty());
     }
 
     #[test]
@@ -1511,27 +1984,47 @@ mod tests {
         assert_eq!(
             abi_layout(),
             [
-                360,
-                112,
-                88,
+                648,
+                368,
+                376,
                 272,
                 108,
-                40,
-                16,
-                28,
-                56,
-                64, // sizes and offsets
+                8,
+                64,
+                208,
+                176,
+                192,
+                224,
+                248,
+                320,
+                344,
+                348,
+                356, // sizes and offsets
                 u64::from(ABI_VERSION),
                 RUSD_FIELDS as u64,
                 FIELD_OK as u64,
                 FIELD_UNSTABLE as u64,
                 FIELD_UNAVAILABLE as u64,
+                FIELD_NOT_FRESH as u64,
+                CLK_DOMAINS as u64,
+                TEMP_SENSORS as u64,
+                FAN_MAX_COOLERS as u64,
+                ENGINES as u64,
+                POLL_MASK as u64,
                 0,
                 1,
                 2,
                 3,
                 4,
                 5,
+                6,
+                7,
+                8,
+                9,
+                10,
+                11,
+                12,
+                13,
             ]
         );
     }
@@ -1545,7 +2038,6 @@ mod tests {
         assert!(sample.status.pstate.is_none());
         assert!(sample.status.unavailable["pstate"].contains("00000056"));
         let value = serde_json::to_value(&sample).unwrap();
-        assert_eq!(value["fan_rpm"], 0);
         assert_eq!(value["temperature_c"], 50.0);
         assert!(value["updated"]["temperature_c"].as_bool().unwrap());
         assert!(value["unavailable"]["pstate"].is_string());
