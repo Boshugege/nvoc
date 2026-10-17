@@ -536,7 +536,10 @@ pub fn run_render_loop(
             None
         };
 
-        let entry = ash::Entry::load()?;
+        // Loader discovery (and the macOS GPU-bundle/ICD fallback) is
+        // centralised in `vulkan_loader`; other platforms get the plain
+        // `ash::Entry::load()` behaviour.
+        let entry = crate::vulkan_loader::load_entry()?;
         let mut instance_exts: Vec<*const std::ffi::c_char> = Vec::new();
         if use_swapchain {
             instance_exts.push(ash::khr::surface::NAME.as_ptr());

@@ -51,6 +51,7 @@
 - 多流提交模式：`single` / `dual` / `triple`
 - Vulkan 图形压力侧车：渲染负载 `--vulkan`（默认无头 offscreen，`--vulkan-window` 出窗，仅 Windows）；需 `--features vulkan`
 - `--vulkan-only` 是纯 Vulkan 路径：在 CUDA 初始化之前处理，GPU 直接按 `--gpu-uuid` / `--pci-bus` / `--gpu-index`（Vulkan 侧 PCI 排序索引，选中前打印完整映射表）选择，无需可用 CUDA 驱动。注意 Vulkan 枚举包含非 NVIDIA 设备，精确选择优先用 UUID 或 PCI 地址
+- macOS 的 `--vulkan-only` 直接复用本机 GPU 驱动包内的 Khronos loader 与 NVK ICD（`/Library/GPUBundles/nvmtl/`）：两者默认自动解析（可用 `NVOC_VULKAN_LOADER` / `NVOC_VULKAN_ICD` 覆盖；调用方已设置的 `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` 不会被覆盖），无需手工导出 `DYLD_LIBRARY_PATH`。`--vulkan-window` 仍然仅 Windows，macOS 上固定无头 offscreen
 - PCI 总线 / UUID / 排序索引 GPU 选择；`--list-gpus` 枚举设备
 
 ### 支持精度一览
@@ -248,6 +249,7 @@ burst_iters = 64
 - Multi-stream submission: `single` / `dual` / `triple`
 - Optional Vulkan graphics stress sidecar: render load `--vulkan` (headless offscreen by default, `--vulkan-window` to present a window, Windows only); requires `--features vulkan`
 - `--vulkan-only` is a pure-Vulkan path handled before any CUDA init: the GPU is selected directly via `--gpu-uuid` / `--pci-bus` / `--gpu-index` (Vulkan-side PCI-sorted index; the full mapping is printed before selection), so no working CUDA driver is required. Note the Vulkan enumeration includes non-NVIDIA devices; prefer UUID or PCI address for exact selection
+- On macOS `--vulkan-only` reuses the Khronos loader and NVK ICD that ship inside the GPU driver bundle (`/Library/GPUBundles/nvmtl/`). Both are resolved automatically (override with `NVOC_VULKAN_LOADER` / `NVOC_VULKAN_ICD`; a `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` the caller already set is never overridden), so no manual `DYLD_LIBRARY_PATH` export is needed. `--vulkan-window` is still Windows-only; macOS always renders offscreen
 - PCI bus / UUID / sorted-index GPU selection; `--list-gpus` to enumerate devices
 
 ### Precision Matrix

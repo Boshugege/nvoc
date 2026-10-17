@@ -1182,6 +1182,11 @@ fn print_summary(results: &[StressResult], info: &DeviceInfo) {
 
 #[cfg(feature = "cuda")]
 pub fn run_from_args() {
+    // Resolve the Vulkan loader/ICD layout before CUDA init and before the
+    // render thread starts, so selecting an ICD cannot race another thread.
+    // Only meaningful when the Vulkan sidecar is compiled in.
+    #[cfg(feature = "vulkan")]
+    cli_stressor_cuda_rs::vulkan_loader::prepare();
     let (mut args, cli_set) = parse_args_with_cli_sources();
     // --config reads a user-supplied runtime file, whereas --profile selects
     // one of the TOML documents compiled into the binary above.
@@ -1909,6 +1914,9 @@ pub fn run_from_args() {
 
 #[cfg(all(not(feature = "cuda"), feature = "vulkan"))]
 pub fn run_from_args() {
+    // Resolve the Vulkan loader/ICD layout before the render thread starts,
+    // so selecting an ICD cannot race another thread.
+    cli_stressor_cuda_rs::vulkan_loader::prepare();
     let args = Args::parse();
     if vulkan_stress_enabled(&args) || args.vulkan_only {
         let selection = match build_vulkan_device_selection(&args) {
