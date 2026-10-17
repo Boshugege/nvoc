@@ -174,7 +174,7 @@
 
 ### 时钟、偏移与 P-State 锁（`Clock`，20 项）
 
-> 本列写的是**入口**在该后端的行为：「未实现：macOS RM 在访问驱动前拒绝」= 入口在打开驱动前就拒绝。因此它与 `nvoc-cli --macos-rm` 的允许清单必须一致——后端已实现的命令出现在这里的漫拒里就是缺陷（`get-pstate-global-freq-offset` 曾如此，本轮回填）。
+> 本列写的是**入口**在该后端的行为：「未实现：macOS RM 在访问驱动前拒绝」= 入口在打开驱动前就拒绝。因此它与 `nvoc-cli --macos-rm` 的允许清单必须一致——后端已实现的命令出现在这里的漫拒里就是缺陷（`get-pstate-global-freq-offset` 曾如此，本轮回填）。这条一致性现在**机械核对**：`probe-macos-rm/tools/audit-entry-parity.py` 从 CLI 拒绝路径的 `matches!` 取允许清单、从命令表取命令名，双向比对拒绝消息里的用户可见清单，再逐行扫本表（详见下文 九十四）。
 
 
 | 命令 | 原 NVOC 行为（摘要） | macOS RM 状态 |
@@ -1538,3 +1538,17 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 6. **诚实边界** ✗：本步**一次 SET 都没发**，`SETTINGS_WRITE_SUPPORTED` 未动；`window_*` 是**驱动声明的整体跨度**（`window_records` 给出同意该跨度的记录条数），**不是**逐域边界；`restore_khz` 是"读到的当前值"，它的证明要等第一次 SET＋同字段回读。
 7. **验证范围（如实）** ✔：新增 core 单测两个——`the_entry_view_carries_the_window_and_the_restore_target`（窗口走**生产解析路径** `apply_offset_channel`，三条同值记录 ⇒ 入口必须带 `Some(-18750)`／`Some(18750)`／`records=3`，且 `restore_khz == offset_khz`）、`an_unread_window_is_absent_with_the_blocks_own_reason`（范围块 `Refused(0x62)` ⇒ 窗口为 `None` 且理由里同时出现"refused"与"no window is reported"，**偏移本身仍报出** ⇒ 两个读不塌成一个失败；未 corroborate 的域返回错误而非 0）；`cargo test -p nvoc-core --lib` **109 通过／0 失败**（含新增两例）、`nvoc-cli` **89 通过／0 失败**（含新增两例：`the_offset_entry_publishes_the_driver_span_and_the_restore_target`、`an_unread_window_reaches_the_entry_as_null_with_a_reason`——为此把入口 JSON 抽成 `offset_entry_json(&DeviceSettings, …)`，使**入口形态**无需设备即可测）、`nvoc-srv` 53／`nvoc-auto-optimizer` 68 全绿；`cargo clippy --workspace --exclude cli-stressor-cuda-rs --exclude pynvoc --all-targets -- -D warnings` 干净，`cargo fmt --all -- --check` 干净，`cargo check -p pynvoc` 成功。**本轮测试机 0 次 GPU 请求**（只 ssh 取 `uptime`＋后台重试日志、`git` 同步、`cargo test`）。测试机（macOS）实测同四个新测试**全部通过**：`nvoc-core` **108**／`nvoc-cli` **88**（本机 Linux 为 109／89——差 1 来自仓库既有的**平台门控桩测试**（`cfg(not(all(target_os="macos", target_arch="x86_64")))` 的占位测试在非 macOS 侧存在），与本次改动无关，两侧新增测试名逐一相同 ✔）。数字本身仍是**已实测**（范围块 `NV_OK`、±18750、三条记录；776 文档逐域偏移），"入口是否把它们完整发布"由上述单测保证 ⇒ 数字＝**已实现且实测**、入口形态＝**已实现（单测覆盖）**；**入口的实时快照仍待健康窗口**（楔死期 `MacosRmSession` 在 RUSD 映射阶段即失败，该命令此刻取不到新快照），故本轮**没有**把它记成"入口已实机跑通"；写面仍 **未实现，且驱动明确拒绝**。
 8. **设备侧口径** ✔：楔死未变（后台重试第 100 次仍 `0x00000062`，uptime 1 天 8 小时 ⇒ **未重启**，不自动重启）。健康窗口一到即按交接 §7.0 重建（`OGKM=` 必带）并跑 `tools/clock-offset-read-run.sh`；写闸门仍等一次交互式 sudo。
+
+### 本轮追加九十四（2026-10-18，把"入口漫拒"从人工发现变成闸门：一个缺陷类别的机械核对，含四个历史反例，零 GPU 请求）
+
+**(1) 选择依据** ✔：上一轮的缺陷（平坦表把已实现的 `get-pstate-global-freq-offset` 写成"入口在打开驱动前就拒绝"）是**靠人眼比对文档发现的**。同一类问题在表中还有 92 处漫拒，人眼每次只能抽检；而阶段 11 第 5 条要求"既不能后端可用而入口一律拒绝，也不能可点但无实现"。故先把这一类做成**可执行判定**：健康窗口稀缺，闸门必须能在无设备、无 GPU 时随时跑。
+
+**(2) 实现** ✔：`probe-macos-rm/tools/audit-entry-parity.py` 只读三份**决定答案**的来源——CLI 拒绝路径里 `validate` 的 `matches!`（真正执行的允许清单）、`cli/src/lib.rs` 的命令表（变体→命令名）、拒绝消息里那句用户可见的 `supported commands: …`——产出三类判定：①允许清单与命令表是否对得上（变体缺命令名即 FAIL）；②那句消息与允许清单是否**双向**一致（漏掉允许的命令、或列出被拒的命令都 FAIL）；③本表每一行：命令在允许清单里却带漫拒 → FAIL（带行号）。**`--selftest` 覆盖**：干净表通过、把**上一轮那条真实缺陷行原文**放回去必须 FAIL（`matrix:2`）、消息漏项／多项、变体无命令名、允许清单读不出来、表里没有任何命令行——七种情形全部断言，且**空输入一律判 FAIL 而非静默通过**。
+
+**(3) 反例（闸门确实有牙）** ✔：对四份历史文档运行同一工具（用当时的 `docs/design/macos-backend-feature-matrix.md`）：`8830c0f`／`dac43f2`／`d06dff7`／`18b5117` **四版全部在第 181 行报 FAIL**（`get-pstate-global-freq-offset carries the blanket refusal while the entry allows it`），对当前 `71ebffd` 报 `9 allowed command(s); none of them is behind the blanket refusal (108 table rows read)` ⇒ rc=0。**这四个历史命中是"闸门有效"的证据，不是新缺陷**。
+
+**(4) 不检查什么（写清边界）** ✗：①**不判断非允许命令那行的散文是否准确**——那列自由文本会点名 RM 状态码、尺寸与前置条件，属 `audit-matrix-claims.py` 的职责（本轮另跑一次：**151 supported／0 contradicted**）；②不做"可点但无实现"的反向检查——允许清单只说明入口放行，**放行后是否真有实现**由各命令自己的产物与功能表说明；③不认 id、不认尺寸、不发任何请求。
+
+**(5) 验证范围（如实）** ✔：新增工具 1 个（Python，`--selftest` 七情形 + 真实文件运行）；`ruff format . --check`／`ruff check` 干净。测试机同跑一次并留产物（`outputs/stage-entry-parity-<ts>/`），命令与退出码见该目录 README。**本轮测试机 0 次 GPU 请求**；wedge 未变（第 112 次 `0x00000062`，uptime 1 天 8 小时 22 分，**未重启**）。
+
+**(6) 诚实边界** ✗：闸门只覆盖**能机械判定**的那一类（允许清单 × 漫拒短语）；表里其余措辞仍靠 `audit-matrix-claims.py` 的"声明／派发／产物"三级核对与人工复核。短语本身是**字面量**，若将来改写漫拒措辞（例如加限定词），工具会**失去命中而不是假装通过**（`BLANKET` 常量在文件头，注明来源）。
