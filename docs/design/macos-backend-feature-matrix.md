@@ -174,11 +174,14 @@
 
 ### 时钟、偏移与 P-State 锁（`Clock`，20 项）
 
+> 本列写的是**入口**在该后端的行为：「未实现：macOS RM 在访问驱动前拒绝」= 入口在打开驱动前就拒绝。因此它与 `nvoc-cli --macos-rm` 的允许清单必须一致——后端已实现的命令出现在这里的漫拒里就是缺陷（`get-pstate-global-freq-offset` 曾如此，本轮回填）。
+
+
 | 命令 | 原 NVOC 行为（摘要） | macOS RM 状态 |
 | --- | --- | --- |
 | `get-private-legacy-pstates20-freq-domain-info` | Read-only dump of the private pstates-2.0 delta table (GetPstates20Private 0xC5DDF56E) — the storage whose deltas move the frequency-request ceilin… | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-pstate-freq-range` | Read NVML P-State clock ranges | 未实现：macOS RM 在访问驱动前拒绝 |
-| `get-pstate-global-freq-offset` | Read clock offset in MHz | 未实现：macOS RM 在访问驱动前拒绝 |
+| `get-pstate-global-freq-offset` | Read clock offset in MHz | **已实现且实测（读面）**：入口在 `--macos-rm` 的允许清单里（`validate` 放行，非读前拒绝）；当前值取 `0x20809061` 时钟文档的逐域偏移（域名由**同快照频率比对** corroborate，比对不成立即拒绝而非给数字），窗口取 `0x20809025` 范围块（设备自报 ±18.75 MHz、三条记录同值）；本轮起该入口在**同一次快照**上同时发布 `window_min_khz`／`window_max_khz`／`window_records`／`window_reason`（未读到窗口时给**该块的自身结果**，不是 0）与 `restore_khz`（写回目标＝本次读到的值），`--plan-delta` 仍输出 `plan`。写面**未实现**：孪生 `0x2080D01C` 在 root 之下的 `0x1b` 前置门被拒，故本命令只读（另见 `set-pstate-global-freq-offset`）|
 | `get-pstate-lock` | Read the native NVAPI P-State level table | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-supported-legacy-application-freq` | Read NVML supported application clocks | 未实现：macOS RM 在访问驱动前拒绝 |
 | `reset-freq-lock` | Reset core or memory locked clocks | 未实现：macOS RM 在访问驱动前拒绝 |
@@ -1524,3 +1527,14 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 - **散热器/HWFS 族**：新增 `--hwfs-read`（`0x20808540@24`，尺寸取**方法表行声明的 paramSize 24**，不取 NVAPI 副本的 52 B 平面，并写明理由：isl 尺寸错会伪装成"无此命令"），**首次派发** ⇒ `0x62`，与全体 GSP 转发控制同一堵墙 ⇒ 该 id **可派发、只等健康窗口** ✔，从"从未发"升级为"已登记且已派发 1 次" ✔。已并入读取电池。
 - **修正后的普查（2026-10-17T214405Z，621 个捕获文件）**：派发过的 id **61** 个（含本轮新增的 3 个），其中 16 个至少一次 NV_OK；`0x20808532` 0×NV_OK（2×`0x62`）、`0x20800532` 0×NV_OK（2×`0x56`）、`0x20808540` 0×NV_OK（1×`0x62`）✔。产物：`outputs/stage-live-attempt-census-20261017T214405Z/census.txt`（sha256 `6e1b606275bbc6f4…`）✔。
 - **不变的一条**：全部都是 GET；`SETTINGS_WRITE_SUPPORTED=false`，没有任何一次写入 ✔，未提权 ✔。
+
+### 本轮追加九十三（2026-10-18，偏移入口把「限制／原状态」公开出来：一次读取回答三问，仍零写入）
+
+1. **选择依据** ✔：本轮最高优先的偏移通道仍卡在**健康窗口**（楔死未解，`0x62`），而目标第 3 条要求"先取得**当前值／限制／原状态**"，第 5 条要求"接入现有公共 core/CLI/Python 接口"。核对入口时发现：core 的 `DeviceSettings` 里**窗口与当前值都已读到并有产物**，`OffsetStep` 也会带窗口——但**只有**加 `--plan-delta` 才会打印窗口，等于"限制"在入口上不可直接问；同时功能表的平坦表仍把这命令写成"未实现：访问驱动前拒绝"（与同一文档第八十三节自相矛盾）。⇒ 本轮把三问做进**同一个读入口**，并回填那张表。
+2. **实现（core）** ✔：新增 `ClockOffsetView`（`domain`／`domain_bit`／`offset_khz`／`frequency_khz`／`corroboration`／`window_min_khz`／`window_max_khz`／`window_records`／`window_reason`／`restore_khz`）与 `DeviceSettings::clock_offset_view(name)`，供 CLI 与后续 pynvoc 共用同一份数字与判据（避免三入口各写一套"当前值"定义）。两条规则落进代码：①**未读到窗口不是 0 窗口**——`None` ＋ `window_reason` 引**偏移通道那条记录的原文**（按 `", "` 切分时对未闭合括号做回接，不改写措辞）；②**未命名域在入口被拒**，与后端同理由（`named_clock_offset`）。
+3. **实现（CLI）** ✔：`nvoc-cli get-pstate-global-freq-offset --macos-rm --domain X` 现在额外发布 `window_min_khz`／`window_max_khz`／`window_records`／`window_reason`／`restore_khz`（**纯增键**，既有键与 `plan` 语义不变）；`restore_khz` 是"写回时必须回到的值"，**在写闸门打开前就先给出**，以免事后自造恢复目标。
+4. **Python 入口同源（同一次整改的第二处缺口）** ✔：pynvoc `query_settings` 此前在范围块被拒时**什么都不给**——调用方无从分辨"被拒"与"没读到"，正是本后端明令不允许的含糊。改为从**同一个**共享入口 `DeviceSettings::window_absence_reason()`（域无关；本轮由私有 `offset_window_absence` 提升为公开，理由原文取自该块自身结果）取词，插入 `clock_offset_window_reason`；`clock_offsets_named` 的每条另加 `restore_khz`（＝本次读到的偏移：写回目标**读出来**，不事后自造）。**验证范围有限**：pynvoc 整 lib 在本机与测试机都无法链接（pyo3 缺 libpython 符号，既有环境条件）⇒ 本侧只做到 `cargo check -p pynvoc` 通过，**未跑其运行时测试** ⇒ 该项归类**已实现待实测（Python 运行时）** ✔。
+5. **文档回填（本轮自查出的不一致）** ✔：平坦表 `get-pstate-global-freq-offset` 行由"未实现：拒绝"改为读面**已实现且实测**＋写面未实现；并在该表前加一句列义说明（该列＝**入口**行为，必须与 `nvoc-cli --macos-rm` 允许清单一致，漫拒覆盖已实现命令即为缺陷）。
+6. **诚实边界** ✗：本步**一次 SET 都没发**，`SETTINGS_WRITE_SUPPORTED` 未动；`window_*` 是**驱动声明的整体跨度**（`window_records` 给出同意该跨度的记录条数），**不是**逐域边界；`restore_khz` 是"读到的当前值"，它的证明要等第一次 SET＋同字段回读。
+7. **验证范围（如实）** ✔：新增 core 单测两个——`the_entry_view_carries_the_window_and_the_restore_target`（窗口走**生产解析路径** `apply_offset_channel`，三条同值记录 ⇒ 入口必须带 `Some(-18750)`／`Some(18750)`／`records=3`，且 `restore_khz == offset_khz`）、`an_unread_window_is_absent_with_the_blocks_own_reason`（范围块 `Refused(0x62)` ⇒ 窗口为 `None` 且理由里同时出现"refused"与"no window is reported"，**偏移本身仍报出** ⇒ 两个读不塌成一个失败；未 corroborate 的域返回错误而非 0）；`cargo test -p nvoc-core --lib` **109 通过／0 失败**（含新增两例）、`nvoc-cli` **89 通过／0 失败**（含新增两例：`the_offset_entry_publishes_the_driver_span_and_the_restore_target`、`an_unread_window_reaches_the_entry_as_null_with_a_reason`——为此把入口 JSON 抽成 `offset_entry_json(&DeviceSettings, …)`，使**入口形态**无需设备即可测）、`nvoc-srv` 53／`nvoc-auto-optimizer` 68 全绿；`cargo clippy --workspace --exclude cli-stressor-cuda-rs --exclude pynvoc --all-targets -- -D warnings` 干净，`cargo fmt --all -- --check` 干净，`cargo check -p pynvoc` 成功。**本轮测试机 0 次 GPU 请求**（只 ssh 取 `uptime`＋后台重试日志）。数字本身仍是**已实测**（范围块 `NV_OK`、±18750、三条记录；776 文档逐域偏移），"入口是否把它们完整发布"由上述单测保证 ⇒ 数字＝**已实现且实测**、入口形态＝**已实现（单测覆盖）**；**入口的实时快照仍待健康窗口**（楔死期 `MacosRmSession` 在 RUSD 映射阶段即失败，该命令此刻取不到新快照），故本轮**没有**把它记成"入口已实机跑通"；写面仍 **未实现，且驱动明确拒绝**。
+8. **设备侧口径** ✔：楔死未变（后台重试第 100 次仍 `0x00000062`，uptime 1 天 8 小时 ⇒ **未重启**，不自动重启）。健康窗口一到即按交接 §7.0 重建（`OGKM=` 必带）并跑 `tools/clock-offset-read-run.sh`；写闸门仍等一次交互式 sudo。
