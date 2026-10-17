@@ -566,10 +566,35 @@ static void item_pstate(nvx_ctx *c)
 
 /* Tier-B GET probes: IDs are campaign-sourced (see nvx_defs.h), layouts
  * partially decoded. Read-only; verdicts measure firmware acceptance. Split
- * out of the default battery so they only run on an explicit request. */
+ * out of the default battery so they only run on an explicit request.
+ *
+ * Second pass (2026-10-17): the list covers the WHOLE voltage-rail read half
+ * (VOLT category 0x32) at the paramSize the *GSP's own export table* gives
+ * each id (tools/extract-gsp-method-table.py) -- not at a stride derived from
+ * the NVAPI caller struct.  Every id here has the legacy bit 0x8000 set, and
+ * the loaded NVRM has neither a row nor even the id literal for any of them
+ * (the host's only deprecated-control rows are the eight in
+ * rmapi_deprecated_control.c:rmDeprecatedControlTable, none of which is CLK or
+ * VOLT), so all of them are forwarded to the GSP, which validates the size
+ * itself.  Two outcome codes are reported separately because they mean
+ * different things:
+ *
+ *   0x65 NV_ERR_TIMEOUT       the latch that wedges the GSP for the session
+ *                             (doc §6) -- stop the whole pass right away;
+ *   0x62 NV_ERR_RESET_REQUIRED the post-latch state.  A read-only census must
+ *                             RECORD it and continue, because "which read
+ *                             faces still answer" is the measurement: the gate
+ *                             is per command (doc §6.1/§7), not a global GSP
+ *                             death -- 0x2080B201 answers NV_OK while
+ *                             0x2080B202 answers 0x62 in the same session.
+ *
+ * Every case is one GET at the GSP's size with a zeroed block: no size ladder,
+ * no 0xA5 background (that content is what latched the wedge).  SET twins
+ * (0x2080F2xx) are never listed. */
 static void item_tierb_reads(nvx_ctx *c)
 {
-    static uint8_t buf[4096], prev[4096];
+    /* Largest case is 0x2080B212 at 499936 B; BSS, not stack. */
+    static uint8_t buf[512 * 1024], prev[512 * 1024];
     static const struct {
         const char *id, *name;
         NvU32 cmd;
@@ -578,16 +603,49 @@ static void item_tierb_reads(nvx_ctx *c)
         { "V2.9",  "rails-get-info(legacy)",   NVX_RM_CMD_RAILS_GET_INFO,   NVX_RAILS_INFO_PARAM_SIZE   },
         { "V2.10", "rails-get-status(legacy)", NVX_RM_CMD_RAILS_GET_STATUS, NVX_RAILS_STATUS_PARAM_SIZE },
         { "V2.11", "vfpoints-get(legacy)",     NVX_RM_CMD_VFPOINTS_GET,     NVX_VFPOINTS_PARAM_SIZE     },
+        /* Rest of the VOLT (0x32) read half, sizes straight from the GSP
+         * export table.  Names stay "voltr-family/<cmd>" so a reader never
+         * has to guess which family an id belongs to. */
+        { "V2.17", "volt-read 0x2080B205", 0x2080B205u, 1800   },
+        { "V2.18", "volt-read 0x2080B207", 0x2080B207u, 392    },
+        { "V2.19", "volt-read 0x2080B209", 0x2080B209u, 524    },
+        { "V2.20", "volt-read 0x2080B210", 0x2080B210u, 2568   },
+        { "V2.21", "volt-read 0x2080B211", 0x2080B211u, 520    },
+        { "V2.22", "volt-read 0x2080B212", 0x2080B212u, 499936 },
+        { "V2.23", "volt-read 0x2080B213", 0x2080B213u, 1036   },
+        { "V2.24", "volt-read 0x2080B214", 0x2080B214u, 85720  },
+        { "V2.25", "volt-read 0x2080B216", 0x2080B216u, 1624   },
+        { "V2.26", "volt-read 0x2080B217", 0x2080B217u, 65320  },
+        { "V2.27", "volt-read 0x2080B218", 0x2080B218u, 9220   },
     };
 
     for (unsigned k = 0; k < sizeof rb / sizeof rb[0]; ++k) {
-        memset(buf, 0, sizeof buf);
+        if (rb[k].size > sizeof buf) {
+            nvx_emit(c, rb[k].id, rb[k].name, 0, NVX_V_SKIP,
+                     "paramSize %u exceeds the %zu-byte case buffer",
+                     rb[k].size, sizeof buf);
+            continue;
+        }
+        memset(buf, 0, rb[k].size);
         NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
                                   rb[k].cmd, buf, rb[k].size);
-        nvx_emit(c, rb[k].id, rb[k].name, st, st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-                 st == 0 ? "accepted at paramSize %u; w0..w2 = 0x%08x 0x%08x 0x%08x"
-                         : "paramSize %u rejected",
-                 rb[k].size, ((NvU32 *)buf)[0], ((NvU32 *)buf)[1], ((NvU32 *)buf)[2]);
+        if (st == 0x00000065u) {
+            nvx_emit(c, rb[k].id, rb[k].name, st, NVX_V_REJECTED,
+                     "paramSize %u -> 0x65 NV_ERR_TIMEOUT: wedge latch, "
+                     "aborting the rest of the pass", rb[k].size);
+            break;
+        }
+        if (st == 0) {
+            nvx_emit(c, rb[k].id, rb[k].name, st, NVX_V_OK,
+                     "accepted at paramSize %u; w0..w2 = 0x%08x 0x%08x 0x%08x",
+                     rb[k].size, ((NvU32 *)buf)[0], ((NvU32 *)buf)[1],
+                     ((NvU32 *)buf)[2]);
+        } else {
+            nvx_emit(c, rb[k].id, rb[k].name, st, NVX_V_REJECTED,
+                     "paramSize %u -> 0x%08x (%s)", rb[k].size, st,
+                     st == 0x62 ? "post-latch state, not proof the id is absent"
+                                : "rejected, recorded, pass continues");
+        }
         if (st != 0)
             continue;
 
@@ -595,7 +653,7 @@ static void item_tierb_reads(nvx_ctx *c)
          * report how much of the payload is populated and whether it is
          * stable; an undecoded layout must not be published as a reading. */
         memcpy(prev, buf, rb[k].size);
-        memset(buf, 0, sizeof buf);
+        memset(buf, 0, rb[k].size);
         NvU32 st2 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
                                    rb[k].cmd, buf, rb[k].size);
         unsigned nz = 0, moved = 0;
