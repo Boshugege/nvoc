@@ -81,6 +81,11 @@ int nvx_stage2_clk_obj(nvx_ctx *c) {
     puts("FAKE clkobj");
     return 0;
 }
+int nvx_stage4_clk_track(nvx_ctx *c, int seconds) {
+    if (!telemetry || !c->hSubdevice) abort();
+    printf("FAKE clktrack %d\n", seconds);
+    return 0;
+}
 int nvx_stage3(nvx_ctx *c) { (void)c; abort(); }
 int nvx_stage5(nvx_ctx *c) { (void)c; abort(); }
 int nvx_close(int fd) { printf("FAKE close %d\n", fd); return 0; }
@@ -252,6 +257,13 @@ class IdleCli(unittest.TestCase):
         asked = self.run_cli("--stages", "0", "--clkobj-read")
         self.assertEqual(asked.returncode, 0, asked.stderr)
         self.assertEqual(asked.stdout.count("FAKE clkobj"), 1)
+
+    def test_clk_track_is_explicit_opt_in(self):
+        plain = self.run_cli()
+        self.assertNotIn("FAKE clktrack", plain.stdout)
+        asked = self.run_cli("--stages", "0", "--clk-track", "1")
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        self.assertEqual(asked.stdout.count("FAKE clktrack"), 1)
 
     def test_rated_tdp_set_is_gated_like_other_writes(self):
         log = self.directory / "must-not-exist.jsonl"
