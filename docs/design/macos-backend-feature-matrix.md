@@ -266,7 +266,7 @@
 | 9 自动压力执行与验证器 | 限时负载、停止、结构化结果、正确性校验 | **主负载 + 校验器完成**。主负载＝原 `--vulkan-only` 渲染路径（零算法改动，仅补 loader/ICD 解析 `4993a42`）：无 env 冷启动 rc=0，5/10/30 s 阶梯与 60 s stock 负载 rc=0，错误路径（`--gpu-index` 越界 / `--pci-bus` 不匹配）rc=1，`--vulkan-window` 在非 Windows 回退 offscreen rc=0；同步遥测显示 util 峰值 100%/均值 83%、gfx 1.53→1.95 GHz、功耗 11.5→13.5 W、温度 54→62 ℃、风扇 1778→1920 rpm。校验器＝`stress-macos`（`1dcf27a`）：全量 bit-exact 比对、启动自检、负例 rc=1、60 s 限时 1206 次 dispatch/0 失败、SIGINT 优雅停止。**整体验收**（`stage9-accept-20261017T045311Z`）：3 组 feature 构建 + fmt/clippy/tests 全 rc=0；`--vulkan-only` 冷启动 rc=0、错误路径 rc=1/1/0、阶梯 rc=0；信号语义实测 `--vulkan-only` SIGINT rc=-2 / SIGTERM rc=-15（OS 默认处置、立即终止），`metal_check` `--stress 300` 收 SIGINT 后 rc=0 优雅停止 | 渲染负载无读回校验、`--vulkan-only` 无进程内取消（靠 SIGINT/SIGTERM 默认处置）；阶段 10 需把负载/校验器结果接进 optimizer 闭环 |
 | 10 自动扫描/优化/结果应用 | 受限闭环、保存/应用/恢复 | **部分：非 CUDA 构建 + 只读评测入口落地**。`--no-default-features --features stressor-external` 的 check/build rc=0；新增子命令 `macos-eval`（`195e7af`、证据 `stage10-eval-…`）：用 `BackendSet::MacosRm` 选设备（不再要求 `has_nvapi`），复用原 `cli-stressor-cuda-rs --vulkan-only` 限时负载 + NullMoth RM 遥测采样 + `stress-macos/metal_check --verify`，输出 `nvoc/macos-stock-eval/1`（pre/under_load/post、FPS、校验结论、`settings_written=false`）。实机 20 s：gfx 1950→1965 MHz、util 均值 87%/峰值 99%、power 12.5→13.5 W、temp 52→57.6 ℃、校验 pass。**无候选/SET/回读/接受-回退/恢复**：macOS 无公开写通道，这些仍不能跑 | 需要 macOS 写通道或非公开接口；在此之前闭环停在"预检+原状态快照+限时负载+校验"这半 |
 | 11 共享入口与界面集成 | pynvoc/GUI/TUI/srv 接入 | **pynvoc + GUI/TUI + srv 均已完成**：pynvoc 新增 `auto`/`default` 后端串（macOS→RM、其他→NVAPI+NVML，与 CLI `Auto` 同规则，`37f786f`），GUI/TUI 全部改传该串；客户端 GUI 281 passed/13 skipped、TUI 214 passed，macOS 实机 pynvoc `auto` 的 discover/info/status/settings rc=0 且与 `macos-rm` 同后端同字段集（`stage11-shared-entry-…`）。**srv** 完成只读接入：`SharedBackend` 泛化为 `Box<dyn ControlBackend>`，新增 `MacosRmBackend`（`supports_writes()=false`；`discover_backend()` 用 `cfg!` 让 macOS/NVAPI 两个分支在**每次**构建里都被类型检查），macOS 上发现设备 + 监控循环 + `/status`/`/api/*` 可用，写入在驱动前被拒、模式钉在 `Auto`——构建/测试 bundle `stage11-srv-macos-…`（52 passed）、实机 smoke `stage11-srv-smoke-…`（15/15 PASS、`/shutdown` exit 0），review `review-stage11-srv-macos-backend-20261017.md` | macOS 上无闭环控制（需写通道）；GUI/TUI 在 macOS 本体的实机冒烟（需 customtkinter/textual） |
-| 12 全量回归与交付 | 逐项复核、契约对照、CI 与 review 材料 | **本机可跑范围完成**：`stage12-regression-20261017T052812Z` **17/17 rc=0**（workspace `check`/`clippy`、core 89 / cli 80 / srv 52 / stressor 17 / optimizer 61 / pynvoc 11 passed、硬件只读 5 项、native/rusd/probe lint+测试、`metal_check --verify` 全量比对、CLI 构建与冒烟）＋功能表引用 bundle 存在性核对 **9/9**；交付索引 `outputs/INDEX.md`、阶段 review `review-stage12-regression-20261017.md`。阶段 1/2/3/9/10/11 均已有实机 bundle；阶段 4–7 有明确读写阻塞，`srv` 已从"启动即失败"变为"只读可用、写入受限" | 剩余缺口见 `review-stage12-regression-20261017.md` §5：非 macOS 平台独立构建证据（本机不构建 / fork 未启用 Actions）、GUI/TUI 本体 macOS 冒烟、阶段 4–7 写通道 |
+| 12 全量回归与交付 | 逐项复核、契约对照、CI 与 review 材料 | **本机可跑范围完成**：`stage12-regression-20261017T052812Z` **17/17 rc=0**（workspace `check`/`clippy`、core 89 / cli 80 / srv 52 / stressor 17 / optimizer 61 / pynvoc 11 passed、硬件只读 5 项、native/rusd/probe lint+测试、`metal_check --verify` 全量比对、CLI 构建与冒烟）＋功能表引用 bundle 存在性核对 **9/9**；交付索引 `outputs/INDEX.md`、阶段 review `review-stage12-regression-20261017.md`；随后清掉本工作流引入的最后一条 clippy 告警（`manual_is_multiple_of`）并按 §四已知限制做非 macOS 交叉构建（`stage12b-xplat-20261017T054019Z`）。阶段 1/2/3/9/10/11 均已有实机 bundle；阶段 4–7 有明确读写阻塞，`srv` 已从"启动即失败"变为"只读可用、写入受限" | 剩余缺口见 `review-stage12-regression-20261017.md` §5：非 macOS 平台**原生运行**证据（交叉类型检查已补：`stage12b-xplat-20261017T054019Z`，Linux/Windows 工作区 `--all-targets` 与 Linux Vulkan 路径全 rc=0）、GUI/TUI 本体 macOS 冒烟、阶段 4–7 写通道 |
 
 ## 四、已知限制（本表不得当成支持声明）
 
@@ -285,7 +285,14 @@
   `NV_OK`，但 payload 只有 16/0/1 个非零字且 `rails-get-status` 复读不稳定 → **"被接受"不等于
   "可读"**：这些返回值不是可用读数，不得据此声明范围/曲线/恢复支持。
 - 阶段 11 的 GUI/TUI 只在客户端跑其单元测试（fake pynvoc，验证接线）；**未在 macOS 主机冒烟**
-  （测试机无 customtkinter/textual）。macOS 上的实机证据来自 pynvoc 扩展模块，不是 GUI/TUI 本体。
+  （测试机是 Python 3.9.6：GUI 需 customtkinter、TUI 需 ≥3.11 + textual，两者均未安装）。
+  macOS 上的实机证据来自 pynvoc 扩展模块，不是 GUI/TUI 本体。
+- 非 macOS 平台证据：`discover_backend()` 用 `cfg!`（不是 `#[cfg]`），两个平台分支在**每次**构建里
+  都被类型检查；另在测试机上对 `x86_64-unknown-linux-gnu` 与 `x86_64-pc-windows-msvc` 做了交叉
+  `cargo check`（Linux/Windows 工作区 `--all-targets` rc=0，Linux 上
+  `cli-stressor-cuda-rs --features vulkan` rc=0；bundle `stage12b-xplat-20261017T054019Z`）。
+  **这是类型检查，不是原生运行**：不链接、不执行测试、不证明这两个平台的运行时行为，
+  `core/native` 的 C 也仍只在 macOS 验证。
 - `srv` 在 macOS 上是**只读观测服务**（`MacosRmBackend`，`supports_writes()=false`）：
   `/status`/`/api/status`/`/api/gpus`/`/api/info`/`/api/history`/`/config` 可用，控制模式恒为
   `Auto`；`/mode?value=pid|manual`、`/fan` 返回 409，`/api/oc/*`、`/api/reset` 返回
