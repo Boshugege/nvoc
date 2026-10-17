@@ -62,6 +62,21 @@
 #define NVX_RAILS_INFO_STRIDE        76u
 #define NVX_RAILS_STATUS_STRIDE      100u
 
+/* Accepted `paramsSize` for the Tier-B GETs, measured on 610.57.04/NullMoth
+ * (2026-10-17). A smaller buffer is answered NV_ERR_INVALID_ARGUMENT (0x1f),
+ * which is why the first version of this probe -- which passed one record's
+ * worth of stride -- recorded a flat "driver refuses" for all three.
+ *
+ * The two rail sizes are consistent with the documented record strides for a
+ * 32-record table plus a fixed header (12 + 32*76 = 2444, 32 + 32*100 = 3232);
+ * the VF size (524) matches neither 10 nor 32 records of the documented 68 B
+ * stride, so that layout is still unresolved.  The payloads themselves are
+ * NOT decoded: they are stable across processes and unchanged under GPU load,
+ * so they are not usable as readings. */
+#define NVX_RAILS_INFO_PARAM_SIZE    2444u
+#define NVX_RAILS_STATUS_PARAM_SIZE  3232u
+#define NVX_VFPOINTS_PARAM_SIZE      524u
+
 /* Private V/F point curve GET. Source:
  * blackwell-pro6000-580-173-02-audit.md T3-1:
  *   GET 0x208090A2, v1 record 10x68 B / v2 record 32x68 B.

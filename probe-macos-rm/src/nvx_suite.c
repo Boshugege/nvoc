@@ -564,31 +564,46 @@ static void item_pstate(nvx_ctx *c)
  * out of the default battery so they only run on an explicit request. */
 static void item_tierb_reads(nvx_ctx *c)
 {
-    static uint8_t buf[32 * NVX_VFPOINTS_RECORD_STRIDE];
+    static uint8_t buf[4096], prev[4096];
+    static const struct {
+        const char *id, *name;
+        NvU32 cmd;
+        unsigned size;
+    } rb[] = {
+        { "V2.9",  "rails-get-info(legacy)",   NVX_RM_CMD_RAILS_GET_INFO,   NVX_RAILS_INFO_PARAM_SIZE   },
+        { "V2.10", "rails-get-status(legacy)", NVX_RM_CMD_RAILS_GET_STATUS, NVX_RAILS_STATUS_PARAM_SIZE },
+        { "V2.11", "vfpoints-get(legacy)",     NVX_RM_CMD_VFPOINTS_GET,     NVX_VFPOINTS_PARAM_SIZE     },
+    };
 
-    memset(buf, 0, NVX_RAILS_INFO_STRIDE);
-    NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
-                              NVX_RM_CMD_RAILS_GET_INFO, buf, NVX_RAILS_INFO_STRIDE);
-    nvx_emit(c, "V2.9", "rails-get-info(legacy)", st,
-             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-             st == 0 ? "type@0x44=0x%02x class@0x77=0x%02x" : "-",
-             buf[0x44], buf[0x77]);
+    for (unsigned k = 0; k < sizeof rb / sizeof rb[0]; ++k) {
+        memset(buf, 0, sizeof buf);
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  rb[k].cmd, buf, rb[k].size);
+        nvx_emit(c, rb[k].id, rb[k].name, st, st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 st == 0 ? "accepted at paramSize %u; w0..w2 = 0x%08x 0x%08x 0x%08x"
+                         : "paramSize %u rejected",
+                 rb[k].size, ((NvU32 *)buf)[0], ((NvU32 *)buf)[1], ((NvU32 *)buf)[2]);
+        if (st != 0)
+            continue;
 
-    memset(buf, 0, NVX_RAILS_STATUS_STRIDE);
-    st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
-                        NVX_RM_CMD_RAILS_GET_STATUS, buf, NVX_RAILS_STATUS_STRIDE);
-    nvx_emit(c, "V2.10", "rails-get-status(legacy)", st,
-             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-             st == 0 ? "type@88=0x%02x" : "-", buf[88]);
-
-    memset(buf, 0, sizeof buf);
-    st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
-                        NVX_RM_CMD_VFPOINTS_GET, buf, 10 * NVX_VFPOINTS_RECORD_STRIDE);
-    nvx_emit(c, "V2.11", "vfpoints-get(legacy)", st,
-             st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-             st == 0 ? "rec0 raw 0x%08x 0x%08x 0x%08x" : "-",
-             st == 0 ? ((NvU32 *)buf)[0] : 0, st == 0 ? ((NvU32 *)buf)[1] : 0,
-             st == 0 ? ((NvU32 *)buf)[2] : 0);
+        /* The call is accepted, but acceptance is not data. Re-read once and
+         * report how much of the payload is populated and whether it is
+         * stable; an undecoded layout must not be published as a reading. */
+        memcpy(prev, buf, rb[k].size);
+        memset(buf, 0, sizeof buf);
+        NvU32 st2 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                   rb[k].cmd, buf, rb[k].size);
+        unsigned nz = 0, moved = 0;
+        for (unsigned off = 0; off + 4 <= rb[k].size; off += 4) {
+            unsigned v;
+            memcpy(&v, buf + off, 4);
+            if (v) ++nz;
+            if (memcmp(buf + off, prev + off, 4)) ++moved;
+        }
+        nvx_emit(c, "V2.9p", rb[k].name, st2, NVX_V_SKIP,
+                 "payload %u non-zero words, %u changed on re-read: layout not decoded, treat as probe data only",
+                 nz, moved);
+    }
 }
 
 static void item_legacy_probes(nvx_ctx *c)
@@ -632,24 +647,28 @@ static void item_bus(nvx_ctx *c)
 
 static void item_perf_levels(nvx_ctx *c)
 {
+    /* Capacities matter here too. The driver answers NV_OK with an empty list
+     * when asked for zero domains, and NV_ERR_INVALID_ARGUMENT as soon as one
+     * domain is requested: it accepts the control but supplies no clock-domain
+     * table. The original battery pre-set perfGetClkInfoListSize to
+     * MAX_DOMAINS, which made this look like an unconditional rejection. */
     static NV2080_CTRL_PERF_GET_LEVEL_INFO_V2_PARAMS p;
+
     memset(&p, 0, sizeof p);
-    p.level = 0; /* lowest level first; ranges come back per domain */
-    p.perfGetClkInfoListSize = NV2080_CTRL_PERF_CLK_MAX_DOMAINS;
-    NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2, &p);
-    if (st == 0 && p.perfGetClkInfoListSize >= 2) {
-        nvx_emit(c, "V2.15", "perf-level-info-v2", st, NVX_V_OK,
-                 "lvl%u dom%u cur %u kHz (min %u max %u) | dom%u cur %u kHz (min %u max %u)",
-                 p.level,
-                 p.perfGetClkInfoList[0].domain, p.perfGetClkInfoList[0].currentFreq,
-                 p.perfGetClkInfoList[0].minFreq, p.perfGetClkInfoList[0].maxFreq,
-                 p.perfGetClkInfoList[1].domain, p.perfGetClkInfoList[1].currentFreq,
-                 p.perfGetClkInfoList[1].minFreq, p.perfGetClkInfoList[1].maxFreq);
-    } else {
-        nvx_emit(c, "V2.15", "perf-level-info-v2", st,
-                 st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-                 st == 0 ? "listSize %u" : "-", st == 0 ? p.perfGetClkInfoListSize : 0);
-    }
+    p.level = NV2080_CTRL_PERF_GET_LEVEL_INFO_LEVEL_STANDARD;
+    NvU32 st_empty = SUBCTL(c, NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2, &p);
+    NvU32 empty_count = p.perfGetClkInfoListSize;
+
+    memset(&p, 0, sizeof p);
+    p.level = NV2080_CTRL_PERF_GET_LEVEL_INFO_LEVEL_STANDARD;
+    p.perfGetClkInfoListSize = 1;
+    NvU32 st_one = SUBCTL(c, NV2080_CTRL_CMD_PERF_GET_LEVEL_INFO_V2, &p);
+
+    nvx_emit(c, "V2.15", "perf-level-info-v2", st_one,
+             st_one == 0 ? NVX_V_OK : NVX_V_REJECTED,
+             "capacity 0 -> 0x%x (%u domains returned); capacity 1 -> 0x%x "
+             "(driver exposes no clock-domain list)",
+             st_empty, empty_count, st_one);
 }
 
 static void item_i2c_probe(nvx_ctx *c)

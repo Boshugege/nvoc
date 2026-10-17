@@ -45,12 +45,12 @@
 | V2.6 | `GET_GPUMON_UTIL_SAMPLES_V2` 0x20802096 | ctrl2080perf.h + ctrl2080gpumon.h（A-tree，V2 无内嵌指针） | 引擎利用率环形队列；tracker 推进 ⇒ GPUMON 采样管线活着 |
 | V2.7 | `CLK_PMUMON_CLK_DOMAINS_GET_SAMPLES` 0x20801037 | ctrl2080clk.h（A-tree） | **gpcClkFreqKHz / dramClkFreqKHz** —— 核心/显存频率读数（M0 频率遥测主通道） |
 | V2.8 | `PERF_GET_POWERSTATE` 0x2080205A | ctrl2080perf.h（A-tree） | AC/电池电源状态语义（macOS 上 ACPI 电源源被桩掉，此读数有对照意义） |
-| V2.9–11 | legacy rails/VfPoints GET：0x2080B201(76B)/0x2080B202(100B)/0x208090A2(10×68B) | B-campaign（voltrails-family-full-layout-r610.md；blackwell audit T3-1/T3-10） | 只读探针。`OK` ⇒ GSP 接受 legacy ID，B 层全部升级；`NOT_SUPPORTED` ⇒ 610 固件裁剪了该族；其他状态码逐个记录 |
+| V2.9–11 | legacy rails/VfPoints GET：0x2080B201(76B)/0x2080B202(100B)/0x208090A2(10×68B) | B-campaign（voltrails-family-full-layout-r610.md；blackwell audit T3-1/T3-10） | 只读探针。**参数尺寸决定成败**：2444/3232/524 B 分别被接受（`NV_OK`），更小的缓冲区一律 `0x1f`——首版探针按单条记录的 stride 传参，因此把三个 ID 都记成了"被驱动拒绝"，属误判。接受 ≠ 可读：实测 payload 只有 16/0/1 个非零字，且 `rails-get-status` 两次调用内容不一致，布局未解码，**不得当作读数** |
 | V2.12 | **RUSD 页**：alloc `NV00DE`(0xDE, poll mask CLOCK\|PERF\|POWER\|THERMAL\|FAN) + `NV_ESC_RM_MAP_MEMORY` + mmap | cl00de.h（A-tree；blackwell audit T3-6） | **整页遥测：温度(5 传感器型)/瞬时+平均功耗/功耗墙 enforced/风扇转速/P-state/时钟域/节流原因**。两个可能失败点分别判定：alloc 被拒 vs 映射被拒。成功 ⇒ M0 遥测一步到位 |
 | V2.12b | RUSD 全字段转储：5 温度型/P-state/时钟域(GPC/MEM/SM)/瞬时+平均功耗/enforced 功耗墙/TGP 策略/风扇 | cl00de.h（A-tree） | 数值合理性即 RUSD 管线活性证明；全部失败（INVALID 时间戳）⇒ 轮询段未被固件填充 |
 | V2.13 | `BIOS_GET_SKU_INFO` 0x20800808 | ctrl2080bios.h（A-tree） | BoardID/chipSKU/project 字符串；VBIOS 域可达性 |
 | V2.14 | `BUS_GET_PCI_INFO` 0x20801801 | ctrl2080bus.h（A-tree） | deviceId/subsys/rev 应与 PCI 枚举一致 |
-| V2.15 | `PERF_GET_LEVEL_INFO_V2` 0x2080200B | ctrl2080perf.h（A-tree，32 域×{cur/default/min/max}） | **每级性能状态的频率域表**——M2 锁频的合法范围参照 |
+| V2.15 | `PERF_GET_LEVEL_INFO_V2` 0x2080200B | ctrl2080perf.h（A-tree，32 域×{cur/default/min/max}） | **驱动不提供频率域表**：容量 0 → `NV_OK` 但返回 0 条；容量 ≥1 → `NV_ERR_INVALID_ARGUMENT`。首版探针预置 `perfGetClkInfoListSize=32`，把它记成了无条件拒绝，同样属误判。另有 `PERF_GET_CURRENT_PSTATE`(V2.8)/`PERF_GET_POWERSTATE`(V2.3)/`PERF_RATED_TDP_GET_CONTROL`(V2.4) 实测可用 |
 | V2.16 | `I2C_READ_BUFFER` 0x20800601（零参数探针） | ctrl2080i2c.h（A-tree） | FINN I2C 族分派可达性；返回良构 NV_ERR_* ⇒ GSP I2C 在（风扇/传感器路线活），IRQL/权限类拒绝则记录 |
 
 > 阶段 2 无温度控制命令的原因：r610 开源树**不含** legacy `THERMAL_GET_INFO` 头，其 ID 未在本战役内核级核实——温度读数首选 RUSD 页（T3-6），命令式温度读数列为后续 IDA 任务（见"后续探针"）。
