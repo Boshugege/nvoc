@@ -1409,6 +1409,16 @@ static const clkctl_case nvx_clkctl[] = {
     { "vfp582 get-status 648",               0x20809062u, 648, 0, ~0u, 0, 0 },
     { "freq-ctrl-info 7188",                 0x20809025u, 7188, 0, ~0u, 0, 0 },
     { "freq-ctrl-status 5332",               0x20809026u, 5332, 0, ~0u, 0, 0 },
+    /* 0x2080901a is 2052 = 4 + 32*64 in the GSP table: the same 64 B record
+     * shape as the 0x2080901b control, with a 4-byte instead of 60-byte head.
+     * It is the natural "does a value-bearing variant exist" candidate, and it
+     * was never read with a *zeroed* block (the only earlier attempt used a
+     * 0xA5 background and came back 0x1f).  Zero background only. */
+    { "gc-1a 2052 (4+32*64)",                0x2080901au, 2052, 0, ~0u, 0, 0 },
+    { "gc-1a 2052 counter",                  0x2080901au, 2052, 0, ~0u, 1, 0 },
+    /* 0x2080901d@32680 already answered NV_OK with a 0xA5 background (352/8170
+     * dwords written); read it with a zeroed block so the actual values show. */
+    { "gc-1d 32680 zeroed",                  0x2080901du, 32680, 0, ~0u, 0, 0 },
     /* Anchors: the two ids whose sizes were already confirmed empirically. */
     { "anchor vfp582 get-info 776",          0x20809061u, 776, 0, ~0u, 0, 0 },
     { "anchor rails get-info 2444",          0x2080b201u, 2444, 0, ~0u, 0, 0 },
