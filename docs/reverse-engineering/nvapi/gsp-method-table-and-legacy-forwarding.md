@@ -129,8 +129,20 @@ VAs. `flags` is the access class, and the low nibble picks the direction: `0x48`
 (read) or `0x44` (write), both carrying `0x40`. 368 rows are `0x48`, 121 are
 `0x44`, and 159 rows carry the write bit somewhere in their flags. That field
 is what decides whether a row is a *writer*, independently of any `+1` naming
-convention (§5.2). Category histogram puts **cat 0x10 (CLK) = 169 rows** and
-**cat 0x32 (VOLT) = 151 rows**, vs **1** and **0** in the host table.
+convention (§5.2). The family histogram (see §13 for the tool and the full map)
+puts the **CLK family at 87 rows** — byte `0x90` (68 legacy reads), `0xd0`
+(18 privileged writes) and the single public `0x10` (`0x20801037`) — and the
+**VOLT family at 17** (`0xb2` 13 reads, `0xf2` 4 writes), vs **1** and **0** in
+the host table.
+
+> **Correction (2026-10-17T11:50Z).** This section used to say "cat 0x10 (CLK)
+> = 169 rows, cat 0x32 (VOLT) = 151". Those two numbers do not reproduce under
+> either natural reading of the category field; they reproduce exactly as the
+> **`0x0a` internal block (169)** and the **`0x20` PERF block (151)**, so the
+> figure was a family mislabel, not a different count. The argument it supported
+> ("the GSP implements these families, the host does not") is unaffected — 87
+> and 17 are still 87 and 17 more than the host's 1 and 0 — but anyone reusing
+> the old numbers should re-run `probe-macos-rm/tools/dump-gsp-families.py`.
 
 Authoritative `paramSize` for the ids this effort uses (GET unless marked):
 
@@ -792,6 +804,10 @@ OGKM=$HOME/Desktop/macOS-nvoc-develop/reference/open-gpu-kernel-modules-610.57.0
 cd probe-macos-rm && OGKM=$OGKM sh build.sh
 python3 tools/extract-gsp-method-table.py \
         /Users/Shared/nvfw/nvidia/610.57.04/gsp_tu10x.bin > /tmp/gsp-table.tsv
+# family map of the private surface + host-registration flags (§13)
+python3 tools/dump-gsp-families.py /tmp/gsp-table.tsv \
+        --host /Library/Extensions/NVRM.kext/Contents/MacOS/NVRM
+python3 tools/dump-gsp-families.py /tmp/gsp-table.tsv --family 0x85
 ./probe-macos-rm-idle --clkctl-read     # GSP-sized GETs, incl. mask@+4
 ./probe-macos-rm-idle --clkctl-hex      # THE lossless record: full hex of
                                         # 0x2080901b @2108 with mask@+4 = 0xFF
@@ -1204,4 +1220,98 @@ Changed for the goal:
   first read is `0x2080901b @2108` with `in@4 = 0xFF` (still the only block in
   the corpus without a lossless whole-block dump), then the two V1-record
   questions of §9 — the same barriers, just approached with a correct model.
+
+## 13. The private surface, family by family (2026-10-17T11:50Z, static)
+
+The legacy marker is in the id itself, so the export table groups into families
+by the byte at bits 15:8: bit 15 (`0x80`) marks the legacy non-privileged/read
+half, bit 14 (`0x40`) the privileged/write half of the *same* interface. The
+tool that prints the map is `probe-macos-rm/tools/dump-gsp-families.py`
+(read-only; it also walks the host kext to mark which ids the host registers):
+
+```sh
+python3 probe-macos-rm/tools/dump-gsp-families.py gsp-table.tsv \
+        --host /Library/Extensions/NVRM.kext/Contents/MacOS/NVRM
+```
+
+| category | family | GET rows | SET rows | in host | examples |
+| --- | --- | --- | --- | --- | --- |
+| `0x10` | **CLK** (`0x90` / `0xd0`) | 69 (68 legacy + 1 public) | 18 | 1 | `0x2080901b@2108`, `0x20809025@7188`, `0x20809061@776`, `0x2080d01c@2108` |
+| `0x32` | **VOLT** (`0xb2` / `0xf2`) | 13 | 4 | 0 | `0x2080b201@2444`, `0x2080b202@3232`, `0x2080b213@1036`, `0x2080f214@1036` |
+| `0x05` | **THERMAL** (`0x85` / `0xc5`) | 30 (29 + the public `0x20800513`) | 6 | 1 | `0x20808501@1036`, `0x20808524@4`, `0x2080852a@1784`, `0x2080852b@3324` |
+| `0x26` | **PMGR** (`0xa6` / `0xe6`) | 35 (34 + the public `0x20802609`) | 12 | 1 | `0x2080a60b@1928`, `0x2080a610@42000`, `0x2080a611@73868` |
+| `0x20` | **PERF** (`0xa0` / `0xe0`) | 120 (114 + 6 public) | 31 | 6 | `0x2080a001@16`, `0x2080e019@8` |
+| `0x0a` | **INTERNAL** PM/PFM (no legacy half) | 169 | 0 | 169 | `0x20800a00@268`, `0x20800a01@32` |
+| `0x23` / `0x27` / `0x28` | INTERNAL / GC6 / LPWR | 8 / 11 / 3 | 0 / 0 / 2 | 8 / 1 / 0 | `0x2080a304@132`, `0x2080a702@4`, `0x2080a801@1028` |
+| `0x15`, `0x33`, `0x37` | **unidentified** (no public define) | 11 + 1 + 4 | 3 + 7 + 0 | 0 | `0x20809500@1164`, `0x2080b301@1`, `0x2080b700@6212` |
+
+Counting only the legacy read half (`0x80 | category`) of the five families that
+matter for stages 4–7: **13 VOLT + 68 CLK + 29 THERMAL + 34 PMGR + 114 PERF =
+258 private GETs** sit behind the forward, and the host NVOC table knows none of
+them.
+
+The interface byte of every row can be labelled from the public SDK alone: for
+each `NV2080_CTRL_CMD_<NAME> (0x2080xxxx)` define, `category = (id >> 8) & 0x3f`
+and the name prefix gives the family — `0x05 THERMAL`, `0x10 CLK`, `0x20 PERF`,
+`0x26 PMGR`, `0x27 GC6`, `0x28 LPWR`, `0x34 ECC`, `0x23/0x0a/0x0b INTERNAL`,
+`0x13 FB` (with GMMU/GSP commands), and so on. Two private families present in
+the GSP table have **no** public define at all — `0x32` (labelled VOLT by the
+reverse-engineering records and by its own `0x2080b201` rails-info payload) and
+`0x15`/`0x33`/`0x37`, which stay *unidentified* here rather than guessed at.
+
+Whole table: **889** rows; **589** of those ids are also registered in the host
+NVOC table and **170** are GSP-only. The count that matters for planning is the
+read half of each private family: 13 VOLT + 68 CLK + 29 THERMAL + 34 PMGR +
+114 PERF = **258 private GETs** exist behind the forward — plus the four
+unidentified families above — and none of the 258 is known to the host.
+
+Three things this settles or sharpens:
+
+* **The fan family is not in the GSP table at all.** A case-insensitive pass over
+  the whole `.fwimage` finds exactly two fan strings (`RmFan2XOverride`,
+  `MIN_FAN_LEVEL`) and no `FAN`/`COOLER` interface id anywhere in the public SDK
+  (`ctrl2080fan.h` is a 33-line stub that defines nothing). So on this box the
+  fan surface is not "unreadable through a private id we have not found yet" —
+  there is no such id in either table, and the fan investigation has to go
+  through the public thermal/GPIO/I2C surface or the PMU, not through the CLK
+  block. (This does **not** say the fan cannot be controlled; it says the
+  GSP-RM route for it does not exist here.)
+* **The private thermal read half is 29 ids** (`0x208085xx`), sizes known from
+  the same table (4 B … 3324 B). The earlier thermal work only ever sent the
+  public batched `0x20800513 EXECUTE_V2`, so "the thermal read surface" was
+  never actually measured in its private half. All 29 are GSP-served and
+  therefore wedge-gated today — they are the first thermal candidates after the
+  reboot, at their table sizes, GET only.
+* **The firmware names its own fields.** A `.fwimage` string pass (release build,
+  asserts mostly compiled out — only 40 `->`-bearing strings survive) yields
+  nine identifiers, and they are specific:
+
+  ```
+  (pSingle1x->ignoreClkDomainIdx != NV2080_CTRL_CLK_CLK_DOMAIN_INDEX_INVALID)
+  (pSingle1x->clkDomainIdx != pSingle1x->ignoreClkDomainIdx)
+  (pSingle1x->softFloor.perfCfControllerIdx != NV2080_CTRL_PERF_PERF_CF_CONTROLLER_INDEX_INVALID)
+  (pSingle1x->softFloor.perfCfControllerClkIdx != NV2080_CTRL_CLK_CLK_DOMAIN_INDEX_INVALID)
+  (pSingle1x->softFloor.clkPropTopIdx != NV2080_CTRL_CLK_CLK_PROP_TOP_ID_INVALID)
+  (pPhysicalSingle2x->ignoreClkDomainIdx != NV2080_CTRL_CLK_CLK_DOMAIN_INDEX_INVALID)
+  (pPhysicalSingle2x->clkDomainIdx != pPhysicalSingle2x->ignoreClkDomainIdx)
+  (pOutputVoltage1x->voltMode < NV2080_CTRL_PMGR_PWR_CHANNEL_OUTPUT_VOLTAGE_1X_VOLT_MODE_NUM)
+  (BOARDOBJ_GET_TYPE(pPhysicalSingle2xPolicy) == NV2080_CTRL_PMGR_PWR_POLICY_TYPE_WORKLOAD_PHYSICAL_SINGLE_2X)
+  ```
+
+  Read together they say: the **PMGR power-channel output-voltage** record
+  (`pSingle1x` / `pPhysicalSingle2x`, one per rail) carries a `clkDomainIdx`
+  plus an `ignoreClkDomainIdx`, and a **`softFloor`** sub-record holding
+  `perfCfControllerIdx` + `perfCfControllerClkIdx` + `clkPropTopIdx`. That is
+  the voltage rail and the clock-domain binding in one struct, with the
+  frequency floor as a nested member — a useful orientation for reading the
+  VOLT/PMGR read halves after the reboot, and the reason "voltage rail" and
+  "clock domain" should not be treated as unrelated families when the marshalling
+  is reconstructed.
+
+  The public SDK cannot help here: `ctrl2080volt.h`, `ctrl2080clkavfs.h`,
+  `ctrl2080fan.h`, `ctrl2080vfe.h`, `ctrl2080perf_cf.h` and
+  `ctrl2080perf_cf_pwr_model.h` are all shipped as `#pragma once` stubs with no
+  `CTRL_CMD_*` and no `INTERFACE_ID` at all (33/36/33/42/33/32 lines). That is
+  why a header grep can never find this surface, and why the GSP image is the
+  only primary source for it.
 
