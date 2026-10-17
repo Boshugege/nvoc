@@ -2,7 +2,9 @@
 
 import os
 from pathlib import Path
+import struct
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -389,6 +391,68 @@ class IdleCli(unittest.TestCase):
                 self.assertNotIn("FAKE chain", result.stdout)
                 self.assertNotIn("FAKE sample", result.stdout)
                 self.assertNotIn("FAKE close", result.stdout)
+
+
+
+
+class DecodeClkContainers(unittest.TestCase):
+    """Offline decoder for the private clock containers (tools/decode-*.py).
+
+    The geometry it enforces is the one the GSP table implies; a regression
+    here would silently re-introduce the "guessed header + count*stride"
+    layouts that the reverse-engineering notes warn about.
+    """
+
+    TOOL = ROOT / "tools" / "decode-clk-containers.py"
+
+    def run_tool(self, *args):
+        return subprocess.run(
+            [sys.executable, str(self.TOOL), *args],
+            capture_output=True, text=True,
+        )
+
+    def test_selftest_covers_geometry_and_fields(self):
+        result = self.run_tool("--selftest")
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("selftest ok", result.stdout)
+
+    def test_decodes_one_captured_block(self):
+        header, stride = 20, 224
+        buf = bytearray(20 + 32 * stride)
+        struct.pack_into("<I", buf, 4, 0x7)
+        struct.pack_into("<I", buf, header, 0x01030101)
+        struct.pack_into("<I", buf, header + 8, 1638400)
+        struct.pack_into("<i", buf, header + 20, -18750)
+        struct.pack_into("<i", buf, header + 24, 18750)
+        lines = [
+            "[OK] V2.clkctl freq-ctrl-info   0x20809025 @7188  status "
+            "0x00000000 (NV_OK)  cmd 0x20809025 size 7188 -> NV_OK, "
+            "7188-byte hex follows"
+        ]
+        for off in range(0, len(buf), 16):
+            lines.append("    %05d: %s" % (off, " ".join(
+                "%02x" % b for b in buf[off:off + 16])))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hex.txt"
+            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            result = self.run_tool(str(path))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertIn("max_vf_khz)=0x00190000/1638400", result.stdout)
+        self.assertIn("offset_floor_khz)=0xffffb6c2/-18750", result.stdout)
+        self.assertIn("offset_ceiling_khz)=0x0000493e/18750", result.stdout)
+
+    def test_rejects_a_size_the_gsp_table_does_not_have(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "hex.txt"
+            path.write_text(
+                "[OK] x 0x20809025 @2108  status 0x00000000 (NV_OK)  "
+                "cmd 0x20809025 size 2108 -> NV_OK, 2108-byte hex follows\n"
+                "    00000: " + " ".join(["00"] * 16) + "\n",
+                encoding="utf-8",
+            )
+            result = self.run_tool(str(path))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not the GSP paramSize", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
