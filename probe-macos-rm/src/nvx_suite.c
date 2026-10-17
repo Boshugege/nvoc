@@ -1660,6 +1660,36 @@ int nvx_stage2_clkdom_read(nvx_ctx *c)
         }
         nvx_emit(c, "V2.clkdom", k->name, st, NVX_V_OK,
                  "  non-zero dwords (%u listed):%s", listed, off);
+
+        /* The published ClockDomainsInfo caller struct names a per-domain kHz
+         * range and a per-domain VFP index range, but the RM block is 32 rows of
+         * 384 B and only the row head (stamp, domain bit) was ever decoded -- the
+         * rest was captured once and then lost, because the two lines above stop
+         * at dword 24 and row 0. Per row, list every non-zero dword: the fields
+         * that look like a range sit at +40/+44, so a row-tail dump is exactly
+         * what a later session needs in order to compare them. 12336 is the
+         * documented caller size of that block, which is how this row is picked
+         * out of the table without adding a column to it. */
+        if (k->size == 12336u) {
+            const unsigned row_head = 48, row_len = 384;
+            for (unsigned r = 0; r < (k->size - row_head) / row_len; ++r) {
+                const unsigned char *p = buf + row_head + r * row_len;
+                char line[1280];
+                char *lp = line;
+                lp += snprintf(lp, (size_t)(line + sizeof line - lp),
+                               "row %2u non-zero:", r);
+                unsigned in_row = 0;
+                for (unsigned d = 0; d < row_len / 4; ++d) {
+                    NvU32 w; memcpy(&w, p + 4 * d, 4);
+                    if (!w) continue;
+                    ++in_row;
+                    lp += snprintf(lp, (size_t)(line + sizeof line - lp),
+                                   " +%u=%08x", 4 * d, w);
+                }
+                nvx_emit(c, "V2.clkdom", k->name, st,
+                         in_row ? NVX_V_OK : NVX_V_SKIP, "  %s", line);
+            }
+        }
     }
     free(buf);
     return 0;

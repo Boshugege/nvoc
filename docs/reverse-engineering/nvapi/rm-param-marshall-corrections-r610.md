@@ -528,3 +528,41 @@ below the ten domains. Against it: all three records carry the same `0x190000` a
 record `+8`, which is an odd thing for a per-domain quantity to do — so what that
 dword means stays open, and the backend keeps reporting one agreed window rather
 than three attributed ones until something other than the numbering supports it.
+
+## 8. `0x20809019` 目录行：文档给出的字段名 ↔ RM 行里真实存在的字节（2026-10-18）
+
+### 8.1 文档侧：这个块本来是**按域带范围**的
+`nvapi-rs/src/clock.rs` L303-330 的 `RawConversion for NV_GPU_CLOCK_CLIENT_CLK_DOMAINS_INFO_ENTRY`
+把这个 caller 结构的字段**逐个点名**：`disabled`、`clockType`（→ `ClockDomain`）、`rangeMax`、
+`rangeMin`（→ kHz 的 `Range`）、`vfpIndexMin`、`vfpIndexMax`（→ VFP 索引 `Range`）、`unknown0`、
+`unknown1`、`padding`；转换目标是 `ClockRange { domain, range, vfp_index }`（L285）。**即：公开层
+认为"域目录"按域携带一段 kHz 范围与一段 VFP 索引范围**——这与我们此前"目录只有 stamp + domain bit"
+的解析结论**不冲突**（RM 行 384 B ≠ 公开层行长，正如同族控制块 2108 B/64 B ≠ NVAPI 2404 B/72 B），
+但它意味着：**行的其余字节不是填充，而我们此前只解析了两个字段。**
+
+### 8.2 测量侧：行里确实有别的字段（`core/tests/data/macos-offset-directory.bin`，行 = `48+384r`）
+逐行非零 dword（u16 以两字节读）：
+
+| 行 | bit | +0 | +4 | +8 | +12 | +16 | +24 | +28 | +40 | +44 | +48 | +52 | +76 |
+|----|-----|----|----|----|-----|-----|-----|-----|-----|-----|-----|-----|-----|
+| 0 | 0x1 | 0x10808 | 1 | 7 | 1 | — | 1 | 0xb0b | 30000 | **−1000 / +1000** | 0x1000103 | 0xffff | 554 |
+| 1 | 0x2 | 0x10909 | 2 | — | −1 | 0xff00 | 1 | 0x1717 | — | — | 0x1010204 | 0xffff | — |
+| 2 | 0x10 | 0x808 | 0x10 | — | 4 | 0x100 | 1 | 0xa06 | — | **−1000 / +3000** | 0x1000602 | 0xffff | 256 |
+| 3 | 0x4 | 0x10909 | 4 | — | −1 | 0xff00 | 1 | 0x1919 | — | — | 0x1020305 | 0xffff | — |
+
+（+44 两列按 **int16** 读：`18 fc` = −1000、`e8 03` = 1000、`b8 0b` = 3000。）
+
+**可确证的**：行里存在大量此前的解析从未读出的字段 ✔；其中 **`+44` 处一对有符号 16 位值**
+只出现在 **bit 0x1（文档索引 0 = Gpc）与 bit 0x10（索引 4 = M）** 两行（本批 4 行里），
+其余两行该处为零 ✔。另外每行都有 `+48`（形如 `03 01 00 01`，四个字节字段）与 `+52 = 0xffff` ✔。
+
+**仍是假设、不得当结论的**：这对 `+44` 值是"该域的偏移窗口（kHz）"。**反向证据**：`0x20809025`
+那三条记录（tag 3/4/5）给的是 ±18750，与此处的 −1000/+1000、−1000/+3000 **不一致** ⇒ 二者
+要么**本就是不同量**（域窗口 vs 记录级跨度），要么其中之一读错了。**只有健康会话里再抓一次
+（最好换 pstate 对比）才能判定**，故本轮**不动任何公开载荷**（不发布身份未证实的数字）。
+
+### 8.3 顺带查证：这块**没有第二次抓取**
+`outputs/stage-clkdom-20261017T091500Z/clkdom-read.txt` 属**尺寸扫描期**（全部 `0x1f`），
+没有行数据；`outputs/` 里也再无 12336 B 目录块的转储 ⇒ 目前**唯一**的行字节记录就是上述 fixture。
+因此给 probe 的 `--clkdom-read` 加了**逐行非零 dword 普查**（仅当 `size == 12336`，即该块文档
+caller 尺寸），让下次会话自动把行尾字段记进记录，而不是再次丢失。

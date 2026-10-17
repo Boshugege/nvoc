@@ -924,3 +924,15 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **四、因此族状态**：仍留 `unavailable`（**没有编造任何风扇读数** ✔），但成因串已换成"**有具名候选 + 一次被 wedge 拦下的读数**"，并写明 A5 背景的用途（未写字段保持 `0xA5`，从而"写进去的 0"与"根本没写"可区分）✔。**尚未**声称风扇 rpm / 范围 / 恢复路径 ✔。
 
 **验证范围**：probe 重建通过（`built probe-macos-rm-idle (profile idle)`）；`--fan-read` **已实际跑通一次**（证明取参、缓冲、拒绝分支与状态分支都对）✔；core fmt clean、clippy（core/cli/auto-optimizer `-D warnings`）仅余既有 `nvapi-sys` 警告、core tests 全绿（89+5+15）。本轮**设备访问 3 次**（1 次 anchor 轮询 + 2 次风扇只读 GET）✔，**无写入、未提权**。
+
+### 本轮追加三十五（2026-10-18，`0x20809019` 目录行：文档字段名 ↔ 真实字节）
+
+**一、文档侧**：仓库内 NVAPI 副本（`nvapi-rs/src/clock.rs` L303-330）把"域目录" caller 结构的字段**逐一点名**：`disabled`/`clockType`/`rangeMax`/`rangeMin`/`vfpIndexMin`/`vfpIndexMax`/`unknown0`/`unknown1`/`padding`，目标是 `ClockRange{domain, range, vfp_index}` ⇒ **公开层认为该块按域携带一段 kHz 范围与一段 VFP 索引范围** ✔ 与"RM 行 384 B ≠ 公开行长"并不冲突（同族控制块已有 2108/64 vs 2404/72 的先例）。
+
+**二、测量侧**：对 `core/tests/data/macos-offset-directory.bin` 逐行 dump（行 = `48+384r`）——行内**确有大量此前从未解析的字段** ✔；其中 **`+44` 处一对 int16** 只出现在 **bit 0x1（文档索引 0 = Gpc）与 bit 0x10（索引 4 = M）** 两行（值 −1000/+1000 与 −1000/+3000），另两行该处为 0 ✔；每行还有 `+48`（形如 `03 01 00 01`）与 `+52=0xffff` ✔。
+
+**三、明确留在假设层**：`+44` 是"该域偏移窗口(kHz)"**尚未证实**；**反向证据**是 `0x20809025` 记录 3/4/5 给的是 ±18750，与此处不一致 ⇒ 二者要么不同量、要么之一读错，**须健康会话二次抓取（最好换 pstate）判定**。故本轮**不发布任何身份未证实的数字**（公开载荷不动）✔。
+
+**四、顺带查证**：`stage-clkdom-20261017T091500Z`（尺寸扫描期）无行数据，`outputs/` 也再无该块转储 ⇒ **目前唯一行字节记录就是该 fixture**；已给 probe `--clkdom-read` 加**逐行非零 dword 普查**（仅 `size==12336`），使下次会话自动记录行尾字段 ✔。
+
+**验证范围**：probe 重建 `built probe-macos-rm-idle (profile idle)` ✔（普查分支只在读成功时打印，wedge 下**未被执行**，仅编译验证——如实标注）；**无写入、未提权**；本轮设备访问 1 次（anchor 轮询）；core 未改动，故未重跑 Rust 门（上一轮 fmt/clippy/tests 结论仍适用 ✔）。
