@@ -2180,8 +2180,16 @@ fn query_temperature_thresholds(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
-fn query_throttle_reasons(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
-    let value = with_target(gpu, "nvml", normalize_throttle_reasons)?;
+#[pyo3(signature = (gpu, backends = None))]
+fn query_throttle_reasons(
+    py: Python<'_>,
+    gpu: &str,
+    backends: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    // `both` matches the query_info/status/settings family: on macOS pass
+    // `"auto"`/`"macos-rm"` to get the same nine RM-backed reasons the CLI
+    // reports; the NVML path is unchanged elsewhere.
+    let value = with_target(gpu, backends.unwrap_or("both"), normalize_throttle_reasons)?;
     py_value(py, &value)
 }
 

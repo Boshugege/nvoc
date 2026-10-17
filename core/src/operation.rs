@@ -754,6 +754,24 @@ impl GpuOperation for QueryThrottleReasons {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        // macOS has no NVML runtime: the NullMoth RM snapshot already carries
+        // the RUSD `clkThrottleInfo.reasonMask`. Decoding it here — with the
+        // same nine-reason NVML vocabulary/order the NVML path below reports —
+        // keeps every consumer of this operation (the CLI `get-throttle-reasons`
+        // surface, pynvoc's `query_throttle_reasons`) on one implementation
+        // instead of each front end re-deriving the flags.
+        if target.has_macos_rm() {
+            let status = target.macos_rm()?.status()?;
+            return Ok(
+                crate::macos_rm::throttle_reason_states(status.throttle_reason_mask)
+                    .into_iter()
+                    .map(|(name, active)| ThrottleReason {
+                        name: name.to_string(),
+                        active,
+                    })
+                    .collect(),
+            );
+        }
         low_nvml::get_nvml_throttle_reasons(target.nvml()?, target.id.0)
             .ok_or_else(|| {
                 Error::Custom(format!(

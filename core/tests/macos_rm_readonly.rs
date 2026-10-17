@@ -12,8 +12,8 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 
 use nvoc_core::{
     BackendSet, DeviceStatus, FieldState, GpuId, GpuSelector, MacosRmSession, QueryMacosRmInfo,
-    QueryMacosRmStatus, abi_layout, discover_targets, native_abi_layout, nvapi_init_attempted, run,
-    select_targets,
+    QueryMacosRmStatus, QueryThrottleReasons, abi_layout, discover_targets, native_abi_layout,
+    nvapi_init_attempted, run, select_targets,
 };
 
 fn count_fds() -> usize {
@@ -108,6 +108,46 @@ fn native_inventory_and_queries_do_not_initialize_nvapi() {
         assert_required_fields_present(&status);
     }
     assert!(!nvapi_init_attempted());
+}
+
+/// One shared operation backs the dedicated throttle surface in every front
+/// end (CLI `get-throttle-reasons`, pynvoc `query_throttle_reasons`): NVML's
+/// nine-reason vocabulary/order, flags decoded from the RUSD mask the status
+/// payload carries. Comparing against the raw mask bits proves the op does
+/// not just echo its own decoder.
+#[test]
+#[ignore = "requires a NullMoth GPU on x86_64 macOS"]
+fn shared_throttle_reason_query_reports_the_nvml_vocabulary() {
+    let _serial = serial();
+    let inventory = discover_targets(BackendSet::MacosRm).unwrap();
+    let targets = inventory.targets();
+    let target = targets[0];
+    let status = run(&target, QueryMacosRmStatus).unwrap().output;
+    let reasons = run(&target, QueryThrottleReasons).unwrap().output;
+    let expected_names = [
+        "GPU Idle",
+        "App Clock Setting",
+        "SW Power Cap",
+        "HW Slowdown",
+        "Sync Boost",
+        "SW Thermal",
+        "HW Thermal",
+        "HW Power Brake",
+        "Display Clock",
+    ];
+    let names: Vec<&str> = reasons.iter().map(|reason| reason.name.as_str()).collect();
+    assert_eq!(names, expected_names, "NVML vocabulary/order drifted");
+    let mask = status
+        .throttle_reason_mask
+        .expect("throttle_reason_mask on this driver");
+    for (bit, reason) in reasons.iter().enumerate() {
+        assert_eq!(
+            reason.active,
+            mask & (1 << bit) != 0,
+            "{} active flag disagrees with mask {mask:#010x}",
+            reason.name
+        );
+    }
 }
 
 #[test]

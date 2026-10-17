@@ -47,17 +47,18 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 Command::GetSettings => {
                     serde_json::to_value(run(&target, nvoc_core::QueryMacosRmSettings)?.output)?
                 }
-                // Same nine-reason vocabulary NVML/NVAPI report, with the
-                // active flags decoded from the RUSD reason mask. NVML also
-                // appends per-policy violation counters; the RM backend has no
-                // equivalent, so violation stays null like NVML when the
+                // Decoded by the shared `QueryThrottleReasons` operation (core
+                // serves it from the RM snapshot on macOS), so this surface and
+                // pynvoc's `query_throttle_reasons` cannot drift apart. NVML
+                // also appends per-policy violation counters; the RM backend
+                // has no equivalent, so violation stays null like NVML when the
                 // device exposes no counters.
                 Command::GetThrottleReasons => {
-                    let status = run(&target, nvoc_core::QueryMacosRmStatus)?.output;
                     let reasons: Vec<serde_json::Value> =
-                        nvoc_core::macos_rm::throttle_reason_states(status.throttle_reason_mask)
+                        run(&target, nvoc_core::QueryThrottleReasons)?
+                            .output
                             .into_iter()
-                            .map(|(name, active)| json!({"name": name, "active": active}))
+                            .map(|reason| json!({"name": reason.name, "active": reason.active}))
                             .collect();
                     json!({ "reasons": reasons, "violation": serde_json::Value::Null })
                 }
