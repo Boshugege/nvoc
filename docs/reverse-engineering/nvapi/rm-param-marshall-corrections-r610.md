@@ -1379,3 +1379,24 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 - 真机 macOS 编译 ✔：`OGKM=… sh build.sh` ⇒ **`built probe-macos-rm-idle (profile idle)`** ✔。
 - **未运行** ✗（GSP 仍 `0x62` ✔）⇒ 新用例＝**已实现待实测** ✔。
 - 设备访问 ✔：本轮仅一次 wedge 轮询（`0x00000062`，uptime `1 day, 4:24`，同一 boot ✔）；真机编译与源码检索均不访问设备 ✔。
+
+## 41. wedge 是**间歇性**的：首次观测到恢复窗口与正确的健康判据（2026-10-18）
+
+**选择依据** ✔：原目标要求"轮询要非阻塞""不要因外部条件标 blocked"✔；本轮轮询出现**新观测** ⇒ 足以修正此前"楔形是硬锁存、只能等重启"的操作假设 ✗。
+
+### 41.1 实测：恢复窗口真实存在，但很短 ✗
+- 本机 macOS 本地时间 **11:46** ✔：`./probe-macos-rm-idle --anchor-read` 的 **`anchor verdict`** 行返回 **`status 0x00000000`（NV_OK）** ✔ —— 楔形开始以来首次健康观测 ✔。
+- 数秒后同一命令（runbook 内部首例）⇒ `0x2080901b@2108 in@4=0xFF bg=A5` 返回 `0x00000062` ✗，且同一 bundle 内 `fb-get-info-v2`／`fb-stats-get`／`perf-current-pstate`／`rated-tdp-get-control`／`gpumon`／`pmumon`／`rusd-page`／`perf-level-info-v2` 全 `0x62` ✗（无关状态的 `bios-sku-info`／`bus-get-pci-info` 仍 `NV_OK` ✔）。
+- 再三次**门控重试**（间隔 15 s）⇒ verdict 均 `0x62` ✗。
+⇒ 结论 ✔：**楔形不是硬锁存** ✔；GSP 会自行回到 NV_OK 然后又很快回到 reset-required ✗ ⇒ 策略从"等重启"改为"**用门控重试抓窗口**"✔（重启仍由用户执行，不自动重启 ✔）。
+### 41.2 判据行纠正 ✗（我自己踩过一次）
+- 健康判据只有 **`anchor verdict`** 行的状态 ✔（`0x00000000` ＝ 健康 ✔ ／ `0x00000062` ＝ 楔形 ✗）。
+- `anchor host size gate` 行**恒为 `0x1f`** ✔ —— 它自述 "the host NVOC paramSize gate is alive and **GPU-state independent**" ✔ ⇒ 用 `grep -o "status 0x…" | head -1` 抓第一处状态会读到**这一行** ✗ ⇒ 必须按**行名**检索 ✔ ✔。
+### 41.3 可用配方（避开窗口错过）✔
+- 同一次 ssh 调用内：先读 `anchor verdict` ✔ → 仅当 `0x00000000` 才执行 `tools/clock-offset-read-run.sh` ✔ ⇒ 两次独立 ssh 之间隔数秒，正是本轮错过窗口的原因 ✗。
+- runbook **自身也有守门** ✔：首例见 `0x62`/`0x65` 即停，并声明 "Reboot, then rerun; **nothing was written**" ✔ ⇒ 只读语义成立 ✔。
+### 41.4 顺带复核导出表 capture（降级一条口径）✗
+- 本次复核的 dump 实得 **1081 行** ✗，与交接文档记载的 **1118 行**不一致（差 37 行 ⇒ 待核 ✔）⇒ 引用行数时必须写明是"工具声称"还是"实得 dump 行数"✔。
+- `flags & 0x4000`（bit14）命中的行 ＝ **19 行** ✔，而该 capture 的 `GET/SET` 列把这 19 行**全标成 GET** ✗；但 `0x2080206f` 的 flags `0x00040048` 明明带 bit14 ✗ ⇒ **该列不是方向的可信来源** ✗ ⇒ 纠错：方向只认逐条证据（生成分发表的处理函数名如 `...SetControl` ✔，或 set 身份 `(cmd & 0xC000) == 0xC000` ✔）；该 capture 里 94 行 `SET` 同样**降级为线索** ✔。
+### 41.5 设备访问 ✔
+本轮设备调用 ✔：轮询 1 次（`0x62` ✔）＋诊断 1 次 ✔＋门控重试 3 次（各 1 次 anchor ✔）＋后台门控重试（每 60 s 一次 anchor，命中即跑只读 battery ✔）⇒ **全部只读** ✔，未重启、未写入、无性能 SET ✔。
