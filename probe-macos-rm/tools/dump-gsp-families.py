@@ -3,7 +3,10 @@
 
 Why this exists
 ---------------
-The GSP's own export table lists 889 methods.  The id encoding puts the
+The GSP's own export table lists 1118 methods (an earlier extraction reported
+only 889, because a `flags < 0x10000` guard silently dropped 229 real rows -- see
+`extract-gsp-method-table.py`, which now finds all 1118 with two scan
+alignments).  The id encoding puts the
 interface (category) byte at bits 15:8 of the low half, and the two top bits of
 that byte are the legacy/privilege marker:
 
