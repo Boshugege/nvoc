@@ -146,11 +146,25 @@ NAMED = {
 # (nvapi-rs clk_ctrl_entry) names five value dwords at record+44/+48/+52/+56/
 # +60, and the one measured RM<->nvapi coordinate constant (0x24, pinned on
 # 0x20809025's max_khz/offset_floor/offset_ceiling) puts them at RM rec+8/12/
-# 16/20/24.  The order inside that five is NOT resolved: the article's own text
-# says slot 0 is the signed kHz frequency offset, while the same layer's
-# Blackwell field map says the frequency delta is VALUES[2].  So the current
-# offset is one of rec+8 / rec+12 / rec+16, and only a same-field readback
-# after a single-step SET can decide.  Printed as CANDIDATES, never as names.
+# 16/20/24.
+#
+# WHICH SLOT, for the signed offset: rec+8 is the supported reading, and the
+# one counter-citation does not apply to this block.
+#   * the repo's own V1 map names the first of the five value dwords
+#     (record+44) OFFSET_KHZ and appends range min / range max / applied after
+#     it (nvapi-rs/sys/src/gpu/clock.rs, `clk_ctrl_entry`); the records this
+#     driver reports carry types 3, 8 and 9, all inside `v1_marshalable`'s set,
+#     so the V1 naming is the one that applies to them.
+#   * the VALUES[2] counter-citation is a V2/Blackwell fact -- BASE 292,
+#     STRIDE 772, VALUES@268, FREQ_KHZ = 0x114 == VALUES[2] -- i.e. a different
+#     struct generation, and this driver rejects the V2 caller size (24996) at
+#     0x1f, so the V2 value map is not evidence about this block.
+#   * the measured write set agrees: 13 contiguous dwords per 0x08/0x09 record
+#     (WRITE_SET_PER_TYPE below; rec+8 + 4*12 == rec+56 is where the last
+#     changed dword of the last row lands), so value slot k sits at rec+8+4k and
+#     "the caller's field k" and "RM slot k" are the same index.
+# Still printed as CANDIDATES: only a same-field readback after a single-step
+# SET can promote them to names.
 #
 # That +8..+24 mapping comes from one constant, 0x24, re-derived from the
 # recorded 0x20809025 payload: RM row +0x08/+0x14/+0x18 hold 1638400 / -18750 /
@@ -613,6 +627,83 @@ def decode(mid: int, size: int, buf: bytes, out=sys.stdout) -> int:
     return 0
 
 
+# The slot claim above is only as good as the Rust constants it quotes, and those
+# constants live in another file that nothing here reads.  So read them: this
+# turns "the repo's V1 map names slot 0 the offset" from prose into a check that
+# fails loudly if nvapi-rs changes its mind.  Missing file (the tool copied out
+# of the tree) is a skip, not a failure.
+RUST_CLOCK = "nvapi-rs/sys/src/gpu/clock.rs"
+# The marshal gates live in the high-level crate, not the sys one -- a second
+# file, checked too, because "v1_marshalable covers the types this driver
+# reports" is the other half of the argument.
+RUST_MARSHAL = "nvapi-rs/src/clock.rs"
+
+
+def cross_check_rust_field_map(verbose=True) -> bool:
+    import re
+    from pathlib import Path
+
+    here = Path(__file__).resolve()
+    for root in (here.parents[1], here.parents[2], Path.cwd()):
+        path = root / RUST_CLOCK
+        if path.is_file():
+            break
+    else:
+        if verbose:
+            print(f"  (skipped: {RUST_CLOCK} not found relative to {here.parents[1]})")
+        return True
+    text = path.read_text()
+    here_parents = [here.parents[1], here.parents[2], Path.cwd()]
+    for root in here_parents:
+        marshal_path = root / RUST_MARSHAL
+        if marshal_path.is_file():
+            break
+    else:
+        if verbose:
+            print(f"  (skipped: {RUST_MARSHAL} not found)")
+        return True
+    marshal = marshal_path.read_text()
+
+    def const(module: str, name: str) -> int:
+        body = text.split(f"pub mod {module} {{", 1)[1].split("\n    }", 1)[0]
+        hit = re.search(rf"pub const {name}: usize = ([0-9]+);", body)
+        assert hit, (module, name)
+        return int(hit.group(1))
+
+    slots = {
+        "OFFSET_KHZ": const("clk_ctrl_entry", "OFFSET_KHZ"),
+        "RANGE_MIN": const("clk_ctrl_entry", "RANGE_MIN"),
+        "RANGE_MAX": const("clk_ctrl_entry", "RANGE_MAX"),
+        "APPLIED": const("clk_ctrl_entry", "APPLIED"),
+    }
+    assert slots == {"OFFSET_KHZ": 44, "RANGE_MIN": 48, "RANGE_MAX": 52, "APPLIED": 56}, slots
+    # The five printed candidate slots are those four plus the next one, moved by
+    # the one measured field delta -- so the tool cannot drift from the map.
+    delta = 0x24
+    expected = [v - delta for v in (*slots.values(), slots["APPLIED"] + 4)]
+    printed = sorted(CANDIDATES[0x2080901B])
+    assert printed == expected, (printed, expected)
+    # The types this driver reports are inside the V1 marshal set, which is why
+    # the V1 naming applies to them at all.
+    assert re.search(
+        r"fn v1_marshalable.*?matches!\(entry_type, 1 \| 3 \| 4 \| 5 \| 6 \| 7 \| 8 \| 9\)",
+        marshal,
+        re.S,
+    ), "v1_marshalable no longer covers 3/8/9 -- the V1 naming would stop applying"
+    # And the VALUES[2] counter-citation is a different generation: its base and
+    # stride are not this family's, and its value block starts past them.
+    assert const("clk_ctrl_entry_v2", "STRIDE") == 772, const("clk_ctrl_entry_v2", "STRIDE")
+    assert const("clk_ctrl_entry_v2", "BASE") == 292, const("clk_ctrl_entry_v2", "BASE")
+    assert const("clk_ctrl_entry", "STRIDE") == 72
+    if verbose:
+        print(
+            "  rust field map: V1 offset slot"
+            f" {slots['OFFSET_KHZ']} -> RM rec+{slots['OFFSET_KHZ'] - delta}"
+            f" ; V2 stride {const('clk_ctrl_entry_v2', 'STRIDE')} is another generation"
+        )
+    return True
+
+
 def selftest() -> int:
     check_geometry()
     # The 0x2080901d candidate above claims a measured 128-byte period over a
@@ -760,7 +851,8 @@ def selftest() -> int:
     odd = a5_block(0x1, rows=((1, 0x0B0B),) + RECORDED_ROWS[1:])
     assert "type unknown" in "\n".join(write_set_check(odd, 60, 64))
     assert write_set_model(0x1, rows=((1, 0x0B0B),) + RECORDED_ROWS[1:]) == (None, None)
-    print("selftest ok: geometry + round-trip + field decode + write-set model")
+    cross_check_rust_field_map()
+    print("selftest ok: geometry + round-trip + field decode + write-set model + rust field map")
     return 0
 
 

@@ -16,20 +16,24 @@
 # for you, so this script refuses to run without one.
 #
 # Ordered candidates (see docs/reverse-engineering/nvapi/
-# rm-param-marshall-corrections-r610.md section 27): the in-tree copy records the
-# caller layer's record field map, where record+44 is the signed kHz offset and
-# record+56 is the applied value. Those two offsets are inside the twelve dwords
-# this probe can write, and 44 is the only one the copy names as the offset, so
-# it is the first case to try; +8 stays as the second because the copy's record
-# base and stride differ from the RM block's and that mapping is an inference,
-# not a measurement. Readback should watch +56 as well as the written dword.
+# rm-param-marshall-corrections-r610.md sections 27 and 50): the in-tree copy
+# records the caller layer's record field map, where its record+44 is the signed
+# kHz offset and its record+56 is the applied value. Those two caller offsets
+# sit 0x24 below the RM block's value slots, and that delta is *measured*, not
+# inferred: in the 0x20809025 container the caller's named REC_MIN_OFFSET /
+# REC_MAX_OFFSET (-18750/+18750) read back at RM rec+20/+24, with the same
+# values, and REC_MAX_KHZ at RM rec+8. So the RM slot the caller names as the
+# offset is rec+8, and that is the first case to try; +44 stays as the second
+# because the delta is only measured for the sibling container 0x20809025, and
+# if this container's value slots sit at a different delta the caller's own
+# number is the hedge. Readback should watch +56 as well as the written dword.
 #
 # Usage:
 #   sh tools/clock-offset-write-run.sh <bit>:<off>:<delta_khz>
 #
-#   sh tools/clock-offset-write-run.sh 0:44:250   # core domain, candidate +44 (first)
-#   sh tools/clock-offset-write-run.sh 0:8:250    # core domain, candidate +8 (second)
-#   sh tools/clock-offset-write-run.sh 2:44:250   # memory domain, same candidate
+#   sh tools/clock-offset-write-run.sh 0:8:250    # core domain, candidate +8 (first)
+#   sh tools/clock-offset-write-run.sh 0:44:250   # core domain, candidate +44 (hedge)
+#   sh tools/clock-offset-write-run.sh 2:8:250    # memory domain, same candidate
 #
 #   <bit>   index-space row (bit i selects record i), so 0 is the row whose
 #           1<<id names the core/GPU domain and 2 the memory domain
