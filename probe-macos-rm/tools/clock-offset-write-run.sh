@@ -15,11 +15,21 @@
 # the restored block byte-identical). What it cannot do is choose the candidate
 # for you, so this script refuses to run without one.
 #
+# Ordered candidates (see docs/reverse-engineering/nvapi/
+# rm-param-marshall-corrections-r610.md section 27): the in-tree copy records the
+# caller layer's record field map, where record+44 is the signed kHz offset and
+# record+56 is the applied value. Those two offsets are inside the twelve dwords
+# this probe can write, and 44 is the only one the copy names as the offset, so
+# it is the first case to try; +8 stays as the second because the copy's record
+# base and stride differ from the RM block's and that mapping is an inference,
+# not a measurement. Readback should watch +56 as well as the written dword.
+#
 # Usage:
 #   sh tools/clock-offset-write-run.sh <bit>:<off>:<delta_khz>
 #
-#   sh tools/clock-offset-write-run.sh 0:8:250    # core domain, candidate +8
-#   sh tools/clock-offset-write-run.sh 0:16:250   # core domain, candidate +16
+#   sh tools/clock-offset-write-run.sh 0:44:250   # core domain, candidate +44 (first)
+#   sh tools/clock-offset-write-run.sh 0:8:250    # core domain, candidate +8 (second)
+#   sh tools/clock-offset-write-run.sh 2:44:250   # memory domain, same candidate
 #
 #   <bit>   index-space row (bit i selects record i), so 0 is the row whose
 #           1<<id names the core/GPU domain and 2 the memory domain
