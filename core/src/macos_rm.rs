@@ -968,6 +968,35 @@ fn decode_throttle_reasons(mask: u32) -> Vec<String> {
         .collect()
 }
 
+/// Human-facing throttle-reason view for the dedicated surface: the full
+/// nine-reason vocabulary in the same order NVML reports it, each paired with
+/// its active flag decoded from the RUSD `clkThrottleInfo.reasonMask`.
+///
+/// [`decode_throttle_reasons`] keeps the raw snake_case tags the status payload
+/// has always carried; this is the NVML-compatible twin so `get-throttle-reasons`
+/// returns the same rows on macOS that it does on NVML/NVAPI. A `None` mask
+/// (throttle section unavailable) reports every reason as inactive rather than
+/// inventing an active one.
+pub fn throttle_reason_states(mask: Option<u32>) -> Vec<(&'static str, bool)> {
+    const DISPLAY_NAMES: [&str; 9] = [
+        "GPU Idle",
+        "App Clock Setting",
+        "SW Power Cap",
+        "HW Slowdown",
+        "Sync Boost",
+        "SW Thermal",
+        "HW Thermal",
+        "HW Power Brake",
+        "Display Clock",
+    ];
+    let mask = mask.unwrap_or(0);
+    THROTTLE_REASONS
+        .iter()
+        .zip(DISPLAY_NAMES)
+        .map(|((bit, _), name)| (name, mask & *bit != 0))
+        .collect()
+}
+
 /// Engine names in the order NVOC_RM_ENGINES carries them (gr, fb, nvenc,
 /// nvdec, nvjpg, nvofa), matching RUSD_PROC_UTIL's own field names.
 const ENGINE_NAMES: [&str; ENGINES] = ["gr", "fb", "nvenc", "nvdec", "nvjpg", "nvofa"];
@@ -1928,6 +1957,22 @@ mod tests {
         // The whole gen-info word at 0 means the driver does not report a link.
         assert_eq!(decode_pci_gen_info(0), (None, None));
         assert_eq!(decode_pci_gen_info(0x0000_1000), (Some(1), Some(2)));
+
+        // The NVML-facing view keeps the full nine-reason list in NVML order,
+        // with the active flags decoded from the same mask.
+        let states = throttle_reason_states(Some(0b1000101));
+        assert_eq!(states.len(), 9);
+        assert_eq!(states[0], ("GPU Idle", true));
+        assert_eq!(states[1], ("App Clock Setting", false));
+        assert_eq!(states[2], ("SW Power Cap", true));
+        assert_eq!(states[6], ("HW Thermal", true));
+        assert_eq!(states[8], ("Display Clock", false));
+        // An unavailable mask never fabricates an active reason.
+        assert!(
+            throttle_reason_states(None)
+                .iter()
+                .all(|(_, active)| !active)
+        );
     }
 
     #[test]

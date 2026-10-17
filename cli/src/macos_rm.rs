@@ -8,12 +8,16 @@ pub(super) fn selected(backend: BackendChoice) -> bool {
 pub(super) fn validate(command: Command) -> CliResult<()> {
     if matches!(
         command,
-        Command::GetGpuList | Command::GetInfo | Command::GetStatus | Command::GetSettings
+        Command::GetGpuList
+            | Command::GetInfo
+            | Command::GetStatus
+            | Command::GetSettings
+            | Command::GetThrottleReasons
     ) {
         Ok(())
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings. Performance writes are not implemented.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons. Performance writes are not implemented.",
             command.name()
         )))
     }
@@ -43,12 +47,29 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 Command::GetSettings => {
                     serde_json::to_value(run(&target, nvoc_core::QueryMacosRmSettings)?.output)?
                 }
+                // Same nine-reason vocabulary NVML/NVAPI report, with the
+                // active flags decoded from the RUSD reason mask. NVML also
+                // appends per-policy violation counters; the RM backend has no
+                // equivalent, so violation stays null like NVML when the
+                // device exposes no counters.
+                Command::GetThrottleReasons => {
+                    let status = run(&target, nvoc_core::QueryMacosRmStatus)?.output;
+                    let reasons: Vec<serde_json::Value> =
+                        nvoc_core::macos_rm::throttle_reason_states(status.throttle_reason_mask)
+                            .into_iter()
+                            .map(|(name, active)| json!({"name": name, "active": active}))
+                            .collect();
+                    json!({ "reasons": reasons, "violation": serde_json::Value::Null })
+                }
                 _ => unreachable!("validated above"),
             };
             if let Some(object) = value.as_object_mut() {
                 // The settings query carries its own capability block; the
                 // status/info payloads keep the read-only summary.
-                if command != Command::GetSettings {
+                if matches!(
+                    command,
+                    Command::GetGpuList | Command::GetInfo | Command::GetStatus
+                ) {
                     object.insert("capabilities".into(), json!({
                         "device_info": true, "pstate_query": true,
                         "telemetry": true, "performance_writes": false,
@@ -119,6 +140,9 @@ mod tests {
     #[test]
     fn settings_is_readable_but_writes_stay_refused() {
         assert!(validate(Command::GetSettings).is_ok());
+        // Stage-8 read face: throttle reasons are RM-backed now, so the
+        // dedicated command joins the macOS allow-list.
+        assert!(validate(Command::GetThrottleReasons).is_ok());
         for command in [
             Command::SetPowerLimit,
             Command::SetPstateGlobalFreqOffset,
