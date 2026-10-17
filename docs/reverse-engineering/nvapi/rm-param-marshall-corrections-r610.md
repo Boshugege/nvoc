@@ -106,6 +106,14 @@ records are zero, i.e. this board exposes one rail.
 | the id is part of the driver's exported method table | it is **absent** from the 604-row table extracted from the loaded image |
 | the carrier object is `NV20_SUBDEVICE_0` | it answers on **both** the subdevice and the device object; the client object answers `0x56` |
 
+> **Resolved later the same day (11:50Z).** The "minimum-size gate the NVOC
+> gate cannot produce" question this table raises is settled in
+> `gsp-method-table-and-legacy-forwarding.md` §12/§13: the gate is on the
+> **forwarded** side. The same short-size request that the host rejects with
+> `0x1f` answers `0x62` while the GSP is wedged, and the client carrier — where
+> the forward is skipped — answers `0x56` at *every* size. So `0x2080B201` is
+> GSP-answered and needs no unexplained host path.
+
 The `(version<<16|size)` magics (`0x10964`, `0x78604`, …) are **NVAPI-layer**
 values — they are compared by the NVAPI handler, not by the RM. The RM
 parameter block for `0x2080B201` carries no magic at all (dword 0 is an

@@ -1143,6 +1143,19 @@ queue plus a doorbell, not a syscall per byte, so "as fast as a host id" is not
 evidence of being one. The line is printed, labelled *not discriminating*, and
 then ignored.
 
+**A cross-check the source model predicts, and the measurements confirm.**
+`RmDeprecatedGetControlHandler` only forwards when it can resolve a GPU from the
+object handle (`gpuGetByHandle`, then `pGpu != NULL && IsGssLegacyCall(cmd)`); a
+*client* handle resolves to no GPU, so the forward is skipped and the id falls
+through to the normal NVOC dispatch, which has no row for it. That predicts:
+same id, same size, different carrier, *different* error, and the error should
+be size-independent and wedge-independent. Measured on `0x2080b201` in one run
+(`outputs/clkobj-wedge-20261017T114050Z/`): subdevice `0x62` at 88/164/620/2440
+and `NV_OK` at ≥2444; **client `0x56` at every one of those sizes**, including
+the ones that are `NV_OK` on the subdevice. So the size gate and the wedge
+collapse exist only where the forward runs — which is what "the validation is
+behind the forward" means, and it is visible without a reboot.
+
 **A note on `0x2080a0ff`.** It is a good anchor for "does the GSP still say
 *no such method*" (`0x56`) and a bad one for "is the forward alive": under the
 wedge the GSP answers `0x62` for it, and for a mismatched size, and for
