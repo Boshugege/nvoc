@@ -1058,7 +1058,7 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 | 温度 | `thermal-sensor`（走 1432 的 `0x20800513`）| **NV_OK**，`reading 47 \| range [0,127] \| target 0 provider 0` ✔ | ✔ | ✔ | **✔ 有范围 [0,127]** | ✔ | 只读 |
 | 温度（另一路）| `rusd-readout` | `temp[gpu=44.46C…51.9C]`、负载中 `temperature_c 59.34` ✔ | ✔ | ✔ | ✔ | ✔ | 只读 |
 | 温度（分类）| `thermal-classify` | **NV_OK**，`target 0 type 1 (=GPU) provider 0 type 1` ✔ | ✔ | ✔ | — | ✔ | 只读 |
-| 风扇 | `rusd-readout` / `get-status` | `fan 0 rpm`（空转）→**负载中 `fan_rpm 1833`/`fan_rpms [1833]`** ✔ | ✔ | ✔ | ✔（0–1833 实测）| ✔ | 只读 |
+| 风扇 | `rusd-readout` / `get-status` | `fan_rpm` **1613**（记录中的"前"采样，非 0）→**负载中 `fan_rpm 1833`/`fan_rpms [1833]`** ✔ | ✔ | ✔ | ✔（记录中 1610–1833；更早一次空转读数为 0，**未在本批记录中复现**）| ✔ | 只读 |
 | 功耗 | `rusd-readout` / `get-status` | `limit 100000 mW`、`power_policy_tgp_mw 12857`、负载中 `power_mw 12798`、`utilization 99 %` ✔ | ✔ | ✔ | ✔ | ✔ | 只读 |
 | 功耗（命令面）| `rated-tdp-get-control` | **NV_OK**（detail 仅 `raw[0..2]=0 0 0`）✔ | ✔ | **待确认** ✗ | 待确认 | 待确认 | 只读 |
 | 热批处理 | `thermal-targets-sensors` / `thermal-counts` | **NV_OK**，`EXECUTE_V2 (0x20800513) paramSize 1432: batch accepted`、`1 target(s), 1 sensor(s)` ✔ | ✔ | ✔ | — | ✔ | 只读 |
@@ -1199,3 +1199,48 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 客户端：`cargo fmt --all -- --check` 干净 ✔；`cargo test -p nvoc-cli` 82 passed ✔；`cargo test -p nvoc-core --all-targets` 94 passed ✔；`clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 干净 ✔。测试机（`OGKM=`）：同步该文件后 `cargo build -p nvoc-cli` 通过 ✔（sha256 两侧一致 ✔）。
 **设备访问**：本轮仅 wedge 轮询一次 ✔ —— verdict `0x00000062 NV_ERR_RESET_REQUIRED` ✔（探针原文：forward ALIVE 但 GSP 处于 reset-required；`0x2080b201` 仍 NV_OK，而所有拒绝都被折叠成 `0x62` ✔），uptime `1 day, 3:53`，同一 boot ⇒ **未重启、未写入、未做任何性能操作** ✔。
 **状态**：第 32 轮遗留的"人读输出未确认"⇒ **已确认（有测试）** ✔；`clock_offsets` 在设备侧仍为 **已实现待实测** ✔。
+
+## 34. 逐族只读审计（按原目标要求的"可读 / 可解释 / 范围 / 原状态 / 恢复"五段式，2026-10-18）
+
+**选择依据** ✔：原目标把风扇/功耗/温度列为**必须分别调查**的次优先项 ✗，且要求每族独立给出五段证据与**剩余问题** ✔；此前 §28 是一张汇总表 ✗，缺"缺失层归属"与"证据边界" ✔。本轮**基于测试机已记录的文件**逐一核对 ✔（读文件 ✗ 非设备访问 ✔），并**更正一处与记录不符的旧断言** ✗（§28 风扇行 ✔）。
+
+### 34.1 频率域偏移（最高优先通道）
+- **可读** ✔：RUSD 实时频率（`graphics_clock_khz 1935000` / `memory_clock_khz 6000984`，`stage6-fan-read-20261017T060900Z/status-under-load.json` ✔）；偏移本身经 `0x20809061@776` 的 **776 字节时钟文档**实测 ✔（11 个 24 字节槽、域位＋频率＋**有符号**偏移 ✔，捕获见 `stage-clkdoc-20261017T074448Z/clkdoc-read.txt` ✔）。
+- **可解释** ✔：槽位语义=域位/频率 kHz/偏移 kHz ✔；仓库内仅 `0x10` 可命名 MCLK ✔。
+- **范围** ✔：`0x20809025` range 块给 **±18 750 kHz 偏移窗口** ✔（§29 ✔）。
+- **原状态** ✔：重复读**逐字节一致** ✔。
+- **恢复** ✗ **N/A——因为还没有 SET** ✔。
+- **缺失层** ✗：**前置条件（写权限）＋客户端 SET 入口** ✔，四路独立支持：驱动源码的 legacy 权限判定 ✔、set 身份 `(cmd & 0xC000) == 0xC000` ✔、非特权调用实测 `0x1b` ✔、host 表 **0 条**特权行 ✔、`core/native/macos_rm.c` 内**没有任何 SET id** ✔、导出表把 `0x2080d01c` 命名为 `SetControl` ✔。⇒ 属**待授权** ✔，**不是**"只能固件逆向" ✗。
+
+### 34.2 风扇
+- **可读** ✔：`fan_rpm`/`fan_rpms`（RUSD 逐槽 ✔）——本批记录采样 **1610 / 1613 / 1616 / 1619 / 1833** ✔（`stage9-stress-20261017T041107Z/telemetry-before.jsonl` 与 `stage6-fan-read-20261017T060900Z/status-under-load.json` ✔）。
+- **可解释** ✔：RPM 单值＝最高实时读数，逐槽列表跳过 0；单风扇卡二者一致 ✔。
+- **范围** ✗：**没有声明式范围** ✗，只有**观察区间 1610–1833** ✔ ⇒ §28 那句"`fan 0 rpm`（空转）→…（0–1833 实测）"**已更正** ✔：`stage9-*` 的"前"采样是 **1613** 而非 0 ✗，0 rpm 只在更早一次空转探测里出现过、**未在本批记录中复现** ✗。
+- **原状态** ✔：如上（1613，环境温度 44.4 °C、功耗 11.5 W、`graphics_clock_khz 1530000` ⇒ 当时**并非真空转** ✔）。
+- **恢复** ✗ **N/A**（无 SET）。
+- **缺失层** ✗：**公开 RM 读/写命令本身** —— 风扇百分比/模式/曲线/FanStop 都不在公开 opcode 内 ✔（`stage6-fan-read-20261017T060900Z/README.md` 的"缺口"节 ✔）⇒ 分类**未实现 / 待授权** ✔。
+- **预订只读动作** ✔：wedge 解除后**在真正空转时重采一次** ✔，把"0 rpm"这一观察补成有据 ✔（若仍非 0，则"0"这一点作为**更早观察**保留、不与本批混写 ✗）。
+
+### 34.3 温度
+- **可读** ✔：公开 `NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2 = 0x20800513` **NV_OK** ✔（`stage-thermal-read-20261017T061320Z/` 断言 6/6 ✔）。
+- **可解释** ✔：1 target（type 1 = GPU）、1 sensor（target 0/provider 0）✔，读数与 RUSD `temperature_c` **四舍五入一致**（47 vs 47.4 ✔，采样间隔 <1 s ✔）。
+- **范围** ✔ **声明式**：sensor range **[0,127]** ✔ ——**本批唯一的声明式范围** ✔（来自 OGKM 头文件、编译期权威 ✔）。
+- **原状态** ✔：空转 44–47 °C ✔（跨记录一致 ✔）。
+- **恢复** ✗ **N/A**：该命令的公开 opcode **全是 GET** ✔。
+- **缺失层** ✗：**温度墙/目标的写面不在该命令的公开 opcode 内** ✔ ⇒ 写侧仍门控 ✔。
+
+### 34.4 功耗
+- **可读** ✔：RUSD 的 `power_mw 12798`、enforced `power_limit_mw 100000`、`power_limit_requested_mw 100000`、`power_policy_tgp_mw 12857` ✔（同 `status-under-load.json` ✔）。
+- **可解释** ✔：enforced limit ≠ 可写范围 ≠ rated TDP ✔（`stage2-read-battery-20261017T062835Z/README.md` ✔）。
+- **范围** ✗ **驱动明确拒绝**：`GET_EDPP_LIMIT_INFO (0x20800AFD)` → **`0x56 NV_ERR_NOT_SUPPORTED`** ✔ ⇒ 功耗墙 min/rated/max 窗口**读面不可用** ✔（`stage2-read-battery-*` 断言 ✔）。**这不是"尚未定位"** ✔，是 id 已知、结构在树、**驱动不实现** ✗。
+- **原状态** ✔：同 34.2/34.3 的同批采样 ✔。
+- **恢复** ✗ **N/A**：本轮及此前均**未跑任何 SET** ✔（`review-stage-reg-read-20261017.md:96` 明记 `--rated-tdp-set` 未在 GPU 上跑 ✔）。
+- **剩余未知** ✗：write-only 的 `0x2080d024@66060` 用途 ✔（§26 ✔）。
+
+### 34.5 `RATED_TDP`（独立候选）
+- **可读** ⚠️：`rated-tdp-get-control (V2.4)` **返回 NV_OK** ✔，但**记录载荷只有输入回显** `raw[0..2]=0x00000000 0x00000000 0x00000000 ("client/input/vpstate echo")` ✗（`telemetry-ctl-map.jsonl:19` ✔）⇒ **尚未真正取得 rated TDP 数值** ✗ ⇒ 不能拿它充当偏移/VF 控制 ✔（原目标原话 ✔）。
+- **可解释/范围/原状态/恢复** ✗：均**未取得**（因值本身没拿到 ✔）。
+- **分类** ✔：**已实现待实测 / 调查未知** ✔；**可证伪的下一步** ✔：按导出声明尺寸重发、并检查请求侧结构是否缺字段（当前只回显 client/input/vpstate ⇒ 更像**调用帧不完整**而非驱动拒绝 ✗）✔。楔形期间该命令同样被折叠成 `0x62` ✔（`stage-clkctl-guard-20261017T094527Z/clkctl-read-guard.txt` ✔）。
+
+### 34.6 顺带确认（压力侧前提）
+`stage9-vulkan-20261017T041959Z` 与 `stage9-stress-20261017T041107Z` 记录了 **Vulkan-only 负载** ✔，`load.txt` 中 `nvrm: b81 PERF_BOOST flags 0x12 INFINITE`、`[VKGFX-H] …fps` 等横幅由 **NVK/nvrm 一侧**打印 ✔ ⇒ 原目标要求的"底层是 NVK、不要默认必须经 MoltenVK"这一前提**已有记录支持** ✔（非假设 ✔）。**边界** ✗：这是**压力负载**证据 ✔，**渲染成功 ≠ 超频稳定** ✗，故不能替代偏移设置成功 ✔。
