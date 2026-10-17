@@ -991,6 +991,225 @@ int nvx_stage2_perf_read(nvx_ctx *c)
     return 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Private clock-domain / V-F read-surface census (--clkvf-read)       */
+/* ------------------------------------------------------------------ */
+/* The Windows NVOC backend reads the editable core/memory clock offsets and
+ * the whole V/F curve through the private ClockClient family: MEASURE_FREQ,
+ * ClkDomains GET_CONTROL, the V/F-points GET_INFO/GET_STATUS/GET_CONTROL trio
+ * and the PerfVfe equation/variable GETs (nvapi-rs/src/clock.rs,
+ * nvapi-rs/src/gpu.rs). Those are the read half of the same wires the known
+ * SET ids ride, and they are missing from the OGKM 610.57.04 SDK headers, so
+ * the ids live in nvx_defs.h with their RE provenance.
+ *
+ * On macOS the same RM subdevice controls are reachable, but the kext
+ * validates paramsSize: a known id answers NV_ERR_INVALID_ARGUMENT (0x1f) for
+ * every size except the one it wants, while an id it does not implement
+ * answers something else (NOT_SUPPORTED / INVALID_METHOD / ...). That
+ * difference is the oracle this census uses -- and it is exactly the trap
+ * that made the first Tier-B probe record three working commands as "the
+ * driver refuses them". Two negative controls (ids in unused slots of the
+ * same interfaces) are scanned with the identical ladder so the 0x1f verdict
+ * is anchored to a measured baseline instead of an assumption.
+ *
+ * Read-only by construction: every real candidate is a GET, and the candidate
+ * table is checked against the documented SET ids before anything is sent.
+ */
+static const NvU32 nvx_known_set_ids[] = {
+    NVX_RM_CMD_VOLT_LIMITS_SET,    /* 0x20801ACF, MODS Volt3x.SetVoltagesMv   */
+    NVX_RM_CMD_GPC_VF_OFFSET_SET,  /* 0x2080D031, nvmlDeviceSetGpcClkVfOffset */
+    0x2080D01Cu, /* ClockClient ClkDomains SET_CONTROL (nvapi-rs gpu.rs:2203) */
+    0x2080D024u, /* ClockClient VfPoints SET_CONTROL (nvapi-rs gpu.rs:3135)  */
+    0x2080D0A3u, /* single-slot V/F point write (p100 audit / blackwell T3-1) */
+    0x2080E0B0u, /* PerfVfeVar SET_CONTROL (oc-gap-layouts-r610-74.md B3)     */
+    0x2080E0B7u, /* PerfVfeEqu SET_CONTROL (oc-gap-layouts-r610-74.md B3)     */
+    0x2080F031u, /* nvmlDeviceSetGpcClkVfOffset SET, 610-era twin of D031     */
+    0x2080F214u, /* VoltVoltRails SET_CONTROL (voltrails r610)                */
+};
+
+static int nvx_id_is_known_set(NvU32 cmd)
+{
+    for (unsigned i = 0; i < sizeof nvx_known_set_ids / sizeof nvx_known_set_ids[0]; ++i)
+        if (cmd == nvx_known_set_ids[i]) return 1;
+    return 0;
+}
+
+/* paramSize ladder for one control id. Small alignments first, then the sizes
+ * the private families are documented to use: the Blackwell V/F-points
+ * magics 0x1182C/0x12420 (nvapi-rs nvid.rs:757), the ClockClient control
+ * magics 0x10964/0x261A4 (nvapi-rs clock.rs:360) with the 0x13000 working
+ * buffer, and the Windows NVAPI escape buffer sizes 0x98240/0x100440. A
+ * stamp-validating command needs its size *and* its header; a size-only scan
+ * cannot see the latter, which is why a "0x1f everywhere" verdict is reported
+ * as "known command, size/header not found" and never as "not implemented".
+ */
+static const unsigned nvx_clk_sizes[] = {
+    4, 8, 12, 16, 24, 32, 36, 40, 44, 48, 56, 64, 76, 88, 96, 100, 128,
+    160, 192, 200, 256, 260, 264, 268, 272, 280, 288, 320, 512, 776, 1036,
+    1060, 1064, 1092, 1120, 2048, 4096, 4368, 6188, 8448, 9248, 12288, 16384,
+    32768, 65536, 67936, 67940, 67944, 77824, 82976, 156064, 156068, 156072,
+    262144, 401600, 623168, 737084, 1050688, 1349156, 4343300,
+};
+
+static void clk_scan_one(nvx_ctx *c, unsigned char *buf, unsigned char *prev,
+                         const char *name, NvU32 cmd, int negative)
+{
+    const unsigned nsizes = sizeof nvx_clk_sizes / sizeof nvx_clk_sizes[0];
+    unsigned accepted[4], nacc = 0;
+    unsigned n_1f = 0, n_56 = 0, n_other = 0;
+    NvU32 other_st = 0;
+    unsigned other_sz = 0;
+
+    for (unsigned s = 0; s < nsizes; ++s) {
+        memset(buf, 0, nvx_clk_sizes[s]);
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  cmd, buf, nvx_clk_sizes[s]);
+        if (st == 0) {
+            if (nacc < 4) accepted[nacc] = nvx_clk_sizes[s];
+            ++nacc;
+        } else if (st == NV_ERR_INVALID_ARGUMENT) {
+            ++n_1f;
+        } else if (st == NV_ERR_NOT_SUPPORTED) {
+            ++n_56;
+        } else {
+            ++n_other;
+            if (other_st == 0) { other_st = st; other_sz = nvx_clk_sizes[s]; }
+        }
+    }
+
+    char acc_text[96];
+    if (nacc) {
+        int off = 0;
+        for (unsigned a = 0; a < nacc && a < 4; ++a)
+            off += snprintf(acc_text + off, sizeof acc_text - (size_t)off,
+                            "%s%u", a ? "," : "", accepted[a]);
+        if (nacc > 4)
+            snprintf(acc_text + off, sizeof acc_text - (size_t)off,
+                     ",+%u", nacc - 4);
+    } else {
+        snprintf(acc_text, sizeof acc_text, "none");
+    }
+
+    char other_text[80] = "";
+    if (n_other)
+        snprintf(other_text, sizeof other_text,
+                 ", first other 0x%08x (%s) at size %u",
+                 other_st, nvx_status_name(other_st), other_sz);
+
+    nvx_emit(c, "V2.clkvf", name, nacc ? 0 : NV_ERR_INVALID_ARGUMENT,
+             nacc ? NVX_V_OK : NVX_V_REJECTED,
+             "cmd 0x%08x%s over %u sizes: accepted [%s]; invalid-arg %u, "
+             "not-supported %u, other %u%s",
+             cmd, negative ? " (negative control)" : "", nsizes,
+             acc_text, n_1f, n_56, n_other, other_text);
+
+    /* Acceptance is not data. Re-read the accepted sizes and report how much
+     * of the payload is populated, whether it moves, and the first dwords in
+     * hex, so a layout we have not decoded is never published as a reading
+     * (same rule the Tier-B GETs follow). */
+    for (unsigned a = 0; a < nacc && a < 2; ++a) {
+        unsigned sz = accepted[a];
+        memset(buf, 0, sz);
+        NvU32 st1 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                   cmd, buf, sz);
+        if (st1 != 0) continue;
+        memcpy(prev, buf, sz);
+        memset(buf, 0, sz);
+        NvU32 st2 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                   cmd, buf, sz);
+        unsigned nz = 0, moved = 0;
+        for (unsigned off = 0; off + 4 <= sz; off += 4) {
+            NvU32 v;
+            memcpy(&v, buf + off, 4);
+            if (v) ++nz;
+            if (memcmp(buf + off, prev + off, 4)) ++moved;
+        }
+        nvx_emit(c, "V2.clkvf", name, st2, NVX_V_SKIP,
+                 "paramSize %u accepted (st1 0x%08x st2 0x%08x): %u non-zero "
+                 "words, %u changed on re-read: layout not decoded, probe "
+                 "data only", sz, st1, st2, nz, moved);
+
+        /* Raw payload in 16-dword lines: enough to decode a fixed-stride
+         * record table by hand without overflowing the result detail field. */
+        unsigned show = sz / 4;
+        for (unsigned base = 0; base < show; base += 16) {
+            unsigned n = show - base < 16 ? show - base : 16;
+            char hex[16 * 9 + 1];
+            char *hp = hex;
+            for (unsigned w = 0; w < n; ++w) {
+                NvU32 v;
+                memcpy(&v, buf + 4 * (base + w), 4);
+                hp += snprintf(hp, 10, "%s%08x", w ? " " : "", v);
+            }
+            nvx_emit(c, "V2.clkvf", name, 0, NVX_V_SKIP,
+                     "payload dwords [%u..%u): %s", base, base + n, hex);
+        }
+    }
+}
+
+static void item_clk_reads(nvx_ctx *c)
+{
+    static const struct { const char *name; NvU32 cmd; } reads[] = {
+        { "clk-measure-freq",          NVX_RM_CMD_CLK_MEASURE_FREQ        },
+        { "clk-domains-get-control",   NVX_RM_CMD_CLK_DOMAINS_GET_CONTROL },
+        { "vfp-get-info",              NVX_RM_CMD_VFP_GET_INFO            },
+        { "vfp-get-status",            NVX_RM_CMD_VFP_GET_STATUS          },
+        { "vfp-get-control",           NVX_RM_CMD_VFP_GET_CONTROL         },
+        { "vfp-get-info(582.41)",      NVX_RM_CMD_VFP_GET_INFO_582        },
+        { "vfp-get-status(582.41)",    NVX_RM_CMD_VFP_GET_STATUS_582      },
+        { "vfp-get-aux(582.41)",       NVX_RM_CMD_VFP_GET_AUX_582         },
+        { "vfe-equ-get-info",          NVX_RM_CMD_VFE_EQU_GET_INFO        },
+        { "vfe-equ-get-control",       NVX_RM_CMD_VFE_EQU_GET_CONTROL     },
+        { "vfe-var-get-info",          NVX_RM_CMD_VFE_VAR_GET_INFO        },
+        { "vfe-var-get-control",       NVX_RM_CMD_VFE_VAR_GET_CONTROL     },
+        { "rails-get-control(legacy)", NVX_RM_CMD_RAILS_GET_CONTROL       },
+    };
+    /* Negative controls: ids in the same interfaces but past any documented
+     * message slot. Scanned with the identical ladder so the "0x1f at every
+     * size" verdict for a real candidate can be compared against what an
+     * unimplemented id actually answers on this driver. */
+    static const struct { const char *name; NvU32 cmd; } controls[] = {
+        { "neg-control 0x2080ffff", 0x2080FFFFu },
+        { "neg-control 0x2080a0ff", 0x2080A0FFu },
+    };
+    const unsigned buflen =
+        nvx_clk_sizes[sizeof nvx_clk_sizes / sizeof nvx_clk_sizes[0] - 1];
+    unsigned char *buf = malloc(buflen), *prev = malloc(buflen);
+
+    if (!buf || !prev) {
+        free(buf);
+        free(prev);
+        nvx_emit(c, "V2.clkvf", "clkvf-read", 0, NVX_V_HARD,
+                 "scan buffer alloc failed");
+        return;
+    }
+
+    for (unsigned r = 0; r < sizeof reads / sizeof reads[0]; ++r) {
+        if (nvx_id_is_known_set(reads[r].cmd)) {
+            nvx_emit(c, "V2.clkvf", reads[r].name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a documented SET id; the read census "
+                     "never sends it", reads[r].cmd);
+            continue;
+        }
+        clk_scan_one(c, buf, prev, reads[r].name, reads[r].cmd, 0);
+    }
+    for (unsigned r = 0; r < sizeof controls / sizeof controls[0]; ++r)
+        clk_scan_one(c, buf, prev, controls[r].name, controls[r].cmd, 1);
+
+    free(buf);
+    free(prev);
+}
+
+int nvx_stage2_clk_read(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.clkvf", "clkvf-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    item_clk_reads(c);
+    return 0;
+}
+
 static void item_bios_sku(nvx_ctx *c)
 {
     NV2080_CTRL_BIOS_GET_SKU_INFO_PARAMS p;

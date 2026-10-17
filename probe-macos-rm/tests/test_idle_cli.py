@@ -66,6 +66,11 @@ int nvx_stage2_perf_read(nvx_ctx *c) {
     puts("FAKE perfread");
     return 0;
 }
+int nvx_stage2_clk_read(nvx_ctx *c) {
+    if (!chain || !c->hSubdevice) abort();
+    puts("FAKE clkvf");
+    return 0;
+}
 int nvx_stage3(nvx_ctx *c) { (void)c; abort(); }
 int nvx_stage5(nvx_ctx *c) { (void)c; abort(); }
 int nvx_close(int fd) { printf("FAKE close %d\n", fd); return 0; }
@@ -215,6 +220,14 @@ class IdleCli(unittest.TestCase):
         asked = self.run_cli("--stages", "0", "--perf-read")
         self.assertEqual(asked.returncode, 0, asked.stderr)
         self.assertEqual(asked.stdout.count("FAKE perfread"), 1)
+
+    def test_clkvf_reads_are_explicit_opt_in(self):
+        plain = self.run_cli("--stages", "012")
+        self.assertEqual(plain.returncode, 0, plain.stderr)
+        self.assertNotIn("FAKE clkvf", plain.stdout)
+        asked = self.run_cli("--stages", "0", "--clkvf-read")
+        self.assertEqual(asked.returncode, 0, asked.stderr)
+        self.assertEqual(asked.stdout.count("FAKE clkvf"), 1)
 
     def test_rated_tdp_set_is_gated_like_other_writes(self):
         log = self.directory / "must-not-exist.jsonl"

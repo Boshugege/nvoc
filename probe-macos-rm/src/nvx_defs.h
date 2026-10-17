@@ -103,4 +103,65 @@
  * CLOCK|PERF|POWER|THERMAL|FAN */
 #define NVX_RUSD_POLL_MASK           0x5Bu
 
+/* ------------------------------------------------------------------ */
+/* Private ClockClient / VfPoints / PerfVfe READ faces                 */
+/* ------------------------------------------------------------------ */
+/* NVOC's own Windows backend reads the editable core/memory clock offsets
+ * and the V/F curve through the private ClockClient family. The ids below are
+ * the GET (read) faces of exactly those wires -- taken from our own nvapi-rs
+ * bindings and the NVAPI RE campaign docs, NOT from the OGKM SDK (the
+ * 610.57.04 open tree keeps the interface names in g_finn_rm_api.h but strips
+ * the command defines: docs/reverse-engineering/nvml/binding-strategy-
+ * evaluation.md L58, "接口在、命令剥离").
+ *
+ * Provenance discipline: every id here is annotated with the nvapi-rs /
+ * reverse-engineering doc it came from. The SET twins of these families are
+ * listed in nvx_known_set_ids (nvx_suite.c) and the census refuses to send
+ * one even if a later edit pastes the wrong constant.
+ */
+
+/* Physical clock measurement for one clock domain. Source:
+ * nvapi-rs/src/clock.rs:524 (NVAPI 0xFB8F61EC) -- domain index in, physical
+ * frequency in kHz out. Read-only. */
+#define NVX_RM_CMD_CLK_MEASURE_FREQ        0x20809006u
+
+/* Controllable clock-domain block (get-private-freq-domain-info on Windows).
+ * Source: nvapi-rs/src/clock.rs:360 / gpu.rs:1797 (NVAPI 0xF58938F5; V1 magic
+ * 0x10964, V2 magic 0x261A4). SET twin is 0x2080D01C. */
+#define NVX_RM_CMD_CLK_DOMAINS_GET_CONTROL 0x2080901Bu
+
+/* Private ClockClient V/F-points trio (get-private-vftable on Windows).
+ * Source: nvapi-rs/src/gpu.rs:2366 + clock.rs:586/681 (NVAPI 0x8895B510 /
+ * 0x7FEE9032 / 0xDA025C3E). GET_INFO = present-point masks, GET_STATUS = the
+ * 488 B curve records, GET_CONTROL = the applied-offset readback whose SET
+ * twin is 0x2080D024. RE'd as 0x2080906x on 582.41
+ * (docs/reverse-engineering/nvapi/p100-58241-privatevftable-audit.md §2) and
+ * renumbered to 0x2080902x by R610. */
+#define NVX_RM_CMD_VFP_GET_INFO    0x20809021u  /* NVAPI 0x8895B510 */
+#define NVX_RM_CMD_VFP_GET_STATUS  0x20809022u  /* NVAPI 0x7FEE9032 */
+#define NVX_RM_CMD_VFP_GET_CONTROL 0x20809023u  /* NVAPI 0xDA025C3E */
+
+/* 582.41-era numbering of the same family (p100-58241-privatevftable-audit.md
+ * §2/§5: GET_INFO 0x20809061 / GET_STATUS 0x20809062 / the 0x20809022+0x20809025
+ * GET handlers). Kept so the census can show which numbering this driver
+ * answers instead of guessing. */
+#define NVX_RM_CMD_VFP_GET_INFO_582    0x20809061u
+#define NVX_RM_CMD_VFP_GET_STATUS_582  0x20809062u
+#define NVX_RM_CMD_VFP_GET_AUX_582     0x20809025u
+
+/* PerfVfe equation/variable GET faces. Source: nvapi-rs/src/gpu.rs:3922/3954/
+ * 4046/4077 and docs/reverse-engineering/nvapi/oc-gap-layouts-r610-74.md §B3
+ * (NVAPI 0x8D49471C / 0x4C75C9FE / 0xB9DA41D6 / 0x5D387298). SET twins are
+ * 0x2080E0B7 (Equ) and 0x2080E0B0 (Var). */
+#define NVX_RM_CMD_VFE_EQU_GET_INFO    0x2080A0B5u  /* NVAPI 0x8D49471C */
+#define NVX_RM_CMD_VFE_EQU_GET_CONTROL 0x2080A0B6u  /* NVAPI 0x4C75C9FE */
+#define NVX_RM_CMD_VFE_VAR_GET_INFO    0x2080A0B1u  /* NVAPI 0xB9DA41D6 */
+#define NVX_RM_CMD_VFE_VAR_GET_CONTROL 0x2080A0B3u  /* NVAPI 0x5D387298 */
+
+/* VoltVoltRails GetControl -- the readback half of the rail family whose
+ * GetInfo/GetStatus are already probed as V2.9/V2.10. Source:
+ * docs/reverse-engineering/nvapi/voltrails-family-full-layout-r610.md (32 B
+ * records, type byte @record+0). SET twin is 0x2080F214. */
+#define NVX_RM_CMD_RAILS_GET_CONTROL 0x2080B213u
+
 #endif /* NVX_DEFS_H */

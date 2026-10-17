@@ -78,6 +78,12 @@ int nvx_stage2_pm_read(nvx_ctx *c);
  * GETs plus explicit SKIPs for the ones this transport cannot or must not
  * send (kernel-pointer v1 level info, the state-changing GPU_IS_IDLE). */
 int nvx_stage2_perf_read(nvx_ctx *c);
+/* Explicit, read-only private ClockClient / VfPoints / PerfVfe GET census:
+ * the read half of the same wires the Windows backend uses for clock-domain
+ * and V/F reads. Scans candidate paramSize values (the driver answers
+ * NV_ERR_INVALID_ARGUMENT for the sizes it does not want) and never sends a
+ * documented SET id. */
+int nvx_stage2_clk_read(nvx_ctx *c);
 int nvx_stage3(nvx_ctx *c);                    /* gated writes             */
 void nvx_stage4(nvx_ctx *c, int seconds);      /* sampling loop            */
 int nvx_stage5(nvx_ctx *c);                    /* channel smoke (GPU exec) */

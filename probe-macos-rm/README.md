@@ -69,6 +69,7 @@ OGKM=/path/to/ogkm python3 tests/test_idle_cli.py
 ./probe-macos-rm-idle --stages 0 --thermal-read     # THERMAL_SYSTEM_EXECUTE_V2 只读批（传感器读数/范围）
 ./probe-macos-rm-idle --stages 0 --pm-read          # 内部 PM/PFM GET（PM1 状态/V-P-state 映射/boost-sync）；SET 孪生全不发
 ./probe-macos-rm-idle --stages 0 --perf-read        # perf/pmgr 公开读面普查（模块信息、视频引擎 perfmon）+ 不可发送项的显式跳过
+./probe-macos-rm-idle --stages 0 --clkvf-read       # 私有 ClockClient/VfPoints/PerfVfe **只读**面普查（paramSize 存在性扫描；SET 孪生从不发送）
 ```
 
 **写入（门控）**：RATED_TDP 仲裁 SET 已实现为 V3.4，但**不随任何 stage 组运行**，必须显式同时给出
@@ -103,4 +104,4 @@ src/nvx_defs.h   仅收录开源树不含的 Tier-B legacy ID（逐条标注出�
 src/main.c       CLI / 阶段调度 / JSONL
 ```
 
-常量出处纪律：**能进 OGKM 树的不进 nvx_defs.h**（编译期即权威）；树外 ID 必须带 campaign 文档出处注释；SET 面的 legacy 命令（`0x20801ACF`、`0x2080D031` 等）v1 只在矩阵文档记录、代码不发送。
+常量出处纪律：**能进 OGKM 树的不进 nvx_defs.h**（编译期即权威）；树外 ID 必须带 campaign 文档出处注释；SET 面的 legacy 命令（`0x20801ACF`、`0x2080D031` 等）只在矩阵文档记录、代码不发送——只读普查（`--tierb-read`/`--clkvf-read` 等）发送前还会与 `nvx_suite.c` 的 `nvx_known_set_ids` 黑名单逐条比对，命中即 `REFUSED`。
