@@ -100,6 +100,20 @@ pub struct SettingsCapabilities {
     pub settings_restore: bool,
 }
 
+/// Whether this backend can change configuration at all, as a property of the
+/// backend rather than of one device reading.
+///
+/// Kept separate from [`SettingsCapabilities`] so a consumer that only wants to
+/// know whether a write is possible does not have to produce a settings
+/// projection first, and so the projection and every such consumer cannot drift
+/// apart: `settings_from` fills the struct from these constants. Turning writes
+/// on is therefore a change here and nowhere else.
+pub const SETTINGS_WRITE_SUPPORTED: bool = false;
+
+/// Whether this backend can put a saved configuration back. Only meaningful once
+/// [`SETTINGS_WRITE_SUPPORTED`] is true.
+pub const SETTINGS_RESTORE_SUPPORTED: bool = false;
+
 /// Why a family that needs a *write* is listed as unavailable: the write half of
 /// these ids carries the legacy privileged bits, so an unprivileged client is
 /// refused before the GSP is consulted. This is a precondition that has been
@@ -304,8 +318,8 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
         unavailable,
         capabilities: SettingsCapabilities {
             settings_read: true,
-            settings_write: false,
-            settings_restore: false,
+            settings_write: SETTINGS_WRITE_SUPPORTED,
+            settings_restore: SETTINGS_RESTORE_SUPPORTED,
         },
         notes: vec![
             "responder: these ids are answered by the GSP firmware, not by a host RM table row (NVRM forwards legacy ids with bit 0x8000 set), so every parameter block is sized against the GSP's own export table rather than the NVAPI caller struct.".into(),

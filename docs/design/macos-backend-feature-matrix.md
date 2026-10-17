@@ -1081,3 +1081,17 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **三、给下次健康会话的**可证伪预测**（现有数据推导）：全部 10 个已填充条目类型 ⇒ 带值 9 条、03 一条 ⇒ 掩码 `0xFFFFFFFF` 预测改变 dword 数：空槽不写 ⇒ **132** ✔；空槽各写 1 印章 ⇒ **154** ✔ ⇒ **实得值即判据** ✔（都不是则算术模型需修正 ✔）。对照：掩码 `0xFF`⇒106 已由本节独立复算 ✔。
 
 **验证范围**：无代码改动；本机夹具重解＋探针源码读数（两侧 sha 一致的同名文件）✔；设备访问 1 次（anchor）、无写入、未提权 ✔。
+
+### 本轮追加四十九（2026-10-18，**代码**：写入能力单一事实源 + 自动优化器的能力驱动写入闸门；并纠正一句不准确提示）
+
+**一、装上了阶段 10 要用的钩子（能力驱动，不是硬编码默认）**：
+- `core/src/macos_rm.rs` 新增 `SETTINGS_WRITE_SUPPORTED` / `SETTINGS_RESTORE_SUPPORTED` 两个**公开常量作为唯一事实源** ✔，`settings_from` 改为由它们填充 `SettingsCapabilities` ✔ ⇒ 投影与任何消费者**不可能各自漂移** ✔，将来"打开写入"只需改后端这一处 ✔。
+- `auto-optimizer/src/main.rs` 新增**第二条独立的 macOS 闸门** ✔：命令若会改设置（用既有且已有测试覆盖的 `requirements.elevation` 作为判据 ✔）而后端报告不可写，则**快速失败** ✔；提示里直接引用**实测到的原因**常量（`WRITE_NEEDS_PRIVILEGE_REASON` ⇒ 私有写 id 带 legacy 特权位、未提权客户端在 GSP 之前就被 `0x1b` 拒 ✔），而不是笼统的"未实现" ✔。
+
+**二、纠正一处不准确的用户可见提示**：原 macOS 提示说后端"**does not implement** performance writes" ✗；证据显示 SET 处理**存在**、拒绝来自特权前置条件 ✔ ⇒ 提示已更正 ✔（"命令不存在"与"未授权"不得混同——正是 goal 的硬要求 ✔）。
+
+**三、验证（测试机执行，客户端未构建）**：`cargo fmt --all -- --check` **干净** ✔；`cargo test -p nvoc-core -p nvoc-auto-optimizer --all-targets` ⇒ **rc=0，174 passed / 0 failed** ✔，其中新增 `macos_write_gate_follows_the_backend_capability` 与既有 `gpu_write_commands_require_elevation` **均在真机 macOS 上通过** ✔；`cargo clippy` 仅剩 vendored `nvapi-sys` 的既有告警 ✔，**两个被改 crate 零告警** ✔（首版断言被 clippy 判为"常量断言"，已改掉 ✔）。两侧 sha256 一致（`f337f66c…` / `3266b1cd…`）。
+
+**四、如实标注的余留**：需求模型里**没有**显式 `writes` 字段 ✗，故闸门以 `elevation` 为代理 ✔（已注释说明 ✔）；写命令目前更早地被 `requires_nvapi()` 拦下 ✗ ⇒ **下一步明确动作**＝写入能力开启后，把 `optimize`/`autoscan-*` 的路由接到 macOS 后端（属阶段 11 共享入口决定 ✔），而非改这里的判断 ✔。
+
+设备访问 1 次（anchor）、**无写入、未提权** ✔。

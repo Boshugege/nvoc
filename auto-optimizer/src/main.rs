@@ -146,8 +146,28 @@ fn main_result() -> Result<i32, Box<dyn std::error::Error>> {
     if cfg!(target_os = "macos") && requirements.target.requires_nvapi() {
         return Err(format!(
             "`{command_name}` requires NVAPI/NVML, which do not exist on macOS. \
-             The native NullMoth RM backend is read-only and does not implement \
-             performance writes; use `macos-eval` for the read-only stock evaluation."
+             The native NullMoth RM backend is the only macOS backend; use \
+             `macos-eval` for the read-only stock evaluation."
+        )
+        .into());
+    }
+
+    // The second, independent macOS gate, and the one a later change should
+    // open: a command that mutates settings needs the backend to be able to
+    // write. The backend answers that question itself (the write half of the
+    // private ids carries the legacy privileged bits, so an unprivileged client
+    // is refused with 0x1b before the GSP is consulted), and this is the only
+    // place that turns the answer into a refusal -- so nothing here has to be
+    // edited to start writing, only the backend's own constant.
+    if cfg!(target_os = "macos")
+        && requirements.elevation
+        && !nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED
+    {
+        return Err(format!(
+            "`{command_name}` changes settings, and this macOS build's NullMoth RM backend \
+             reports settings_write = false: {}. Use `macos-eval` for the read-only \
+             stock evaluation until that gate opens.",
+            nvoc_core::macos_rm::WRITE_NEEDS_PRIVILEGE_REASON
         )
         .into());
     }
@@ -333,6 +353,29 @@ mod tests {
             assert!(
                 requirements(command).elevation,
                 "{command} should require elevation"
+            );
+        }
+    }
+
+    #[test]
+    fn macos_write_gate_follows_the_backend_capability() {
+        // The gate is driven by the backend's own constant, so this test pins the
+        // pairing between the capability the backend reports and the commands the
+        // gate refuses: on macOS, while the backend reports no write support,
+        // exactly the commands that mutate settings are refused. It is vacuous on
+        // other targets by design, and meaningful on the machine that runs it.
+        let write_supported = nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED;
+        for command in [
+            "reset-vfp",
+            "import-vfp",
+            "autoscan-vfp",
+            "autoscan-vfp-legacy",
+        ] {
+            let mutates = requirements(command).elevation;
+            let refused = cfg!(target_os = "macos") && mutates && !write_supported;
+            assert_eq!(
+                refused, mutates,
+                "{command} should be refused by the macOS write gate while settings_write = {write_supported}"
             );
         }
     }
