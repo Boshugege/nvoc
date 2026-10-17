@@ -56,7 +56,9 @@
   `--stress 300` 收到 SIGINT 后 rc=0 优雅停止）、`stage11-shared-entry-20261017T045726Z`
   （**阶段 11 pynvoc 共享后端串验收**：`pynvoc-tests` 11 passed、release 扩展模块构建 rc=0、
   `discover_gpus("auto")`/`query_info|status|settings(...,"auto")` rc=0 且与 `"macos-rm"`
-  解析到同一后端、字段集一致）。
+  解析到同一后端、字段集一致）、`stage10-build-20261017T050001Z`（**阶段 10 构建边界**：
+  `--no-default-features --features stressor-external` 的 check/build rc=0；`--help` 正常，
+  `optimize` 以 NVAPI/NVML 缺库告警退出不 panic）。
 
 ## 一、CLI 命令表（101 条，来源：`cli/src/lib.rs` 的 `CommandSpec`）
 
@@ -243,7 +245,7 @@
 | 9 自动压力执行与验证器 | 限时负载、停止、结构化结果、正确性校验 | **主负载 + 校验器完成**。主负载＝原 `--vulkan-only` 渲染路径（零算法改动，仅补 loader/ICD 解析 `4993a42`）：无 env 冷启动 rc=0，5/10/30 s 阶梯与 60 s stock 负载 rc=0，错误路径（`--gpu-index` 越界 / `--pci-bus` 不匹配）rc=1，`--vulkan-window` 在非 Windows 回退 offscreen rc=0；同步遥测显示 util 峰值 100%/均值 83%、gfx 1.53→1.95 GHz、功耗 11.5→13.5 W、温度 54→62 ℃、风扇 1778→1920 rpm。校验器＝`stress-macos`（`1dcf27a`）：全量 bit-exact 比对、启动自检、负例 rc=1、60 s 限时 1206 次 dispatch/0 失败、SIGINT 优雅停止。**整体验收**（`stage9-accept-20261017T045311Z`）：3 组 feature 构建 + fmt/clippy/tests 全 rc=0；`--vulkan-only` 冷启动 rc=0、错误路径 rc=1/1/0、阶梯 rc=0；信号语义实测 `--vulkan-only` SIGINT rc=-2 / SIGTERM rc=-15（OS 默认处置、立即终止），`metal_check` `--stress 300` 收 SIGINT 后 rc=0 优雅停止 | 渲染负载无读回校验、`--vulkan-only` 无进程内取消（靠 SIGINT/SIGTERM 默认处置）；阶段 10 需把负载/校验器结果接进 optimizer 闭环 |
 | 10 自动扫描/优化/结果应用 | 受限闭环、保存/应用/恢复 | **部分：非 CUDA 构建在 macOS 可编译**（`cargo check/build -p nvoc-auto-optimizer --no-default-features --features stressor-external` rc=0，仅 2 个既有告警）；但入口按 `has_nvapi()` 筛选目标、全部 SET 走 NVAPI，macOS 上无可用目标（本机实测 `NvAPI_Initialize`/`NVML init` 均 `LibraryNotFound`），闭环**不能在真机运行** | 需要：macOS 目标选择（脱离 `has_nvapi`）+ 把 `--vulkan-only` 负载与 `stress-macos` 校验器接进闭环 + dry-run/mock 骨架；真实 SET 仍受写入门槛 |
 | 11 共享入口与界面集成 | pynvoc/GUI/TUI/srv 接入 | **pynvoc + GUI/TUI 完成，srv 未接入**：pynvoc 新增 `auto`/`default` 后端串（macOS→RM、其他→NVAPI+NVML，与 CLI `Auto` 同规则，`37f786f`），GUI/TUI 全部改传该串；客户端 GUI 281 passed/13 skipped、TUI 214 passed，macOS 实机 pynvoc `auto` 的 discover/info/status/settings rc=0 且与 `macos-rm` 同后端同字段集（`stage11-shared-entry-…`）。**srv** 的 `NvapiBackend` 硬依赖 NVAPI+NVML，macOS 需独立只读 ControlBackend | srv 的 macOS 只读后端；GUI/TUI 在 macOS 本体的实机冒烟（需 customtkinter/textual） |
-| 12 全量回归与交付 | 逐项复核、契约对照、CI 与 review 材料 | 进行中：阶段 1 已交付回归与 review 说明 | 每阶段补证据 |
+| 12 全量回归与交付 | 逐项复核、契约对照、CI 与 review 材料 | 进行中：阶段 1/2/3/9/10/11 均已有实机验收 bundle + `outputs/review-stage*.md`（阶段 9/10/11 本轮补齐）；阶段 4–7 有明确读/写阻塞，`srv` 有明确后端阻塞 | 最终全量回归 + `outputs/` 索引 |
 
 ## 四、已知限制（本表不得当成支持声明）
 
