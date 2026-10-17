@@ -111,6 +111,10 @@ static void usage(void)
         "                   explicit skips for the ones that cannot be sent\n"
         "  --clkvf-read     read-only private ClockClient/VfPoints/PerfVfe GET\n"
         "  --clkdoc-read    read-only documented-marshalling pass over the\n"
+        "  --clkobj-read    read-only object-carrier sweep: the same\n"
+        "  --clk-track N    read-only 1 Hz tracker: RUSD gpc/mem clocks + the\n"
+        "                   RM 0x20809061/776 B per-domain table (load A/B)\n"
+        "                   documented forms against subdevice/device/client\n"
         "                   same private clock/VF read faces: one case per\n"
         "                   (paramSize, stamp, seed) triple, no size sweep\n"
         "                   census (paramSize oracle scan; SET twins never sent)\n"
@@ -135,6 +139,8 @@ int main(int argc, char **argv)
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
     int thermal_read = 0, pm_read = 0, perf_read = 0, clkvf_read = 0;
     int clkdoc_read = 0;
+    int clkobj_read = 0;
+    int clk_track_sec = 0;
     NvU32 rtdp_client = 0, rtdp_action = 0;
     NvU32 gpuId = 0;
 
@@ -164,6 +170,12 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--perf-read")) perf_read = 1;
         else if (!strcmp(argv[i], "--clkvf-read")) clkvf_read = 1;
         else if (!strcmp(argv[i], "--clkdoc-read")) clkdoc_read = 1;
+        else if (!strcmp(argv[i], "--clkobj-read")) clkobj_read = 1;
+        else if (!strcmp(argv[i], "--clk-track") && i + 1 < argc) {
+            unsigned long long v;
+            if (parse_number(argv[++i], 600, &v) != 0) { usage(); return 2; }
+            clk_track_sec = (int)v;
+        }
         else if (!strcmp(argv[i], "--rated-tdp-set") && i + 1 < argc) {
             if (parse_rated_tdp_set(argv[++i], &rtdp_client, &rtdp_action) != 0) {
                 fprintf(stderr, "invalid --rated-tdp-set spec (want CLIENT:ACTION)\n");
@@ -281,6 +293,16 @@ int main(int argc, char **argv)
     if (clkdoc_read) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
         if (nvx_stage2_clk_doc(&g_ctx) != 0) rc = 1;
+    }
+    if (clkobj_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_clk_obj(&g_ctx) != 0) rc = 1;
+    }
+
+    if (clk_track_sec > 0) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (!ran2 && nvx_stage2(&g_ctx) != 0) { rc = 1; goto out; }
+        if (nvx_stage4_clk_track(&g_ctx, clk_track_sec) != 0) rc = 1;
     }
 
     if (rated_tdp_set) {

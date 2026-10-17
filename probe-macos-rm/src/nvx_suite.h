@@ -92,6 +92,14 @@ int nvx_stage2_clk_read(nvx_ctx *c);
  * handler; this pass is what actually tests the documented form. Never
  * sends a documented SET id. */
 int nvx_stage2_clk_doc(nvx_ctx *c);
+/* Same documented forms as --clkdoc-read, re-sent against each RM object
+ * carrier (subdevice / device / client) so "object mismatch" and
+ * "bad paramSize" stop looking alike. GETs only. */
+int nvx_stage2_clk_obj(nvx_ctx *c);
+/* Read-only 1 Hz tracker: RUSD gpc/mem clocks next to the RM 0x20809061/
+ * 776 B per-domain table, for the load-vs-idle A/B that decides
+ * whether that table is a live reading or a capability list. */
+int nvx_stage4_clk_track(nvx_ctx *c, int seconds);
 int nvx_stage3(nvx_ctx *c);                    /* gated writes             */
 void nvx_stage4(nvx_ctx *c, int seconds);      /* sampling loop            */
 int nvx_stage5(nvx_ctx *c);                    /* channel smoke (GPU exec) */

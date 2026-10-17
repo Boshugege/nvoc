@@ -1699,6 +1699,194 @@ static void item_clk_doc(nvx_ctx *c)
     free(buf);
 }
 
+/* ------------------------------------------------------------------ */
+/* Object-carrier sweep (--clkobj-read)                                */
+/* ------------------------------------------------------------------ */
+/* Every documented case that still answers 0x1f was sent with
+ * hObject = hSubdevice, which is where the two working faces live. The
+ * remaining failing layer is therefore "command/category/object mismatch":
+ * an RM control is dispatched on (class, method, object), and a control that
+ * belongs to the DEVICE or to the CLIENT is rejected with INVALID_ARGUMENT
+ * when addressed to the subdevice -- the same status a bad paramSize produces.
+ * This sweep re-sends the SAME documented form against each carrier so the
+ * two causes are separated instead of merged.
+ *
+ * Read-only: GET ids only, same SET blacklist as the other passes.
+ */
+
+static void item_clk_obj(nvx_ctx *c)
+{
+    static const struct {
+        const char *name; NvU32 cmd; unsigned size; NvU32 stamp;
+        unsigned seed_off; NvU32 seed_val;
+    } cases[] = {
+        { "domains-get-info v1", NVX_RM_CMD_CLK_DOMAINS_GET_INFO, 2520,
+          NVX_STAMP_CLK_DOMAINS_INFO_V1, ~0u, 0 },
+        { "domains-get-control v1", NVX_RM_CMD_CLK_DOMAINS_GET_CONTROL, 2404,
+          NVX_STAMP_CLK_DOMAINS_CONTROL_V1, 8, 0xFFu },
+        { "measure-freq v1 dom0", NVX_RM_CMD_CLK_MEASURE_FREQ, 32,
+          NVX_STAMP_CLK_MEASURE_V1, 4, 0 },
+        { "vfp-get-info 493060", NVX_RM_CMD_VFP_GET_INFO_582, 493060,
+          NVX_STAMP_VFP_INFO, ~0u, 0 },
+        { "vfp-get-status 2000388", NVX_RM_CMD_VFP_GET_STATUS_582, 2000388,
+          NVX_STAMP_VFP_STATUS, ~0u, 0 },
+        { "vfp-get-control 0x474604", NVX_RM_CMD_VFP_GET_CONTROL, 4343300,
+          NVX_STAMP_VFP_CONTROL, ~0u, 0 },
+        { "freq-ctrl-info 3148", NVX_RM_CMD_CLK_FREQ_CTRL_INFO, 3148,
+          NVX_STAMP_CLK_FREQ_CTRL_INFO, ~0u, 0 },
+        { "freq-ctrl-status 2508", NVX_RM_CMD_CLK_FREQ_CTRL_STATUS, 2508,
+          NVX_STAMP_CLK_FREQ_CTRL_STATUS, 4, 0x7u },
+        { "rails-get-status 3212", NVX_RM_CMD_RAILS_GET_STATUS, 3212, 0, ~0u, 0 },
+        /* Two known-good controls as carrier controls: whatever carrier flips
+         * these is the wrong carrier, so the sweep is self-anchoring. */
+        { "ctl vfp-get-info 776", NVX_RM_CMD_VFP_GET_INFO_582, 776, 0, ~0u, 0 },
+        { "ctl rails-get-info 2444", NVX_RM_CMD_RAILS_GET_INFO, 2444, 0, ~0u, 0 },
+        /* Size-boundary set for the rail GetInfo: is the accept an exact
+         * struct size, a minimum, or a congruence? (2404 fails, 2444 and
+         * 500008 pass.) */
+        { "rails-get-info 88", NVX_RM_CMD_RAILS_GET_INFO, 88, 0, ~0u, 0 },
+        { "rails-get-info 164", NVX_RM_CMD_RAILS_GET_INFO, 164, 0, ~0u, 0 },
+        { "rails-get-info 620", NVX_RM_CMD_RAILS_GET_INFO, 620, 0, ~0u, 0 },
+        { "rails-get-info 2440", NVX_RM_CMD_RAILS_GET_INFO, 2440, 0, ~0u, 0 },
+        { "rails-get-info 2444", NVX_RM_CMD_RAILS_GET_INFO, 2444, 0, ~0u, 0 },
+        { "rails-get-info 2448", NVX_RM_CMD_RAILS_GET_INFO, 2448, 0, ~0u, 0 },
+        { "rails-get-info 2480", NVX_RM_CMD_RAILS_GET_INFO, 2480, 0, ~0u, 0 },
+        { "rails-get-info 2500", NVX_RM_CMD_RAILS_GET_INFO, 2500, 0, ~0u, 0 },
+    };
+    struct { const char *tag; NvHandle h; } carriers[3];
+    carriers[0].tag = "subdevice"; carriers[0].h = c->hSubdevice;
+    carriers[1].tag = "device";    carriers[1].h = c->hDevice;
+    carriers[2].tag = "client";    carriers[2].h = c->hClient;
+
+    unsigned buflen = 0;
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; ++i)
+        if (cases[i].size > buflen) buflen = cases[i].size;
+    unsigned char *buf = malloc(buflen);
+    if (!buf) {
+        nvx_emit(c, "V2.clkobj", "clkobj-read", 0, NVX_V_HARD,
+                 "alloc %u B failed", buflen);
+        return;
+    }
+
+    for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
+        NvU32 st[3];
+        if (nvx_id_is_known_set(cases[i].cmd)) {
+            nvx_emit(c, "V2.clkobj", cases[i].name, 0, NVX_V_HARD,
+                     "REFUSED: 0x%08x is a documented SET id", cases[i].cmd);
+            continue;
+        }
+        for (unsigned k = 0; k < 3; ++k) {
+            memset(buf, 0, cases[i].size);
+            if (cases[i].stamp) memcpy(buf, &cases[i].stamp, 4);
+            if (cases[i].seed_off != ~0u)
+                memcpy(buf + cases[i].seed_off, &cases[i].seed_val, 4);
+            st[k] = nvx_rm_control(c->ctl_fd, c->hClient, carriers[k].h,
+                                   cases[i].cmd, buf, cases[i].size);
+        }
+        nvx_emit(c, "V2.clkobj", cases[i].name, st[0],
+                 st[0] == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "cmd 0x%08x size %u stamp 0x%08x -> subdevice 0x%08x (%s) | "
+                 "device 0x%08x (%s) | client 0x%08x (%s)",
+                 cases[i].cmd, cases[i].size, cases[i].stamp,
+                 st[0], nvx_status_name(st[0]),
+                 st[1], nvx_status_name(st[1]),
+                 st[2], nvx_status_name(st[2]));
+        if (st[0] == 0) {
+            /* buf was zeroed again by the last (client) carrier attempt, so
+             * re-read on the subdevice before judging the payload. */
+            memset(buf, 0, cases[i].size);
+            if (cases[i].stamp) memcpy(buf, &cases[i].stamp, 4);
+            if (cases[i].seed_off != ~0u)
+                memcpy(buf + cases[i].seed_off, &cases[i].seed_val, 4);
+            NvU32 re = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                      cases[i].cmd, buf, cases[i].size);
+            unsigned first = 0, last = 0;
+            unsigned nz = doc_census(buf, cases[i].size, &first, &last);
+            nvx_emit(c, "V2.clkobj", cases[i].name, re, NVX_V_SKIP,
+                     "  subdevice re-read 0x%08x: %u non-zero words, first @%u "
+                     "last @%u", re, nz, first, last);
+        }
+    }
+    free(buf);
+}
+
+/* ------------------------------------------------------------------ */
+/* Live clock tracker (--clk-track N)                                  */
+/* ------------------------------------------------------------------ */
+/* One line per second: the RUSD gpc/mem clocks (when the shared page is
+ * mapped) next to the per-domain kHz table that RM 0x20809061 ACKs at
+ * paramSize 776.
+ *
+ * The question this answers is the one payload dumps cannot: a table that
+ * MOVES with the RUSD clocks under a real load is a live reading, while a
+ * table that holds still while they move is a capability/max list. Without
+ * that A/B the 776 B table stays "probe data", not a reading.
+ *
+ * Read-only: one RM GET per second, plus the existing RUSD page reads. */
+int nvx_stage4_clk_track(nvx_ctx *c, int seconds)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V4.clk", "track", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    unsigned char buf[776];
+    for (int t = 0; t <= seconds; ++t) {
+        memset(buf, 0, sizeof buf);
+        NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
+                                  NVX_RM_CMD_VFP_GET_INFO_582, buf, sizeof buf);
+        /* Print each record's OWN bit field: the entries are ordered by bit,
+         * but indexing them positionally silently mislabels every domain. */
+        char dom[192];
+        int off = 0;
+        unsigned shown = 0;
+        for (unsigned i = 0; i < (sizeof buf - 8) / 24; ++i) {
+            unsigned ro = 8 + 24 * i;
+            NvU32 bit = 0, v = 0;
+            if (st != 0 || ro + 24 > sizeof buf) break;
+            memcpy(&bit, buf + ro + 4, 4);
+            memcpy(&v, buf + ro + 8, 4);
+            if (!bit && !v) continue;
+            ++shown;
+            off += snprintf(dom + off, sizeof dom - (size_t)off, "%s0x%x=%u",
+                            shown > 1 ? " " : "", bit, v);
+            if (off <= 0 || off >= (int)sizeof dom - 1) break;
+        }
+        if (!shown) snprintf(dom, sizeof dom, "no records");
+        NvU32 gpc = 0, dram = 0;
+        int have_rusd = 0;
+        if (c->rusd) {
+            NV00DE_SHARED_DATA *sd = (NV00DE_SHARED_DATA *)c->rusd;
+            RUSD_CLK_PUBLIC_DOMAIN_INFOS clocks;
+            if (rusd_copy(&sd->clkPublicDomainInfos.lastModifiedTimestamp,
+                          &sd->clkPublicDomainInfos, &clocks, sizeof clocks) == 0) {
+                gpc = clocks.info[RUSD_CLK_PUBLIC_DOMAIN_GRAPHICS].actualClkKHz;
+                dram = clocks.info[RUSD_CLK_PUBLIC_DOMAIN_MEMORY].actualClkKHz;
+                have_rusd = 1;
+            }
+        }
+        char rusd_txt[64];
+        if (have_rusd)
+            snprintf(rusd_txt, sizeof rusd_txt, "gpc=%u mem=%u kHz", gpc, dram);
+        else
+            snprintf(rusd_txt, sizeof rusd_txt, "rusd n/a");
+        nvx_emit(c, "V4.clk", "track", st, st == 0 ? NVX_V_OK : NVX_V_REJECTED,
+                 "t=+%ds rm776[%s] | %s", t, dom, rusd_txt);
+        if (t < seconds) sleep(1);
+    }
+    return 0;
+}
+
+int nvx_stage2_clk_obj(nvx_ctx *c)
+{
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.clkobj", "clkobj-read", 0, NVX_V_SKIP,
+                 "RM chain not open");
+        return -1;
+    }
+    item_clk_obj(c);
+    return 0;
+}
+
 int nvx_stage2_clk_doc(nvx_ctx *c)
 {
     if (!c->hSubdevice) {

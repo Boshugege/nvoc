@@ -71,6 +71,8 @@ OGKM=/path/to/ogkm python3 tests/test_idle_cli.py
 ./probe-macos-rm-idle --stages 0 --perf-read        # perf/pmgr 公开读面普查（模块信息、视频引擎 perfmon）+ 不可发送项的显式跳过
 ./probe-macos-rm-idle --stages 0 --clkvf-read       # 私有 ClockClient/VfPoints/PerfVfe **只读**面普查（paramSize 存在性扫描；SET 孪生从不发送）
 ./probe-macos-rm-idle --stages 0 --clkdoc-read      # 同一批私有读面的**文档封送** pass：每面只发一个 (paramSize, dword[0] 戳, 输入 seed) 三元组（scanner 发零填充，满足不了校验戳/mask 的 handler；SET 孪生从不发送）
+./probe-macos-rm-idle --stages 0 --clkobj-read      # 同一批文档形态分别打到 subdevice/device/client，把「参数尺寸不对」与「挂错对象」分开（只读 GET）
+./probe-macos-rm-idle --stages 0 --clk-track 10    # 1 Hz 只读跟踪：RUSD gpc/mem + RM 0x20809061/776 B 每域 kHz 表（负载 A/B 用）
   # 该普查含两轮：61 档 paramSize 扫描 + 11 个 `(version<<16|size)` 版本戳 pass；
   # 另有 `0x2080ffff`/`0x2080a0ff` 两个阴性对照锚定 `0x1f` 的语义
 ```
