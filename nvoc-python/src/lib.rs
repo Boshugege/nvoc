@@ -99,6 +99,30 @@ fn ensure_backend_available(backends: BackendSet) -> PyResult<()> {
     Ok(())
 }
 
+/// Three read entries ask for a *shape* the RM snapshot does not have: NVML's
+/// severity/threshold table, NVML's per-P-state clock table, and the cooler
+/// count/type/percent triple. On macOS they would otherwise be refused by
+/// [`ensure_backend_available`] with the platform sentence, which is true of
+/// the platform but not of the entry: it reads as "nothing of this family
+/// exists here", while the same backend demonstrably answers the *reading* of
+/// each family (sensors through `query_legacy_temp_sensor`, the current P-state
+/// through `query_status`, per-cooler rpm through `query_fan_info`). So the
+/// reason names the missing layer, and it is the same core constant the CLI
+/// quotes, so both entries cannot drift apart.
+fn refuse_without_source(entry: &str, reason: &str) -> PyResult<()> {
+    if cfg!(target_os = "macos") {
+        return Err(PyRuntimeError::new_err(source_less_message(entry, reason)));
+    }
+    Ok(())
+}
+
+/// The refusal text, kept separate from raising it so a unit test can assert on
+/// it without starting an interpreter (the same reason the other message tests
+/// here only check `is_err`).
+fn source_less_message(entry: &str, reason: &str) -> String {
+    format!("{entry}: {reason}")
+}
+
 fn parse_backend(raw: &str) -> PyResult<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "nvapi" => Ok("nvapi"),
@@ -2358,6 +2382,10 @@ fn query_power_limits(py: Python<'_>, gpu: &str, backends: Option<&str>) -> PyRe
 
 #[pyfunction]
 fn query_pstates(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    refuse_without_source(
+        "query_pstates reads NVML's per-P-state clock table",
+        nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON,
+    )?;
     let value = with_target(gpu, "nvml", normalize_pstates)?;
     py_value(py, &value)
 }
@@ -2375,12 +2403,20 @@ fn query_fan_info(py: Python<'_>, gpu: &str, backends: Option<&str>) -> PyResult
 
 #[pyfunction]
 fn query_cooler_info(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    refuse_without_source(
+        "query_cooler_info reads the private NVAPI cooler family",
+        nvoc_core::FAN_PERCENT_UNREADABLE_REASON,
+    )?;
     let value = with_target(gpu, "nvapi", normalize_cooler_info)?;
     py_value(py, &value)
 }
 
 #[pyfunction]
 fn query_temperature_thresholds(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    refuse_without_source(
+        "query_temperature_thresholds reads NVML's threshold table",
+        nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON,
+    )?;
     let value = with_target(gpu, "nvml", normalize_temperature_thresholds)?;
     py_value(py, &value)
 }
@@ -5983,6 +6019,45 @@ mod tests {
             assert!(ensure_backend_available(BackendSet::Nvml).is_ok());
             assert!(ensure_backend_available(BackendSet::Both).is_ok());
             assert!(ensure_backend_available(BackendSet::MacosRm).is_ok());
+        }
+    }
+
+    /// The three entries whose *shape* the RM snapshot does not have (NVML's
+    /// severity table, NVML's per-P-state clock table, the cooler triple) must
+    /// not answer with the platform sentence: it is true of the platform and
+    /// false of the entry, because the same backend answers the *reading* of
+    /// each of those families through another entry. They carry the core
+    /// constant the CLI quotes instead, so the two entries cannot drift apart.
+    #[test]
+    fn shape_less_entries_name_the_missing_layer_not_the_platform() {
+        let cases = [
+            (
+                "query_temperature_thresholds",
+                nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON,
+            ),
+            ("query_pstates", nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON),
+            ("query_cooler_info", nvoc_core::FAN_PERCENT_UNREADABLE_REASON),
+        ];
+        for (entry, reason) in cases {
+            let text = source_less_message(entry, reason);
+            assert!(text.contains(reason), "{entry} must quote the shared reason");
+            assert!(
+                !text.contains("NVAPI/NVML are not available"),
+                "{entry} must not blame the platform"
+            );
+            // Every shared reason must name a layer rather than a verdict:
+            // "not located", "no source" or the entry that does answer.
+            assert!(
+                reason.contains("no source")
+                    || reason.contains("unlocated")
+                    || reason.contains("not implemented"),
+                "{entry}'s reason must name the layer: {reason}"
+            );
+            if cfg!(target_os = "macos") {
+                assert!(refuse_without_source(entry, reason).is_err());
+            } else {
+                assert!(refuse_without_source(entry, reason).is_ok());
+            }
         }
     }
 

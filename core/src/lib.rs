@@ -18,8 +18,9 @@ pub use macos_rm::{
     ABI_LAYOUT_SLOTS, ClockOffsetDomain, ClockOffsetLimits, ClockOffsetReading, DeviceInfo,
     DeviceSample, DeviceSettings, DeviceStatus, FAN_PERCENT_UNREADABLE_REASON, FanCoolerReading,
     FanReport, FieldState, MONITOR_SECTIONS, MONITOR_STALE_AFTER, MacosRmSession, NamedClockOffset,
-    OffsetStep, OffsetStepTarget, OffsetStepVerdict, PUBLIC_OFFSET_DOMAINS, QueryMacosRmInfo,
-    QueryMacosRmSettings, QueryMacosRmStatus, QueryMacosRmThermalView, SettingsCapabilities,
+    OffsetStep, OffsetStepTarget, OffsetStepVerdict, PSTATE_FREQ_TABLE_UNREADABLE_REASON,
+    PUBLIC_OFFSET_DOMAINS, QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus,
+    QueryMacosRmThermalView, SettingsCapabilities, THERMAL_THRESHOLDS_UNREADABLE_REASON,
     TempSensorView, ThermalReadOutcome, ThermalReadout, abi_layout, native_abi_layout,
     parse_offset_delta, parse_offset_target, plan_offset_step, unnamed_offset_reason,
 };

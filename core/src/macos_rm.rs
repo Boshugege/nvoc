@@ -165,6 +165,19 @@ pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "the thermal family itself is 
 
 /// The boost path is a SET, so it sits behind the same gate as the write
 /// families; nothing about it has been read, and nothing is claimed.
+/// The temperature-*threshold* entry asks for NVML's severity table (slow,
+/// warning, shutdown and the hardware pair). This backend answers the thermal
+/// family successfully, but the table itself has no source yet, so the entry is
+/// refused rather than left to fail with a platform-level message that would
+/// read as "no thermal data on this path" -- which the reading disproves.
+pub const THERMAL_THRESHOLDS_UNREADABLE_REASON: &str = "the threshold table has no source here, and the family that would carry it has been read: 0x20800513 answered NV_OK with one target and one sensor reading 47 on the driver's own [0,127] range (its non-privileged twin 0x20808513 is the same read), and the SDK's thermal control family is exactly those two ids -- its opcodes cover targets, sensors, readings, reading ranges and a sensor target index, so no severity/threshold opcode exists in the family this host answers; the thresholds are therefore unlocated rather than absent, and the *configured* policy limit is a different field again (see thermal_limit); what does answer on macOS is the live reading of every sensor this backend knows, through get-legacy-temp-sensor (see notes)";
+
+/// NVML's pstate entry emits a table of P-state to clock pairs. This backend
+/// publishes the *current* P-state and per-domain offsets, so the table has no
+/// source; the reads that could feed one are private, and one of them was
+/// measured empty rather than assumed absent.
+pub const PSTATE_FREQ_TABLE_UNREADABLE_REASON: &str = "the per-pstate clock table has no source here: the RM snapshot carries the *current* P-state (get-status, get-settings) and the per-domain clock offsets (get-pstate-global-freq-offset), not a table of P-state to frequency pairs; the reads that could feed one are private, and the one that was measured came back empty rather than missing -- 0x2080901d answered NV_OK at its own 32680-byte size with every value dword written as zero on an 0xA5 background (a written zero, not an untouched field), while the public per-level control 0x2080200B still answers 0x1f on this driver; so the entry is not implemented here for want of a read source, and the two entries that do answer on macOS report the current state rather than the table (see notes)";
+
 pub const VOLTAGE_BOOST_UNREADABLE_REASON: &str = "the boost *write* is a SET and sits behind the same privilege gate -- but the family is not read-blind: the client side exposes a read of it as the volt-rails control (a percentage), and the read we actually issued is the internal boost-sync info, which the driver answered 0x56 NOT_SUPPORTED, so this is refused rather than absent; the in-tree copy also carries a controllable window measured live on this very card model at R465 (minimum 300 mV, step 6.25 mV, maximum 1300 mV, default 1000 mV, matching the rail clamp floor), which must be re-measured at R610 rather than reused; the RM endpoint behind the volt-rails escape is still not located (see notes)";
 
 /// The two clock-offset families are the one family where a summary sentence

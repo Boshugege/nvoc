@@ -40,6 +40,23 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::GetLegacyTempSensor
     ) {
         Ok(())
+    } else if command == Command::GetTemperatureThresholds {
+        Err(CliError::new(format!(
+            "get-temp-thresholds is unavailable on macOS RM: it reads the NVML threshold table, \
+             and {} -- on macOS the live reading of every sensor this backend knows is reported \
+             by get-legacy-temp-sensor instead.",
+            nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON
+        )))
+    } else if command == Command::GetPstateFreqRange {
+        // Same shape of refusal as the thermal thresholds above: this backend
+        // does answer P-state questions (get-status reports the current one),
+        // so the list would read as "no P-state here".
+        Err(CliError::new(format!(
+            "get-pstate-freq-range is unavailable on macOS RM: it reads the per-pstate clock \
+             table, and {} -- on macOS get-status reports the current P-state and \
+             get-pstate-global-freq-offset reports the per-domain offsets instead.",
+            nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON
+        )))
     } else {
         Err(CliError::new(format!(
             "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
@@ -501,6 +518,27 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(allowed.contains("get-legacy-temp-sensor"), "{allowed}");
+        // The threshold entry is refused for a reason of its own, not with the
+        // list: this backend does publish sensor readings (the legacy view is
+        // allowed just above), so the list alone would read as "no thermal data
+        // on this path". The reason is the shared core constant the Python
+        // entry quotes, so the two cannot drift apart.
+        assert!(
+            allowed.contains(nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON),
+            "{allowed}"
+        );
+        let pstate = validate(Command::GetPstateFreqRange)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            pstate.contains(nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON),
+            "{pstate}"
+        );
+        assert!(pstate.contains("get-pstate-global-freq-offset"), "{pstate}");
+        // The entries that ask for a *reading* this backend really has no source
+        // for keep the list-shaped refusal.
+        let list_shaped = validate(Command::GetTempSim).unwrap_err().to_string();
+        assert!(list_shaped.contains("supported commands:"), "{list_shaped}");
     }
 
     #[test]
