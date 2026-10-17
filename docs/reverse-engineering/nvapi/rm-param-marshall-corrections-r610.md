@@ -1139,3 +1139,21 @@ Type `0x02`（若干代际的 Disp/Host、A100 的 M）**两个版本都不封�
 ### 30.4 验证与范围
 `cargo fmt --all -- --check` 干净 ✔；`cargo clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 干净 ✔；`cargo test -p nvoc-core --all-targets` 全绿（含新增 3 个单元测试与 fixture 测试 ✔；93 passed ✔）。
 **范围**：客户端本机编译/测试 ✔；**未发新命令、无写入、未用 GPU** ✔。**尚未接线** ✗：`core/native/macos_rm.c` 仍只读三条 block ⇒ 下一步是从该处发出 `0x20809061@776` 并把解析结果并入 `OffsetChannelSnapshot`/`SettingsCapabilities` ✔。
+
+## 31. 接线：客户端封送层现在也读 `0x20809061@776`（2026-10-18）
+
+**选择依据** ✔：§30 落地了解析器但**没有调用者** ✗（`core/native/macos_rm.c` 只发三条 block ✗）⇒ 原目标第 5 条"接入现有接口"未完成 ✔。本轮把**客户端路径**接到与探针相同的读面上 ✔（仍**只读**，写入门槛不变 ✔）。
+
+### 31.1 改动（四处一致）
+- `core/native/macos_rm_abi.h`：`NVOC_RM_OFFSET_KINDS 3→4`，新增 `NVOC_RM_OFFSET_CLOCK_DOCUMENT 3`（776 字节）✔。
+- `core/native/macos_rm.c`：`offset_commands[]` 追加 `{0x20809061u, 776u}` ✔；注释由"three"改为"four"并保留"只能由 GSP 应答、wedge 时返回 `0x62`"✔。**只读**：无 SET id、无写入 ✔。
+- `core/src/macos_rm.rs`：`OffsetBlock::ClockDocument`（kind 3 / bytes `CLK_DOCUMENT_BYTES`）✔；`read_offset_channel()` 增加第四次读取并调用 `parse_clock_document` ✔；`apply_offset_channel()` 把该 block 的结局写进同一条 note ✔，并**逐位列出**频率与当前偏移（例：`bit 0x10 at 6000984 kHz with offset -126 kHz`）✔。
+- `core/src/macos_offset.rs`：`OffsetChannelSnapshot` 增加 `clock_document: OffsetBlockRead<ClkDocument>` ✔（沿用既有 `OffsetBlockRead` 三态：`Refused`/`Malformed`/`Parsed` ✔ ⇒ 拒绝**不会**被渲染成"偏移为零"✔）。
+### 31.2 为什么不把偏移升成"具名域字段" ✔
+`clock_offset_domains`/`clock_offset_limits_khz` 保持原样 ✔：776 文档里的域位是**驱动自己的**位，其中只有 `0x10` 能凭仓库内 NVAPI 副本命名为 MCLK（且其频率与实时显存时钟一致 ✔），其余十个位**没有名字** ✗ ⇒ 升格为具名域字段会**猜名字**，而 note 里逐位列值只报**实测值** ✔。
+### 31.3 实际验证范围（重要）
+- 客户端：`cargo fmt --all -- --check` 干净 ✔；`clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 干净 ✔；`cargo test -p nvoc-core --all-targets` 全绿（93 passed ✔；含两个 `OffsetChannelSnapshot` fixture 构造点已随新字段更新 ✔）。
+- **本机（Linux）不编译 C 也不编译 macOS 门控代码** ✗（`core/build.rs` 在非 macOS 直接返回 ✔）⇒ 回到**测试机**验证 ✔：`cargo build -p nvoc-core`（`OGKM=` 带上 ✔）build script 实际执行 ✔、crate 编译通过 ✔（3.48 s，无 error ✔）；另用 build.rs **同一组 include** 直接 `cc -std=c11 -fsyntax-only core/native/macos_rm.c` 通过 ✔。
+- **覆盖前先核对**：测试机上四个文件改前 sha256 与 `b413f42^`（即第 54 轮提交态）**逐一相同** ✔（`macos_rm.rs b0492d91…`、`macos_rm.c 56217cae…`、`macos_rm_abi.h 169278c6…`、`macos_offset.rs 48fd7af3…`）⇒ 未覆盖任何新工作 ✔。
+- **设备侧：未读** ✗ —— GSP 仍 `0x62`（uptime `1 day, 3:44`，同一 boot ✔）⇒ 新客户端路径状态 = **已实现待实测** ✔（`0x20809061@776` 这一**形态**被驱动接受这件事本身已在第 53 轮由探针实测 ✔，两者不混同 ✔）。
+- 未执行任何写入 ✔，`SETTINGS_WRITE_SUPPORTED`/`SETTINGS_RESTORE_SUPPORTED` 仍为 `false` ✔。

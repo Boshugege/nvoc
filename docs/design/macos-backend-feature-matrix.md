@@ -1216,3 +1216,10 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 (4) **推断边界** ✔：字段名为读取语义描述而非驱动声明；注释同时给佐证与**可反驳点**（受控写入应使该字段随动 ✔）；`flags`／`ffffffff` 语义**尚未定位** ✔。
 (5) **验证**：fmt 干净 ✔、`clippy --workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings` 干净 ✔、`cargo test -p nvoc-core --all-targets` 全绿（93 passed，含 3 个新单元测试＋fixture 测试 ✔）；**客户端本机构建/测试 ✔，未发新命令、无写入、未用 GPU** ✔。
 (6) **尚未接线** ✗：`core/native/macos_rm.c` 仍只读三条 block ⇒ 下一步发 `0x20809061@776` 并并入 `OffsetChannelSnapshot`/`SettingsCapabilities` ✔。
+
+### 本轮追加六十五（2026-10-18，**接线**：客户端封送层读 `0x20809061@776`）
+
+(1) **选择依据** ✔：追加六十四 落地解析器但无调用者 ⇒ 按原目标第 5 条接入 ✔。改动：`macos_rm_abi.h` `NVOC_RM_OFFSET_KINDS 3→4`＋`NVOC_RM_OFFSET_CLOCK_DOCUMENT 3`；`macos_rm.c` `offset_commands[]` 追加 `{0x20809061u,776u}`（**仍只读**，无 SET id ✔）；`macos_rm.rs` `OffsetBlock::ClockDocument`(kind 3)＋`read_offset_channel()` 第四次读取调 `parse_clock_document`＋`apply_offset_channel()` 同 note 记录并**逐位列出**频率与偏移；`macos_offset.rs` `OffsetChannelSnapshot` 增加 `clock_document: OffsetBlockRead<ClkDocument>`（沿用 `Refused`/`Malformed`/`Parsed` 三态，**拒绝不会被渲染成偏移为零** ✔）。
+(2) **不做具名域字段的理由** ✔：776 的域位是驱动自己的位，只有 `0x10` 能凭仓库内 NVAPI 副本命名 MCLK（其频率与实时显存时钟一致 ✔），其余十个位无名 ⇒ 升格会**猜名字**；note 逐位列值只报实测值 ✔。
+(3) **验证范围** ✔：客户端 fmt/clippy（`--workspace --exclude cli-stressor-cuda-rs --all-targets -- -D warnings`）/`cargo test -p nvoc-core --all-targets` 全绿（93 passed）✔；**本机不编译 C 与 macOS 门控代码** ✗ ⇒ 测试机 `cargo build -p nvoc-core`（`OGKM=` 带上）build script 实执行＋编译通过 ✔，另以同一组 include 直接 `cc -fsyntax-only macos_rm.c` 通过 ✔；覆盖前核对四个文件 sha256 与 `b413f42^` 逐一相同 ⇒ 未覆盖新工作 ✔。
+(4) **状态**：`0x20809061@776` 读面在客户端 = **已实现待实测** ✔（其**形态**被驱动接受已在第 53 轮由探针实测 ✔，两者不混同）；**设备侧本轮未读** ✗（GSP 仍 `0x62`）⇒ 无新增设备访问计数 ✔；未执行任何写入 ✔，写入门槛保持关闭 ✔。
