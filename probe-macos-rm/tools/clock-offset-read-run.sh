@@ -111,6 +111,17 @@ stamp_sums() {
     fi
 }
 
+finish() {
+    # How the run ended belongs in the artifact as much as how it started: a
+    # bundle that stopped at case one and a bundle that ran the whole battery
+    # differ only by which logs exist, which a reader should not have to infer.
+    want=$1
+    printf 'battery exit %s at %s\n' "$want" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        >> "$bundle/README.txt"
+    stamp_sums
+    exit "$want"
+}
+
 run_one() {
     name=$1
     shift
@@ -134,10 +145,9 @@ if [ "${wedge:-0}" -ne 0 ]; then
     echo "     legacy path is wedged (see the doc, section 6). STOPPING here --" >&2
     echo "     the wider battery would answer 0x62 for every id. Reboot, then" >&2
     echo "     rerun; nothing was written." >&2
-    # The abort bundle is an artifact too -- the wedge datapoint -- so it gets its
-    # digests before the run ends, not only on the healthy path.
-    stamp_sums
-    exit 5
+    # The abort bundle is an artifact too -- the wedge datapoint -- and it says
+    # how it ended, not only how it started.
+    finish 5
 fi
 
 run_one clkctl-read  --clkctl-read
@@ -158,5 +168,5 @@ if command -v python3 >/dev/null 2>&1; then
     echo "  decode -> $bundle/decode.txt"
 fi
 
-stamp_sums
 echo "done: $bundle"
+finish 0

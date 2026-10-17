@@ -157,6 +157,16 @@ stamp_sums() {
     fi
 }
 
+finish() {
+    # The exit status goes into the bundle: "the driver refused before the write"
+    # and "the write ran and was not verified" must not look the same to a reader.
+    want=$1
+    printf 'write run exit %s at %s\n' "$want" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        >> "$bundle/README.txt"
+    stamp_sums
+    exit "$want"
+}
+
 # 2. preflight: the driver's own state check, before anything is written.
 echo "== anchor (decides whether the GSP is able to answer at all) =="
 "$root/probe-macos-rm" --anchor-read > "$bundle/anchor.txt" 2>&1 && arc=0 || arc=$?
@@ -168,8 +178,7 @@ if grep -q "NV_ERR_RESET_REQUIRED" "$bundle/anchor.txt" || \
     echo "     first, then rerun this script. Nothing was written this run." >&2
     # The refusal is an artifact too: it is the record that the GSP, not the
     # candidate, is why no write happened.
-    stamp_sums
-    exit 3
+    finish 3
 fi
 
 # 3. the single gated write, with its own read-back and restore.
@@ -199,6 +208,5 @@ fi
 echo "note: a frequency change (or its absence) is not evidence; the lines above" 
 echo "      are. Rerun the read runbook afterwards to confirm the blocks agree."
 
-# Digests last, so they cover the finished logs.
-stamp_sums
-exit $wrc
+# Digests last, so they cover the finished logs and the exit status.
+finish "$wrc"
