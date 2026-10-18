@@ -600,6 +600,33 @@ static void item_tierb_reads(nvx_ctx *c)
         NvU32 cmd;
         unsigned size;
     } rb[] = {
+        /* The two published candidates go FIRST although their ids are not in
+         * the V2.9.. sequence: they are the smallest reads in the pass (4 B and
+         * 780 B), they are what today's question needs, and a later case that
+         * answers 0x65 aborts the rest of the pass -- so the answers must not be
+         * behind the 12 volt reads, where a latch would hide them.
+         *
+         * Two published ids that were listed as candidates but never sent.
+         * Neither size is a guess:
+         *
+         *   0x208001ea NV2080_CTRL_CMD_RUSD_GET_SUPPORTED_FEATURES -- the
+         *             published params struct is one NvU32 supportedFeatures
+         *             (ctrl2080gpu.h:4718-4739), so the caller size is 4. This
+         *             is the one read that answers "which RUSD sections does
+         *             THIS RM expose", which is the first question the power /
+         *             fan / temperature families' missing *range* has
+         *             (matrix section 一百五): the RUSD page already answers
+         *             with live numbers, so what is missing is not a reading.
+         *
+         *   0x2080a00b PERF_GET_LEVEL_INFO_V2 at its non-privileged tier --
+         *             same command, same params as the 0x2080200b row this
+         *             table's sibling (0x2080200b@780) already sends, only the
+         *             category byte differs (0x20 -> 0xa0, the tier form the
+         *             ids in this table use). The privileged tier answered
+         *             0x1f with capacity 0 and "0 domains returned", so the
+         *             non-privileged tier is the remaining question. */
+        { "V2.tb1", "rusd-get-supported-features 0x208001EA", 0x208001EAu, 4   },
+        { "V2.tb2", "perf-level-info-v2 nonpriv 0x2080A00B",  0x2080A00Bu, 780 },
         { "V2.9",  "rails-get-info(legacy)",   NVX_RM_CMD_RAILS_GET_INFO,   NVX_RAILS_INFO_PARAM_SIZE   },
         { "V2.10", "rails-get-status(legacy)", NVX_RM_CMD_RAILS_GET_STATUS, NVX_RAILS_STATUS_PARAM_SIZE },
         { "V2.11", "vfpoints-get(legacy)",     NVX_RM_CMD_VFPOINTS_GET,     NVX_VFPOINTS_PARAM_SIZE     },
@@ -617,6 +644,7 @@ static void item_tierb_reads(nvx_ctx *c)
         { "V2.25", "volt-read 0x2080B216", 0x2080B216u, 1624   },
         { "V2.26", "volt-read 0x2080B217", 0x2080B217u, 65320  },
         { "V2.27", "volt-read 0x2080B218", 0x2080B218u, 9220   },
+
     };
 
     for (unsigned k = 0; k < sizeof rb / sizeof rb[0]; ++k) {
@@ -626,7 +654,10 @@ static void item_tierb_reads(nvx_ctx *c)
                      rb[k].size, sizeof buf);
             continue;
         }
-        memset(buf, 0, rb[k].size);
+        /* The whole buffer is cleared, not just this case's paramSize: the
+         * accepted-case line below prints three dwords whatever the size, and a
+         * 4-byte case would otherwise print two words of the previous case. */
+        memset(buf, 0, sizeof buf);
         NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
                                   rb[k].cmd, buf, rb[k].size);
         if (st == 0x00000065u) {
@@ -653,7 +684,7 @@ static void item_tierb_reads(nvx_ctx *c)
          * report how much of the payload is populated and whether it is
          * stable; an undecoded layout must not be published as a reading. */
         memcpy(prev, buf, rb[k].size);
-        memset(buf, 0, rb[k].size);
+        memset(buf, 0, rb[k].size);   /* re-read from zero, same as the first */
         NvU32 st2 = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
                                    rb[k].cmd, buf, rb[k].size);
         unsigned nz = 0, moved = 0;
