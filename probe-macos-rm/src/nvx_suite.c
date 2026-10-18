@@ -611,12 +611,17 @@ static void item_tierb_reads(nvx_ctx *c)
          *
          *   0x208001ea NV2080_CTRL_CMD_RUSD_GET_SUPPORTED_FEATURES -- the
          *             published params struct is one NvU32 supportedFeatures
-         *             (ctrl2080gpu.h:4718-4739), so the caller size is 4. This
-         *             is the one read that answers "which RUSD sections does
-         *             THIS RM expose", which is the first question the power /
-         *             fan / temperature families' missing *range* has
-         *             (matrix section 一百五): the RUSD page already answers
-         *             with live numbers, so what is missing is not a reading.
+         *             (ctrl2080gpu.h:4718-4739), so the caller size is 4. The
+         *             mask is assembled by the driver itself
+         *             (gpu_user_shared_data.c:
+         *             subdeviceCtrlCmdRusdGetSupportedFeatures_IMPL) out of
+         *             exactly two bits -- bit 0 RUSD_FEATURE_NON_POLLING, bit 1
+         *             RUSD_FEATURE_POLLING -- so 0x3 is everything this driver
+         *             can report and anything less would mean RUSD is partly
+         *             withheld. What it does NOT answer: those bits say which
+         *             RUSD *modes* exist, not which RUSD *sections* do, so it
+         *             cannot by itself fill the power / fan / temperature
+         *             families' missing range (matrix section 一百五).
          *
          *   0x2080a00b PERF_GET_LEVEL_INFO_V2 at its non-privileged tier --
          *             same command, same params as the 0x2080200b row this
