@@ -189,7 +189,7 @@ echo "  rc=$wrc -> $bundle/write.txt"
 
 # 4. the verdict, quoted rather than summarised.
 echo "== verdict =="
-grep -E "V3\.5[a-e]|clk-offset" "$bundle/write.txt" || \
+grep -E "V3\.5[a-f]|clk-offset" "$bundle/write.txt" || \
     echo "  (no clk-offset lines: the write path did not run -- read the log)"
 
 # The success claim needs all three parts, not just the restore. V3.5d can say
@@ -197,16 +197,77 @@ grep -E "V3\.5[a-e]|clk-offset" "$bundle/write.txt" || \
 # move, and reporting "all verified" then would be exactly the mistake this
 # exercise exists to avoid. The fragments below are quoted from the probe's own
 # format strings, so they do not depend on how the overall verdict token renders.
+verified=no
 if grep -q "clk-offset-verdict" "$bundle/write.txt" && \
    grep -q "same-field yes" "$bundle/write.txt" && \
    grep -q "others-unchanged yes" "$bundle/write.txt" && \
    grep -q "restore verified" "$bundle/write.txt"; then
+    verified=yes
+fi
+
+# The restore is a separate claim from the write, and its failure is the one
+# state a user must not have to infer from two log lines: the device may still
+# carry the step. Both halves are read out of the log (pre-step value, post-SET
+# read) so the corrective step is printed as a number, not as advice to think.
+restore_bad=no
+if grep -q "RESTORE NOT VERIFIED" "$bundle/write.txt"; then
+    restore_bad=yes
+fi
+
+if [ "$verified" = yes ] && [ "$restore_bad" = no ]; then
     echo "== SET + read-back + restore all verified; block restored =="
 else
     echo "== NOT verified: read $bundle/write.txt before retrying ==" >&2
 fi
-echo "note: a frequency change (or its absence) is not evidence; the lines above" 
+
+if [ "$restore_bad" = yes ]; then
+    echo ""
+    echo "!! RESTORE NOT VERIFIED -- THE DEVICE MAY STILL CARRY THE STEP." >&2
+    grep -h "clk-offset-restore\|clk-offset-pre-record\|clk-offset-readback" \
+        "$bundle/write.txt" | sed 's/^/   /' >&2
+    # orig - seen: the step that lands the field back on its pre-step value if
+    # the device still holds what the read-back saw (the probe prints the same
+    # number in its alarm line, and this recomputes it from the log).
+    corr=$(python3 - "$bundle/write.txt" <<'PY' 2>/dev/null || true
+import re, sys
+text = open(sys.argv[1]).read()
+def last(tag, pattern):
+    hits = re.findall(pattern, text)
+    return hits[-1] if hits else None
+pre = last("pre", r"clk-offset-pre-record.*?field \+(\d+) current 0x[0-9a-f]+ \((-?\d+)\)")
+after = last("after", r"clk-offset-readback.*?field \+(\d+) = 0x[0-9a-f]+ \((-?\d+)\)")
+if pre and after and pre[0] == after[0]:
+    print("%d %s" % (int(pre[1]) - int(after[1]), pre[0]))
+PY
+)
+    if [ -n "$corr" ]; then
+        set -- $corr
+        bit=$(printf '%s' "$cand" | cut -d: -f1)
+        echo "   corrective single step (inverse of what is left applied):" >&2
+        echo "     sudo OUT_ROOT=$out_root sh $0 $bit:$2:$1" >&2
+    else
+        echo "   (could not recompute the step from the log: read the lines above)" >&2
+    fi
+    echo "   Do not issue any other write until the read runbook shows the" >&2
+    echo "   snapshot's block again. Nothing else is claimed about this run." >&2
+    echo ""
+fi
+
+echo "note: a frequency change (or its absence) is not evidence; the lines above"
 echo "      are. Rerun the read runbook afterwards to confirm the blocks agree."
 
-# Digests last, so they cover the finished logs and the exit status.
-finish "$wrc"
+# Digests last, so they cover the finished logs and the exit status. The exit
+# code says which of the three states the run ended in: 0 verified, 1 not
+# verified (block back), 2 not verified with the block NOT proven back.
+stamp_sums
+if [ "$verified" = yes ]; then
+    printf 'write run: VERIFIED (SET + read-back + restore)\n' >> "$bundle/README.txt"
+    exit 0
+fi
+if [ "$restore_bad" = yes ]; then
+    printf 'write run: RESTORE NOT VERIFIED -- device may still carry the step\n' \
+        >> "$bundle/README.txt"
+    exit 2
+fi
+printf 'write run: not verified, block restored\n' >> "$bundle/README.txt"
+exit 1

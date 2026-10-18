@@ -482,8 +482,12 @@ int main(int argc, char **argv)
 
     if (clk_offset_set) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
-        if (nvx_stage3_clk_offset_set(&g_ctx, clkoff_bit, clkoff_off,
-                                      clkoff_delta) != 0) rc = 1;
+        /* The write stage's own code travels: 2 means "the write ran and the
+         * block was NOT proven restored", which the runbook must not report with
+         * the same sentence as a plain read-back failure (rc 1). */
+        int wrc = nvx_stage3_clk_offset_set(&g_ctx, clkoff_bit, clkoff_off,
+                                            clkoff_delta);
+        if (wrc != 0) rc = wrc;
     }
 
     if (sample_sec > 0 && !strchr(stages, '4')) {

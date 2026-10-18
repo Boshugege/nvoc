@@ -3913,9 +3913,9 @@ static void rated_tdp_restore(nvx_ctx *c)
 /* Clock-domain offset restore: re-send the byte-exact pre-write snapshot
  * through the SET id.  Kept separate from the boost and RATED_TDP latches so
  * none of the three can trigger another's restore. */
-static void clkoff_restore(nvx_ctx *c)
+static NvU32 clkoff_restore(nvx_ctx *c)
 {
-    if (!g_clkoff_armed || !c || !c->hSubdevice) return;
+    if (!g_clkoff_armed || !c || !c->hSubdevice) return (NvU32)-1;
     unsigned char block[2108];
     NvU32 mask = 1u << g_clkoff_domain_bit;
     memcpy(block, g_clkoff_snapshot, sizeof block);
@@ -3924,6 +3924,7 @@ static void clkoff_restore(nvx_ctx *c)
                               0x2080d01cu, block, sizeof block);
     printf("[..] restoring 0x2080d01c domain bit %u from snapshot: SET 0x%x (%s)\n",
            g_clkoff_domain_bit, st, nvx_status_name(st));
+    return st;
 }
 
 void nvx_restore_run(void)
@@ -4286,28 +4287,61 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
              (NvU32)((int)orig + delta_khz), (int)orig + delta_khz,
              others_same ? "yes" : "NO", st2);
 
-    /* 5. restore from the snapshot, then prove the block came back exactly. */
-    clkoff_restore(c);
+    /* 5. restore from the snapshot, then prove the block came back exactly.
+     *
+     * The restore's own status is captured, not just printed: "the restore SET
+     * was refused" and "the restore SET was accepted but the block did not come
+     * back" are different states of the device, and only the read-back can tell
+     * the second from success -- reporting them as one verdict is how a device
+     * is left offset while the log reads "restore: FAILED". One bounded retry
+     * is allowed, and it is visible in the log, because a single re-send is not
+     * a sweep; the armed-flag is cleared only after the last attempt. */
+    NvU32 rst = clkoff_restore(c);
+    if (rst != 0) {
+        nvx_emit(c, "V3.5d1", "clk-offset-restore-retry", rst, NVX_V_GATED,
+                 "restore SET 0x%x (%s); re-sending the same snapshot once",
+                 rst, nvx_status_name(rst));
+        rst = clkoff_restore(c);
+    }
     g_clkoff_armed = 0;
     g_clkoff_ctx = NULL;
 
     unsigned char restored[NVX_CLKOFF_SIZE];
     NvU32 st3 = nvx_clkoff_get(c, domain_bit, restored);
     int identical = (st3 == 0 && memcmp(restored, snapshot, NVX_CLKOFF_SIZE) == 0);
-    nvx_emit(c, "V3.5d", "clk-offset-restore", st3,
-             identical ? NVX_V_OK : NVX_V_REJECTED,
-             "restored block byte-identical to snapshot: %s (GET 0x%x, "
-             "%s)", identical ? "yes" : "NO", st3,
+    nvx_emit(c, "V3.5d", "clk-offset-restore", rst,
+             (rst == 0 && identical) ? NVX_V_OK : NVX_V_REJECTED,
+             "restore SET rc 0x%x (%s); restored block byte-identical to snapshot: "
+             "%s (GET 0x%x, %s)", rst, nvx_status_name(rst),
+             identical ? "yes" : "NO", st3,
              identical ? "all 2108 B" : "MISMATCH -- investigate before retrying");
 
+    /* The leftover, named: what the field is believed to hold right now, what it
+     * held before the step, and the single inverse step that would undo it. A
+     * reader must not have to derive the corrective command from two log lines. */
+    NvU32 seen = (st2 == 0) ? nvx_peek_u32(after, rec + field_off) : 0xffffffffu;
+    int leftover = (rst != 0 || !identical);
+    if (leftover) {
+        nvx_emit(c, "V3.5f", "clk-offset-restore-alarm", rst, NVX_V_REJECTED,
+                 "RESTORE NOT VERIFIED -- domain bit %u field +%u may still hold "
+                 "0x%08x (%d); pre-step 0x%08x (%d); if the device still holds it, "
+                 "the corrective step is %+d kHz, or re-run the readback first",
+                 domain_bit, field_off, seen, (int)seen, orig, (int)orig,
+                 st2 == 0 ? (int)orig - (int)seen : -delta_khz);
+    }
+
+    int verified = (st == 0 && st2 == 0 && same_field && others_same && identical);
     nvx_emit(c, "V3.5e", "clk-offset-verdict", 0,
-             (st == 0 && st2 == 0 && same_field && others_same && identical)
-                 ? NVX_V_OK : NVX_V_REJECTED,
+             verified ? NVX_V_OK : NVX_V_REJECTED,
              "SET 0x%x, readback 0x%x, same-field %s, others-unchanged %s, "
              "restore %s -- a live-frequency change is NOT evidence either way",
              st, st2, same_field ? "yes" : "no", others_same ? "yes" : "no",
              identical ? "verified" : "FAILED");
-    return (st == 0 && st2 == 0 && same_field && others_same && identical) ? 0 : 1;
+    /* Three outcomes, three exit codes: verified, not verified with the block
+     * back, not verified with the block NOT proven back (the runbook turns the
+     * last one into an alarm rather than a footnote). */
+    if (verified) return 0;
+    return leftover ? 2 : 1;
 }
 
 /* ------------------------------------------------------------------ */
