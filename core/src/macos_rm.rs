@@ -4642,7 +4642,15 @@ mod tests {
         let status = status_from_snapshot(&s);
 
         let views = status.legacy_temp_sensor_report(ThermalReadOutcome::NotAttempted);
-        assert!(views[0].unavailable["min_c"].contains("does not wire that read in yet"));
+        // The not-attempted text says so, and still names the measured
+        // candidate: it used to add "this snapshot does not wire that read in
+        // yet", which stopped being true once the range read was wired in and
+        // this branch kept the sentence (the read is wired in; it was simply
+        // not attempted here).
+        let reason = &views[0].unavailable["min_c"];
+        assert!(reason.contains("did not *attempt*"), "{reason}");
+        assert!(reason.contains("0x20800513"), "{reason}");
+        assert!(!reason.contains("does not wire"), "{reason}");
 
         let views = status.legacy_temp_sensor_report(ThermalReadOutcome::Refused(
             "macOS RM thermal read: RUSD allocation/mapping failed: 0x00000062 (0x00000062)",
@@ -4651,10 +4659,7 @@ mod tests {
         let reason = &views[0].unavailable["min_c"];
         assert!(reason.contains("0x00000062"), "{reason}");
         assert!(reason.contains("did not complete"), "{reason}");
-        assert!(
-            !reason.contains("does not wire that read in yet"),
-            "{reason}"
-        );
+        assert!(!reason.contains("did not *attempt*"), "{reason}");
         // A refused read also must not turn the live reading into a null: those
         // come from a different read.
         assert_eq!(views[0].current_c, Some(50.0));
