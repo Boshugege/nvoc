@@ -4310,23 +4310,35 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
     NvU32 st3 = nvx_clkoff_get(c, domain_bit, restored);
     int identical = (st3 == 0 && memcmp(restored, snapshot, NVX_CLKOFF_SIZE) == 0);
     nvx_emit(c, "V3.5d", "clk-offset-restore", rst,
-             (rst == 0 && identical) ? NVX_V_OK : NVX_V_REJECTED,
+             identical ? NVX_V_OK : NVX_V_REJECTED,
              "restore SET rc 0x%x (%s); restored block byte-identical to snapshot: "
              "%s (GET 0x%x, %s)", rst, nvx_status_name(rst),
              identical ? "yes" : "NO", st3,
-             identical ? "all 2108 B" : "MISMATCH -- investigate before retrying");
+             identical ? (rst == 0 ? "all 2108 B" : "all 2108 B -- the block needed no restore")
+                       : "MISMATCH -- investigate before retrying");
 
     /* The leftover, named: what the field is believed to hold right now, what it
      * held before the step, and the single inverse step that would undo it. A
-     * reader must not have to derive the corrective command from two log lines. */
+     * reader must not have to derive the corrective command from two log lines.
+     *
+     * What decides this is the block, not the restore's status. A byte-identity
+     * with the snapshot over all 2108 B means there is nothing left to undo,
+     * whether the restore was refused because it never had anything to do (the
+     * SET was refused too) or because it landed. The first half is measured, not
+     * hypothetical: on the unprivileged control run the SET came back 0x1b, the
+     * restore came back 0x1b, the block was byte-identical -- and this alarm
+     * still fired, telling a reader that a block which had never changed "may
+     * still hold" the old value, and the run exited 2, which the runbook turns
+     * into a loud banner. A refused write that never landed is not a leftover. */
     NvU32 seen = (st2 == 0) ? nvx_peek_u32(after, rec + field_off) : 0xffffffffu;
-    int leftover = (rst != 0 || !identical);
+    int leftover = !identical;
     if (leftover) {
         nvx_emit(c, "V3.5f", "clk-offset-restore-alarm", rst, NVX_V_REJECTED,
-                 "RESTORE NOT VERIFIED -- domain bit %u field +%u may still hold "
-                 "0x%08x (%d); pre-step 0x%08x (%d); if the device still holds it, "
-                 "the corrective step is %+d kHz, or re-run the readback first",
-                 domain_bit, field_off, seen, (int)seen, orig, (int)orig,
+                 "RESTORE NOT VERIFIED -- the block read back does NOT match the "
+                 "snapshot (GET 0x%x); domain bit %u field +%u reads 0x%08x (%d), "
+                 "pre-step 0x%08x (%d); the corrective step is %+d kHz, or re-run "
+                 "the readback first",
+                 st3, domain_bit, field_off, seen, (int)seen, orig, (int)orig,
                  st2 == 0 ? (int)orig - (int)seen : -delta_khz);
     }
 
