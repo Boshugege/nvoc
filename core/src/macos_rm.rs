@@ -177,7 +177,7 @@ pub const VF_CURVE_UNREADABLE_REASON: &str = "the VF read half exists and is non
 /// The thermal family *is* read -- the sensor path answered with a temperature
 /// before the wedge -- so what is absent for a limit is a different field, and
 /// that distinction is exactly what the retired blanket sentence lost.
-pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "the thermal family itself is readable (0x20800513 answered a sensor reading before the wedge), and the *configured* limit is a different field that has not been located yet -- but it is located enough to say where it is not: the SDK's thermal control family is exactly two ids (0x20800513 and its non-privileged twin 0x20808513) and its opcodes cover targets, sensors, readings, reading ranges and a sensor target index, so no limit or policy opcode exists in the family we already call successfully; on the client side the configured limit is a *policy* -- a per-policy id, a Celsius value and a remove-TDP-limit flag, with PFF alongside it -- so the shape of the value is known and only the RM control that carries the policy query is still unlocated, and the in-tree NVAPI copy quotes no RM id for it at all (thermal.rs has zero, the whole gpu.rs has ten) (see notes)";
+pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "the thermal family itself is readable (0x20800513 answered a sensor reading before the wedge), and the *configured* limit is a different field that has not been located yet -- but it is located enough to say where it is not: the SDK's thermal control family is exactly two ids (0x20800513 and its non-privileged twin 0x20808513) and its opcodes cover targets, sensors, readings, reading ranges and a sensor target index, so no limit or policy opcode exists in the family we already call successfully; on the client side the configured limit is a *policy* -- a per-policy id, a Celsius value and a remove-TDP-limit flag, with PFF alongside it -- so the shape of the value is known and only the RM control that carries the policy query is still unlocated, and the in-tree NVAPI copy quotes no RM id for it at all (thermal.rs has zero, the whole gpu.rs has ten); what does answer on macOS is the live reading of every sensor this backend knows, through get-legacy-temp-sensor (see notes)";
 
 /// The boost path is a SET, so it sits behind the same gate as the write
 /// families; nothing about it has been read, and nothing is claimed.
@@ -1167,6 +1167,23 @@ pub const POWER_RANGE_UNREAD_REASON: &str = "the RUSD power section publishes th
 /// instantaneous scale and must not be presented as the card's TGP bound.
 pub const POWER_POLICY_SCALE_NOTE: &str = "policy_tgp_watt is the driver's own power_policy_tgp_mw reported under its field name rather than as a bound: measured on the healthy session it read 11.277-11.309 W against a 100.000 W wall and 11.254-11.359 W instantaneous power, so what quantity the policy field carries is 尚未定位 and it is not used as an upper limit here";
 
+/// The ceiling the entries around the wall ask for, and the reason it is a
+/// different field rather than a missing driver capability: the section this
+/// backend reads carries two dwords and neither of them is a bound pair.
+///
+/// The layer this names is the *policy* view (ceiling, D-notifier levels, mode
+/// mask), which is what the other entries report; the answering entry is the
+/// wall itself, named above so a reader is not sent to a command that is also
+/// refused.
+pub const POWER_POLICY_UNREADABLE_REASON: &str = "this backend publishes the requested limit and the enforced wall out of the RUSD power section, and the fields these entries ask for are the policy view around them -- the ceiling, the D-notifier levels and the mode mask; the section's own power record is exactly two dwords (RUSD_POWER_LIMIT_INFO: requestedmW and enforcedmW, cl00de.h:224), so where a bound or a level list would come from is 尚未定位 rather than absent, and in the published tree the only GPU-watt bounds at all are the internal SMBPBI params (limitMin/limitMax/limitDefault, smbpbi.h:1905-1907) while the D-notifier is an arbitration notification rather than a reading; what does answer on macOS is the requested/enforced pair, through get-public-power-limit (see notes)";
+
+/// The rated-TDP entry is refused for the one reason of the eight that is *not*
+/// a missing driver capability: the control is located, published in both
+/// tiers, and was measured answering on this host. What is missing is the
+/// client-side wiring, and saying "the driver does not publish it" would be
+/// wrong in a way a later round would have to retract.
+pub const RATED_TDP_UNWIRED_REASON: &str = "the rated-TDP control is not missing on this driver: its RM pair is located and was measured answering here (NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL 0x2080206e, paramSize 12 in the method table, NV_OK with all three dwords DEFAULT on the healthy captures, and 0x62 under the wedge like every state-checking handler; the SDK publishes the same command in the modern and the legacy tier, 0x2080206e / 0x2080a06e), and the SET twin is never sent; what is missing is the client read -- this entry reports the NVAPI private trio (0xED2BEA09/0x87BD35EF/0xFCBDF642), which this path never issues, so the value is unread here rather than unpublished by the driver; the read is prepared as probe --rated-tdp-read (see notes)";
+
 /// One reading of the public power-limit contract.
 ///
 /// The shape mirrors the entry this backend feeds (min/current/max watts, the
@@ -1273,7 +1290,12 @@ struct SensorReading {
     range_known: u32,
 }
 
-pub const THERMAL_RANGE_UNREAD_REASON: &str = "the live reading comes from the RUSD temperature section, which publishes a reading and no bound; the per-sensor range is readable (measured: 0x20800513 EXECUTE_V2 reported sensor 0 range [0,127], target type 1=GPU, provider 0) but this snapshot does not wire that read in yet, so this end is a missing client read rather than a missing driver value";
+pub const THERMAL_RANGE_UNREAD_REASON: &str = "the live reading comes from the RUSD temperature section, which publishes a reading and no bound; the per-sensor range itself is readable and is read (measured: 0x20800513 EXECUTE_V2 reported sensor 0 range [0,127], target type 1=GPU, provider 0), so this reason means the snapshot did not *attempt* that read -- where it ran and answered, the driver's own range is reported in place of this text, and where it ran and the GSP refused it, the reason says which refusal it was; the end is therefore unknown in this snapshot rather than unpublished by the driver";
+
+/// The simulation switch is the one thermal field this backend cannot even name
+/// a source for: every face it reads is a real sensor, so there is nothing in
+/// the snapshot to report as the simulated value.
+pub const THERMAL_SIM_UNREADABLE_REASON: &str = "the temperature-simulation switch is a simulated input rather than a sensor: every thermal value this backend reports is measured (the public read answered a reading and its range for target type 1=GPU, and the RUSD temperature sections carry the live value), so there is no simulated reading in the snapshot to report; where the switch itself lives is 尚未定位 -- the SDK's thermal opcodes cover targets, sensors, readings, reading ranges and a sensor target index, and none of them is a simulation opcode -- so the entry is refused rather than answered with a fabricated value";
 
 /// The entry's `controller` names which controller acts on the sensor. The
 /// public thermal read reports a provider index (measured: 0) whose relation to
@@ -4480,6 +4502,48 @@ mod tests {
         assert!(views[1].unavailable["current_c"].contains("implausible"));
         assert_eq!(views[0].current_c, Some(50.0));
         assert_eq!(views[3].current_c, Some(45.0));
+    }
+
+    /// Stage 11 item 5 for the read entries that stay refused: a refusal has to
+    /// name the layer it is missing, and the one thing no text may do is blame
+    /// the driver for something the driver answered *in our own captures*.
+    ///
+    /// The layer words below are the checkable half. The wording itself is only
+    /// visible from the entry that prints it, so that half is captured on the
+    /// machine (see cli/src/macos_rm.rs for the same table and the run record
+    /// for the capture).
+    #[test]
+    fn every_refused_read_names_its_missing_layer_and_blames_no_driver() {
+        // The power-policy view: missing is a *policy* source, and the entry
+        // that does answer is named rather than left to the reader.
+        let policy = POWER_POLICY_UNREADABLE_REASON;
+        for word in ["policy", "RUSD", "尚未定位", "get-public-power-limit"] {
+            assert!(policy.contains(word), "{word} missing from: {policy}");
+        }
+        // The mode mask and the D-notifier are policy fields too, so the same
+        // constant has to cover all three entries without pretending one of
+        // them was measured.
+        assert!(!policy.contains("NOT_SUPPORTED"), "{policy}");
+
+        // The rated-TDP entry: the control answered here, so the reason must
+        // carry that measurement and say the gap is on our side.
+        let rated = RATED_TDP_UNWIRED_REASON;
+        for word in ["0x2080206e", "NV_OK", "client read"] {
+            assert!(rated.contains(word), "{word} missing from: {rated}");
+        }
+        assert!(rated.contains("0x2080a06e"), "{rated}");
+
+        // The simulation switch: no source was found, so it must say
+        // 尚未定位 -- not that the driver lacks the feature.
+        let sim = THERMAL_SIM_UNREADABLE_REASON;
+        for word in ["simulated", "尚未定位", "sensor"] {
+            assert!(sim.contains(word), "{word} missing from: {sim}");
+        }
+
+        // The range text no longer claims the read is unwired: the reason is
+        // emitted when no read was attempted, so it has to say that.
+        assert!(THERMAL_RANGE_UNREAD_REASON.contains("did not *attempt*"));
+        assert!(!THERMAL_RANGE_UNREAD_REASON.contains("does not wire"));
     }
 
     /// A thermal read as the device measured it: one GPU sensor, range [0,127],

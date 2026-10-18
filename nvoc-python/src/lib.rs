@@ -2280,6 +2280,31 @@ fn macos_write_gate_here(entry: &str) -> PyResult<()> {
     }
 }
 
+/// The macOS RM *read* faces that have no source in this backend: name the layer
+/// the same way the CLI does, from the same core constant.
+///
+/// The platform sentence these entries used to raise ("NVAPI/NVML are not
+/// available on macOS; ... is read-only and does not implement performance
+/// writes") is true of the host and wrong about the entry: it ends by
+/// explaining a *write* gate, and it hides that the same family's read answers
+/// here. The layer text is the constant the CLI's own arm prints, so the two
+/// surfaces cannot describe the missing layer differently.
+///
+/// The decision is a plain function of `(entry, reason, platform)`, so it is
+/// testable without a Python interpreter: this crate's tests run with
+/// `--no-default-features`, where formatting a `PyErr` would panic.
+fn macos_read_layer_reason(entry: &str, reason: &str) -> Option<String> {
+    cfg!(target_os = "macos").then(|| format!("{entry}: {reason}"))
+}
+
+/// [`macos_read_layer_reason`] as a refusal.
+fn macos_read_layer(entry: &str, reason: &str) -> PyResult<()> {
+    match macos_read_layer_reason(entry, reason) {
+        Some(text) => Err(PyRuntimeError::new_err(text)),
+        None => Ok(()),
+    }
+}
+
 /// The macOS RM offset read: the snapshot's own per-domain record, projected into
 /// the same `mhz` field the NVAPI and NVML branches return, so a caller reads one
 /// field whatever the backend.
@@ -2858,6 +2883,10 @@ fn query_vfp_point_voltage(py: Python<'_>, gpu: &str, point: usize) -> PyResult<
 
 #[pyfunction]
 fn query_tdp_temp_limits(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    macos_read_layer(
+        "query_tdp_temp_limits",
+        nvoc_core::THERMAL_LIMIT_UNREADABLE_REASON,
+    )?;
     let value = with_target(gpu, "nvapi", normalize_tdp_temp_limits)?;
     py_value(py, &value)
 }
@@ -3117,6 +3146,7 @@ fn reset_tgp_watt(py: Python<'_>, gpu: &str, policy_index: Option<usize>) -> PyR
 
 #[pyfunction]
 fn query_dnotifier(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    macos_read_layer("query_dnotifier", nvoc_core::POWER_POLICY_UNREADABLE_REASON)?;
     let value = with_target(gpu, "nvapi", |target| {
         let info = run(target, QueryNvapiDNotifier).map_err(to_py_err)?.output;
         Ok(match info {
@@ -3154,6 +3184,10 @@ fn query_dnotifier(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
 /// slider anchors to. Returns None where the private family is unavailable.
 #[pyfunction]
 fn query_power_ceiling(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    macos_read_layer(
+        "query_power_ceiling",
+        nvoc_core::POWER_POLICY_UNREADABLE_REASON,
+    )?;
     let value = with_target(gpu, "nvapi", |target| {
         let info = run(target, QueryNvapiPowerCeiling)
             .map_err(to_py_err)?
@@ -4251,6 +4285,7 @@ fn set_pmgr_arbiter(py: Python<'_>, gpu: &str, values: Vec<u32>) -> PyResult<Py<
 /// Rated-TDP readback trio (0xED2BEA09/0x87BD35EF/0xFCBDF642).
 #[pyfunction]
 fn get_rated_tdp(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    macos_read_layer("get_rated_tdp", nvoc_core::RATED_TDP_UNWIRED_REASON)?;
     let value = with_target(gpu, "nvapi", |target| {
         let out = run(target, QueryNvapiRatedTdp).map_err(to_py_err)?.output;
         Ok(match out {
@@ -4304,6 +4339,7 @@ fn get_oc_scanner_incomplete(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
 /// Read the temperature-simulation state (Secured-Overrides gated).
 #[pyfunction]
 fn get_temp_sim(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    macos_read_layer("get_temp_sim", nvoc_core::THERMAL_SIM_UNREADABLE_REASON)?;
     let value = with_target(gpu, "nvapi", |target| {
         let out = run(target, QueryNvapiThermalSim).map_err(to_py_err)?.output;
         Ok(match out {
@@ -5608,6 +5644,7 @@ fn set_fan_rpm(
 /// fans carry no NVAPI curve surface.
 #[pyfunction]
 fn query_fan_curve(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    macos_read_layer("query_fan_curve", nvoc_core::FAN_CONTROL_UNREADABLE_REASON)?;
     let value = py.detach(|| {
         with_target(gpu, "nvapi", |target| {
             let curves = run(target, GetFanCurves).map_err(to_py_err)?.output;
@@ -6463,6 +6500,58 @@ mod tests {
                 "off macOS the backend's own sentence is still the right one"
             );
         }
+    }
+
+    /// The Python half of Stage 11 item 5 for the three families' refused reads:
+    /// the same layer text the CLI arm prints, from the same core constant, and
+    /// never the platform sentence that ends by explaining a write gate.
+    #[test]
+    fn macos_read_layers_are_named_from_the_same_constants_as_the_cli() {
+        // The pairs the entries carry. A table rather than spot checks, because
+        // an entry left out of it would keep the platform sentence and no other
+        // assertion here would notice.
+        let pairs: [(&str, &str); 6] = [
+            ("query_fan_curve", nvoc_core::FAN_CONTROL_UNREADABLE_REASON),
+            (
+                "query_power_ceiling",
+                nvoc_core::POWER_POLICY_UNREADABLE_REASON,
+            ),
+            ("query_dnotifier", nvoc_core::POWER_POLICY_UNREADABLE_REASON),
+            ("get_rated_tdp", nvoc_core::RATED_TDP_UNWIRED_REASON),
+            ("get_temp_sim", nvoc_core::THERMAL_SIM_UNREADABLE_REASON),
+            (
+                "query_tdp_temp_limits",
+                nvoc_core::THERMAL_LIMIT_UNREADABLE_REASON,
+            ),
+        ];
+        let on_macos = cfg!(target_os = "macos");
+        for (entry, constant) in pairs {
+            match macos_read_layer_reason(entry, constant) {
+                Some(text) => {
+                    assert!(on_macos, "{entry} is refused off macOS: {text}");
+                    assert!(text.starts_with(entry), "{text}");
+                    assert!(text.contains(constant), "{text}");
+                    assert!(
+                        !text.contains("NVAPI/NVML"),
+                        "the layer is what is missing, not the host runtime: {text}"
+                    );
+                    assert!(
+                        !text.contains("does not implement performance writes"),
+                        "a read is not refused by a write gate: {text}"
+                    );
+                }
+                None => assert!(
+                    !on_macos,
+                    "{entry} must name its layer on macOS, not fall back to the platform sentence"
+                ),
+            }
+        }
+        // The power-policy text is shared by three entries and must not claim a
+        // driver refusal: nothing was issued for them to be refused.
+        assert!(
+            nvoc_core::POWER_POLICY_UNREADABLE_REASON.contains("尚未定位"),
+            "the policy view is unlocated, not refused"
+        );
     }
 
     /// The macOS settings projection must report what it reads, and must name

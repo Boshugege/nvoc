@@ -5,6 +5,38 @@ pub(super) fn selected(backend: BackendChoice) -> bool {
         || (backend == BackendChoice::Auto && cfg!(target_os = "macos"))
 }
 
+/// The fan/power/thermal entries whose *read* this backend cannot answer, each
+/// paired with the layer it is missing.
+///
+/// Stage 11 item 5 asks the entry and the backend to state the same thing.
+/// These eight used to state the blanket sentence, which ends by explaining a
+/// *write* gate: a read refused with a write-gate explanation describes the
+/// wrong layer, and on the one family that is otherwise readable it hides that
+/// the read answers. Each arm therefore carries core's constant for the layer
+/// that is actually missing -- one reason per missing layer, shared with the
+/// Python surface -- while the wall for the families that really have no read
+/// keeps the terse list.
+fn read_layer_refusal(command: Command) -> Option<(&'static str, &'static str)> {
+    let reason = match command {
+        // The fan-control family: no published command exists at all.
+        Command::GetFanCurve | Command::GetFanPolicyInfo => {
+            nvoc_core::FAN_CONTROL_UNREADABLE_REASON
+        }
+        // The policy view around the wall, not the wall itself.
+        Command::GetPowerCeiling | Command::GetPowerMode | Command::GetDNotifier => {
+            nvoc_core::POWER_POLICY_UNREADABLE_REASON
+        }
+        // Located, published, measured answering here -- ours to wire.
+        Command::GetRatedTdp => nvoc_core::RATED_TDP_UNWIRED_REASON,
+        // A thermal field that is not a sensor: the reading answers, the
+        // configured limit is a different field with its own reason.
+        Command::GetPublicTempLimit => nvoc_core::THERMAL_LIMIT_UNREADABLE_REASON,
+        Command::GetTempSim => nvoc_core::THERMAL_SIM_UNREADABLE_REASON,
+        _ => return None,
+    };
+    Some((command.name(), reason))
+}
+
 pub(super) fn validate(command: Command) -> CliResult<()> {
     if matches!(
         command,
@@ -57,6 +89,13 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
              reports the current P-state and get-pstate-global-freq-offset reports the \
              per-domain offsets instead.",
             nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON
+        )))
+    } else if let Some((entry, reason)) = read_layer_refusal(command) {
+        // The three families' refused reads: the same prefix shape as the two
+        // arms above, so the layer text is the only thing that differs between
+        // an entry this backend answers and one it cannot.
+        Err(CliError::new(format!(
+            "{entry} is unavailable on macOS RM: {reason}"
         )))
     } else {
         Err(CliError::new(format!(
@@ -555,10 +594,89 @@ mod tests {
                 .starts_with(nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON),
             "{pstate}"
         );
-        // The entries that ask for a *reading* this backend really has no source
-        // for keep the list-shaped refusal.
-        let list_shaped = validate(Command::GetTempSim).unwrap_err().to_string();
+        // An entry with no read source *in* this backend still keeps the
+        // list-shaped refusal: `get-temp-sim` used to be the example here, and
+        // no longer is -- it now names the layer it is missing (see
+        // `every_refused_read_of_the_three_families_names_its_layer`), because
+        // the list ends by explaining a write gate, which is the wrong layer
+        // for a read.
+        let list_shaped = validate(Command::SetPowerLimit).unwrap_err().to_string();
         assert!(list_shaped.contains("supported commands:"), "{list_shaped}");
+    }
+
+    /// Stage 11 item 5, third pass: the eight read entries of the three families
+    /// that stay refused now each name the layer they are missing, from core's
+    /// one-reason-per-layer constants, and none of them is refused with the
+    /// write-gate sentence.
+    ///
+    /// The pairing is asserted mechanically rather than by reading the text: a
+    /// table that omits a command is invisible to every other check, so every
+    /// entry in the family lists is walked.
+    #[test]
+    fn every_refused_read_of_the_three_families_names_its_layer() {
+        let expected: [(&str, Command, &str); 8] = [
+            ("get-fan-curve", Command::GetFanCurve, "33-line"),
+            (
+                "get-legacy-fan-policy",
+                Command::GetFanPolicyInfo,
+                "33-line",
+            ),
+            (
+                "get-power-ceiling",
+                Command::GetPowerCeiling,
+                "get-public-power-limit",
+            ),
+            (
+                "get-power-mode",
+                Command::GetPowerMode,
+                "get-public-power-limit",
+            ),
+            (
+                "get-dnotifier",
+                Command::GetDNotifier,
+                "get-public-power-limit",
+            ),
+            ("get-rated-tdp", Command::GetRatedTdp, "NV_OK"),
+            (
+                "get-public-temp-limit",
+                Command::GetPublicTempLimit,
+                "readable",
+            ),
+            ("get-temp-sim", Command::GetTempSim, "尚未定位"),
+        ];
+        for (name, command, layer_word) in expected {
+            assert_eq!(command.name(), name, "the table and the CLI disagree");
+            let error = validate(command).unwrap_err().to_string();
+            assert!(error.contains("unavailable on macOS RM"), "{error}");
+            assert!(
+                error.contains(layer_word),
+                "{name} does not name its layer ({layer_word}): {error}"
+            );
+            // The negative that makes this test worth having: the write-gate
+            // sentence must not be what a *read* is told.
+            assert!(
+                !error.contains("Performance writes stay gated"),
+                "{name} still gets the write-gate sentence: {error}"
+            );
+            // And the refusal must not be the bare list either: every one of
+            // these families has a read that answers, so the list alone would
+            // read as "no data of this kind on this path".
+            assert!(!error.contains("supported commands:"), "{name}: {error}");
+        }
+        // The two families whose read really does answer name that entry, so a
+        // user is not sent to a command that is refused as well.
+        assert!(
+            validate(Command::GetPowerCeiling)
+                .unwrap_err()
+                .to_string()
+                .contains("get-public-power-limit")
+        );
+        assert!(
+            validate(Command::GetPublicTempLimit)
+                .unwrap_err()
+                .to_string()
+                .contains("get-legacy-temp-sensor")
+        );
     }
 
     #[test]
