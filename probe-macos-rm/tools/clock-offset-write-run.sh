@@ -43,7 +43,8 @@
 #   <delta> kHz, one minimal step, capped at +-1000 by the probe
 #
 # Refuses to write unless: exactly one candidate is given (this is not a sweep
-# tool), the process is root (see below), the driver's own anchor read answers
+# tool), the probe can run as root (the operator's own root, or a passwordless
+# rule for that one binary -- see below), the driver's own anchor read answers
 # NV_OK (never write into a wedge, where every reply collapses to 0x62 and a
 # rejection would be unreadable), and the full profile builds (the idle build
 # cannot send a stage-3 write at all).
@@ -96,18 +97,37 @@ ogkm=${OGKM:-$HOME/Desktop/macOS-nvoc-develop/reference/open-gpu-kernel-modules-
 
 # 0. the privilege precondition, checked before anything else so that a refusal
 #    here is never mistaken for the driver refusing the id.
+#
+#    The probe, not the script, needs the privilege: the bundle belongs to the
+#    operator, so a per-binary passwordless rule is enough and `sudo -n true` is
+#    the wrong question -- it asks about /usr/bin/true and fails under exactly the
+#    rule that makes this run possible.  `sudo -n -l <cmd>` asks about the command
+#    that matters and executes nothing.
+can_sudo_n() {
+    sudo -n -l "$1" >/dev/null 2>&1
+}
+sudo_cmd=
 if [ "$(id -u)" -ne 0 ]; then
-    if sudo -n true 2>/dev/null; then
-        echo "not root; re-executing under sudo -n (passwordless) -- the write" >&2
-        echo "half is privileged, so an unprivileged SET would return 0x1b" >&2
-        exec sudo -n OGKM="$ogkm" OUT_ROOT="$out_root" "$0" "$@"
+    if can_sudo_n "$root/probe-macos-rm"; then
+        sudo_cmd="sudo -n"
+        echo "not root; the probe runs under sudo -n (the bundle stays the" >&2
+        echo "operator's, not root's). The write half of the private table is" >&2
+        echo "privileged and an unprivileged SET would come back 0x1b" >&2
+    else
+        echo "not root, and sudo will not run the probe without a password --" >&2
+        echo "refusing to attempt the write." >&2
+        echo "  The host forwarder rejects (cmd & 0xC000) == 0xC000 below root," >&2
+        echo "  and 0x2080d01c carries those bits: an unprivileged SET comes back" >&2
+        echo "  0x1b before the GSP sees it, which would look like the driver" >&2
+        echo "  refusing the field instead of the process." >&2
+        echo "  Either rerun as: sudo OGKM=$ogkm OUT_ROOT=$out_root $0 $cand" >&2
+        echo "  or authorise just this binary, once:" >&2
+        echo "    sudo tee /etc/sudoers.d/nvoc-probe >/dev/null <<EOF" >&2
+        echo "    mac ALL=(root) NOPASSWD: $root/probe-macos-rm, $root/probe-macos-rm-idle" >&2
+        echo "    EOF" >&2
+        echo "    sudo chmod 440 /etc/sudoers.d/nvoc-probe && sudo visudo -c" >&2
+        exit 4
     fi
-    echo "not root, and sudo needs a password -- refusing to attempt the write." >&2
-    echo "  The host forwarder rejects (cmd & 0xC000) == 0xC000 below root, and" >&2
-    echo "  0x2080d01c carries those bits: an unprivileged SET comes back 0x1b" >&2
-    echo "  before the GSP sees it, which would look like the driver refusing." >&2
-    echo "  Rerun as: sudo OUT_ROOT=$out_root $0 $cand" >&2
-    exit 4
 fi
 
 # 1. the write vehicle: the full profile, never the idle one.
@@ -169,7 +189,7 @@ finish() {
 
 # 2. preflight: the driver's own state check, before anything is written.
 echo "== anchor (decides whether the GSP is able to answer at all) =="
-"$root/probe-macos-rm" --anchor-read > "$bundle/anchor.txt" 2>&1 && arc=0 || arc=$?
+$sudo_cmd "$root/probe-macos-rm" --anchor-read > "$bundle/anchor.txt" 2>&1 && arc=0 || arc=$?
 echo "  rc=$arc -> $bundle/anchor.txt"
 if grep -q "NV_ERR_RESET_REQUIRED" "$bundle/anchor.txt" || \
    ! grep -q "NV_OK" "$bundle/anchor.txt"; then
@@ -183,7 +203,7 @@ fi
 
 # 3. the single gated write, with its own read-back and restore.
 echo "== write: $cand (one domain, one field, one step) =="
-"$root/probe-macos-rm" --write --clk-offset-set "$cand" \
+$sudo_cmd "$root/probe-macos-rm" --write --clk-offset-set "$cand" \
     > "$bundle/write.txt" 2>&1 && wrc=0 || wrc=$?
 echo "  rc=$wrc -> $bundle/write.txt"
 
