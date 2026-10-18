@@ -104,11 +104,11 @@
   CPU 回归 **Ran 12 tests OK**（新增 `--perf-read` 显式 opt-in 用例）；两次运行结果逐字一致）、
   `stage12-recheck-20261017T073000Z`（**读面普查后复核**：`6226ddf` 上 **19 项 rc=0 首跑全绿**——fmt/check/clippy-workspace、core 74 / cli 80 / srv 52 / stressor 14+17 / optimizer 63 / pynvoc 12 passed、真机只读硬件 6 passed、native-lint/rusd-abi/rusd-cpu/probe-lint/probe-tests（**Ran 12**）/metal-verify/build-cli、引用 bundle 存在性 **26/26**）。
 
-## 一、CLI 命令表（101 条，来源：`cli/src/lib.rs` 的 `CommandSpec`）
+## 一、CLI 命令表（102 条，来源：`cli/src/lib.rs` 的 `CommandSpec`）
 
 表中"原 NVOC 行为"取自命令自身的说明（`nvoc-cli <命令> --help` 是完整参数来源）。
 
-### GPU 与显示信息（`Info`，13 项）
+### GPU 与显示信息（`Info`，14 项）
 
 | 命令 | 原 NVOC 行为（摘要） | macOS RM 状态 |
 | --- | --- | --- |
@@ -122,6 +122,7 @@
 | `get-throttle-reasons` | Read throttle reasons (NVML vocabulary; macOS RM-backed) | **已实现且实测**：RUSD reason mask → 9 条 NVML 原因/顺序 + `active` 标志，`violation=null`（RM 无 per-policy 计数）；证据 `stage8-throttle-reasons-20261017T064017Z`。**2026-10-17 改为共享实现**：core 的 `QueryThrottleReasons` 在 macOS 从 RM 快照解码，pynvoc `query_throttle_reasons` 同源（`stage11-throttle-shared-20261017T065005Z`） |
 | `get-uuid` | Read GPU UUID | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-vbios` | Read and decode a VBIOS image. -i/--input <file> parses a local ROM dump OFFLINE (no GPU/NvAPI needed — works on Linux); without it the live image… | 部分：`-i/--input` 离线解析已实现；实时读取是 NVAPI/Windows 路径，macOS 未实现 |
+| `list` | List all commands grouped by family (optionally filtered to one group) | **不适用（不依赖后端）**：元命令——不读设备、不走后端。`validate_invocation`（`cli/src/lib.rs:1704`）对它整段跳过后端检查，`run_invocation`（`:2315`）在选目标/开设备之前直接渲染命令表，所以在 macOS 上原样可用。本表此前漏了这一行，节标题因此比代码少一条（见 §一百一） |
 | `restart-display-driver` | Restart the display driver (0xB4B26B65); legacy apply-OC trigger | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-ecc-configuration` | Set NVAPI ECC memory configuration (NvAPI_GPU_SetECCConfiguration 0x1CF639D9): persists in non-volatile memory — default defers to the next reboot,… | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-edid` | Set display EDID through NVAPI | 未实现：macOS RM 在访问驱动前拒绝 |
@@ -280,7 +281,7 @@
 
 | 阶段 | 目标 | 现状（2026-10-17） | 下一步 |
 | --- | --- | --- | --- |
-| 0 基线/功能表 | 起点、边界、待办、证据索引 | 完成：本文件 + SSH/硬件/分支核对 + 101 条命令表 | 随每阶段更新并复核 |
+| 0 基线/功能表 | 起点、边界、待办、证据索引 | 完成：本文件 + SSH/硬件/分支核对 + 102 条命令表 | 随每阶段更新并复核 |
 | 1 正确性与资源生命周期 | 修 ABI/释放顺序/旧数据/重连/输出/停止 | **完成**：`78d299d`、`a687453`、`8fb1aeb`；实机 5 项硬件测试、ABI 指纹、broken-pipe、SIGINT 全通过 | 保持回归 |
 | 2 基础信息与遥测 | 设备/信息/状态/连续监控 + 公共字段 | **完成**：样本 ABI v3（14 节/41 槽）落地——限频原因、逐风扇、有效/目标/视频/SM 频率、显存用量、逐引擎利用率、PCIe 代际、多温度、功耗族全部实测；`clkThrottleInfo`/`temps`/`avgPowerUsage`/`tgpmW`/`fanCoolerStatus.rpmCurr[16]`/`procUtil`/`pciBusData` 读取生效，`POLL_MEMORY` 经实测确认 610.57.04 恒返回 `RUSD_TIMESTAMP_INVALID`（`memEcc`/`memRowRemap` 不携带）、SM 域 Turing 为 0/0 → `unavailable`；`get-status` 人类/JSON/JSONL（schema `nvoc/macos-rm-sample/3`）一致；**1 Hz × 10 分钟长跑**（`stage2-longrun-…`）+ **全量验收**（`stage2-telemetry-20261017T034627Z`，15 项 rc=0）+ Metal 负载响应（gfx 1950 MHz / 54.9 C / 12.7 W / util 91% / gr 91.5% / fan 4243 rpm）；pynvoc `backends="macos-rm"` 的 discover/info/status 已分发并归一化。**追加（公开温度读面）**：`NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2`(0x20800513，ctrl2080thermal.h，A-tree) 只读批实测可用——1 target(GPU)/1 sensor、读数 45–47 °C、range [0,127]，与 RUSD `temperature_c` 一致（`stage-thermal-read-20261017T061320Z`，新增只读 flag `--thermal-read`） | 电压读取（`get-status` 无 voltage 字段）留给阶段 3/7 的当前设置读取 |
 | 3 当前设置/范围/恢复基础 | `get-settings`、范围/默认值/粒度、快照/回读/恢复 | **只读部分完成**：`get-settings --macos-rm` 输出驱动可见配置 + 能力位 + 缺口原因（core/CLI/pynvoc 三处一致）；写入族全部保持拒绝。**此前"驱动拒绝"是误判——根因是我们传错参数尺寸**（修正见 `a87876a`）：`0x1f` = `NV_ERR_INVALID_ARGUMENT`（尺寸/参数不符），对照缺方法 `0x1b`、`BUS_GET_PCI_INFO` 传错尺寸也返回 `0x1f`。据此复核：`PERF_GET_LEVEL_INFO_V2`(0x2080200b) 容量 0 → `NV_OK` 但 0 条、容量 ≥1 → `0x1f`，**驱动不提供频率域表**；Tier-B GET `rails-get-info`(0x2080B201) **2444 B**、`rails-get-status`(0x2080B202) **3232 B**、`vfpoints-get`(0x208090A2) **524 B** 在正确尺寸下被派发且返回了 buffer（**接受为间接证据**：该路径只打 banner＋dump、不打 status，见 `stage3-paramsizes-20261017T044129Z/tierb-size-resolution.txt:21`；`outputs/` 内该 id 的 status 行数为 0），但 payload 只有 16/0/1 个非零字且 `rails-get-status` 复读不一致 → **接受 ≠ 可读，布局未解码**；`edpp-limit-info`/`pmumon-clk-samples` 返回 `0x56` | 公开 SDK（610.57.04 `ctrl2080perf.h` 全量 `PERF_*`）**无任何时钟/电压偏移或 VF 编辑命令**；唯一的公开读写对是 RATED_TDP 仲裁（读 0x2080206e 实测可用，写 0x2080206f 见阶段 5）；温度**读数范围**可由 `THERMAL_SYSTEM_EXECUTE_V2` 的 SENSOR_READING_RANGE opcode 公开读到（本卡 [0,127]）。偏移/VF 需非公开接口或另一条读通道。在此之前不声明范围/恢复 **本轮追加七（2026-10-17，静态）**：G1「当前偏移」的缺口的**精确定义**——`0x2080901b@2108` 的容器/掩码/几何全部钉死，handler 也**确实**每条被选中记录写 12 个 value dword，但 stock 下它们全是 0，因此**任何 stock 读都不能命名 offset 字段**；记录图与目录见 `gsp-method-table-and-legacy-forwarding.md` §14（详见阶段 4 行追加七）。**仍未发 SET、未提权、未重启**。 |

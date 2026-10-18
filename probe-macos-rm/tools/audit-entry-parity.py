@@ -99,6 +99,114 @@ def table_rows(matrix: str) -> list[tuple[int, str, str]]:
     return rows
 
 
+# The §一 command table's own structure: a group heading states how many commands
+# it lists (`### …（`Group`，N 项）`), and the rows under it are that group's
+# commands. The table names `cli/src/lib.rs`'s `CommandSpec` as its source, so
+# every one of those headings is a claim about the code.
+SECTION_RE = re.compile(r"^## 一、")
+HEADLINE_RE = re.compile(r"^## 一、CLI 命令表（(\d+) 条", re.M)
+HEADING_RE = re.compile(r"^### .*（`([A-Za-z]+)`，(\d+) 项）")
+GROUP_SPEC_RE = re.compile(
+    r'CommandSpec::new\(\s*"([a-z0-9][a-z0-9-]*)"\s*,\s*Group::([A-Za-z]+)'
+)
+
+
+def command_table(matrix: str) -> tuple[dict[str, list[str]], dict[str, int]]:
+    """The §一 table as (group -> commands, group -> count the heading claims)."""
+    listed: dict[str, list[str]] = {}
+    claimed: dict[str, int] = {}
+    current: str | None = None
+    inside = False
+    for line in matrix.splitlines():
+        if not inside:
+            inside = SECTION_RE.match(line) is not None
+            continue
+        if line.startswith("## "):
+            break
+        heading = HEADING_RE.match(line)
+        if heading:
+            current = heading.group(1)
+            claimed[current] = int(heading.group(2))
+            listed.setdefault(current, [])
+            continue
+        row = ROW_RE.match(line)
+        if row is not None and current is not None:
+            listed[current].append(row.group(1))
+    return listed, claimed
+
+
+def table_completeness(cli_lib: str, matrix: str) -> list[tuple[bool, str]]:
+    """Every command in the code's spec table must have a row, and a group heading
+    must count the rows under it.
+
+    This is the check nothing else here can make, because every other check walks
+    the table's rows: a command the table simply omits is invisible to all of
+    them, and a heading that undercounts is self-consistently wrong. `list` was
+    exactly that -- a real command, in the code, absent from the table, with the
+    heading claiming 101 for a table that described 102.
+    """
+    specs: dict[str, list[str]] = {}
+    for command, group in GROUP_SPEC_RE.findall(cli_lib):
+        specs.setdefault(group, []).append(command)
+    if not specs:
+        return [
+            (
+                False,
+                "the CLI's CommandSpec table has no parseable (command, group) pair",
+            )
+        ]
+    listed, claimed = command_table(matrix)
+    if not listed:
+        return [(False, "the §一 command table has no group heading to read")]
+    out: list[tuple[bool, str]] = []
+    for group in sorted(set(specs) | set(listed)):
+        in_code = sorted(set(specs.get(group, [])))
+        in_table = listed.get(group, [])
+        missing = [command for command in in_code if command not in in_table]
+        extra = sorted({command for command in in_table if command not in in_code})
+        if missing:
+            out.append((
+                False,
+                f"§一 {group}: the code declares {len(in_code)} command(s); the table omits "
+                + ", ".join(missing),
+            ))
+        if extra:
+            out.append((
+                False,
+                f"§一 {group}: the table lists "
+                + ", ".join(extra)
+                + " which the code's CommandSpec table does not declare",
+            ))
+        if group in claimed and claimed[group] != len(in_table):
+            out.append((
+                False,
+                f"§一 {group}: the heading claims {claimed[group]} 项 but "
+                f"{len(in_table)} row(s) follow it",
+            ))
+    if not out:
+        out.append((
+            True,
+            f"the §一 table matches the code: {sum(len(v) for v in specs.values())} spec(s) "
+            f"over {len(specs)} group(s), and every heading counts its rows",
+        ))
+    # The section's own headline is the same claim in one number ("101 条"), and
+    # it was the number that was wrong about a code table of 102.
+    headline = HEADLINE_RE.search(matrix)
+    if headline is None:
+        out.append((False, "the §一 heading states no command count to check"))
+    else:
+        stated = int(headline.group(1))
+        declared = sum(len(v) for v in specs.values())
+        rows = sum(len(v) for v in listed.values())
+        if stated != declared or stated != rows:
+            out.append((
+                False,
+                f"§一 states {stated} 条 but the code declares {declared} and the table "
+                f"has {rows} row(s)",
+            ))
+    return out
+
+
 def verdicts(cli_src: str, cli_lib: str, matrix: str) -> list[tuple[bool, str]]:
     """Every check, as (ok, sentence). Pure: the caller does the printing."""
     out: list[tuple[bool, str]] = []
@@ -146,6 +254,7 @@ def verdicts(cli_src: str, cli_lib: str, matrix: str) -> list[tuple[bool, str]]:
             f"{len(allowed)} allowed command(s); none of them is behind the blanket refusal "
             f"({len(rows)} table rows read)",
         ))
+    out.extend(table_completeness(cli_lib, matrix))
     # Informational, never gating: a command the entry allows and the table has
     # no row for is a documentation gap, not a contradiction.
     absent = sorted(allowed - {command for _, command, _ in rows})
@@ -196,21 +305,74 @@ def selftest() -> int:
         (Command::GetPstateGlobalFreqOffset, CommandSpec::new(
             "get-pstate-global-freq-offset", Group::Clock, "Read",
         )),"""
-    clean = "| `get-info` | Read identity | **已实现且实测（读面）**：入口允许 |\n"
+    # The table has to be a consistent table for the completeness check to pass:
+    # a §一 section, a heading per group that counts its rows, and the rows
+    # themselves. That is the shape the real file has, and the shape `list` was
+    # missing from.
+    # The real file has sections before §一, so the fixture does too: a check that
+    # only worked at the start of the file would pass here and fail there.
+    head = (
+        "# Feature matrix\n\n## 状态图例\n\nlegend\n\n"
+        "## 一、CLI 命令表（2 条，来源：`cli/src/lib.rs` 的 `CommandSpec`）\n\n"
+    )
+    info_row = "| `get-info` | Read identity | **已实现且实测（读面）**：入口允许 |\n"
+    offset_row = "| `get-pstate-global-freq-offset` | Read clock offset in MHz | 读面入口允许 |\n"
+    clean = (
+        head
+        + "### GPU 与显示信息（`Info`，1 项）\n\n"
+        + "| 命令 | 原 NVOC 行为（摘要） | macOS RM 状态 |\n| --- | --- | --- |\n"
+        + info_row
+        + "\n### 时钟、偏移与 P-State 锁（`Clock`，1 项）\n\n"
+        + "| 命令 | 原 NVOC 行为（摘要） | macOS RM 状态 |\n| --- | --- | --- |\n"
+        + offset_row
+    )
     dirty_row = (
         f"| `get-pstate-global-freq-offset` | Read clock offset in MHz | {BLANKET} |\n"
     )
+    # Same table, with the offset row's status swapped for the blanket refusal.
+    dirty = clean.replace(offset_row, dirty_row)
+    assert dirty_row in dirty and dirty != clean
 
-    ok, why = verdicts(cli, lib, clean)[-1]
-    assert ok, why
-    assert "get-pstate-global-freq-offset" in why, why
+    clean_checks = verdicts(cli, lib, clean)
+    assert all(ok for ok, _ in clean_checks), [
+        why for ok, why in clean_checks if not ok
+    ]
 
-    checks = verdicts(cli, lib, clean + dirty_row)
+    checks = verdicts(cli, lib, dirty)
     bad = [why for ok, why in checks if not ok]
     assert any("carries the blanket refusal" in why for why in bad), bad
     # The motivating defect, verbatim: the row above is exactly what the matrix
-    # said before it was fixed, and the tool must fail on it.
-    assert "matrix:2" in " ".join(bad), bad
+    # said before it was fixed, and the tool must fail on it. Its line number is
+    # computed, not hard-coded, so the fixture can grow.
+    assert f"matrix:{dirty.splitlines().index(dirty_row.strip()) + 1}" in " ".join(
+        bad
+    ), bad
+
+    # A command the code declares and the table omits is invisible to every
+    # other check here: only the completeness check can see it. This is `list`
+    # to the letter -- present in the code, absent from the table. The
+    # informational check says the same thing without failing, which is what it
+    # is for; the completeness check is what makes it an error.
+    partial = clean.split("### 时钟、偏移与 P-State 锁")[0]
+    partial_checks = verdicts(cli, lib, partial)
+    assert any(
+        "the table omits get-pstate-global-freq-offset" in why
+        for ok, why in partial_checks
+        if not ok
+    ), [why for ok, why in partial_checks if not ok]
+    assert any(
+        ok and "informational" in why and "get-pstate-global-freq-offset" in why
+        for ok, why in partial_checks
+    ), partial_checks
+
+    # A heading that claims more than the rows under it is the same defect stated
+    # in numbers, so it must fail even when every name is present.
+    undercounted = clean.replace("（`Info`，1 项）", "（`Info`，2 项）")
+    assert any(
+        "the heading claims 2 项" in why
+        for ok, why in verdicts(cli, lib, undercounted)
+        if not ok
+    ), verdicts(cli, lib, undercounted)
 
     # A message that omits an allowed command contradicts the behaviour.
     thin = cli.replace(
@@ -269,7 +431,8 @@ def selftest() -> int:
 
     print(
         "selftest ok: allow-list, message agreement, blanket-refusal rows, "
-        "mirror rows, empty inputs"
+        "mirror rows, table completeness (omitted command, wrong heading count, "
+        "wrong headline count), empty inputs"
     )
     return 0
 
