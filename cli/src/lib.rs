@@ -5,7 +5,7 @@ use clap::{
 use nvoc_core::{
     BackendSet, ClearEdid, ClkVfDomainHint, ClockDomain, ConvertEnum, CoolerPolicy, CoolerTarget,
     DisableNvapiThermalSim, FanCurvePointReadout, GetFanCurves, GetPowerMode, GpuSelector,
-    GpuTarget, Kilohertz, KilohertzDelta, MicrovoltsDelta, NvapiPerfFreqCap, OemOcScanner,
+    GpuId, GpuTarget, Kilohertz, KilohertzDelta, MicrovoltsDelta, NvapiPerfFreqCap, OemOcScanner,
     OemOcScannerAction, PState, Percentage, PmgrArbiterProbe, QueryApiRestriction, QueryAutoBoost,
     QueryClockOffset, QueryDisplays, QueryDomainVfpPoints, QueryEdid, QueryFanInfo, QueryGpuInfo,
     QueryGpuSettings, QueryGpuStatus, QueryLegacyCoreOvervoltRanges, QueryNvapiBarInfo,
@@ -8477,6 +8477,32 @@ mod tests {
         );
         assert_eq!(nvoc_core::parse_offset_delta("+8mhz"), Ok(8_000));
         assert!(nvoc_core::parse_offset_delta("fast").is_err());
+    }
+
+    /// The macOS RM path answers `--plan-delta`; the NVAPI/NVML path cannot,
+    /// and the refusal has to name an entry that can. This host cannot show that
+    /// message at runtime -- `--nvapi` on macOS fails in `NvAPI_EnumPhysicalGPUs`
+    /// before the offset read is reached -- so the test calls the same function
+    /// that builds it, which also renders the string continuation.
+    #[test]
+    fn the_nvapi_offset_read_names_the_entry_that_can_evaluate_a_step() {
+        let invocation = parse_args([
+            "get-pstate-global-freq-offset",
+            "--nvapi",
+            "--plan-delta",
+            "+8mhz",
+        ])
+        .expect("the flag parses against the NVAPI backend");
+        let target = GpuTarget::without_backends(GpuId(0x100), 0);
+        let err = get_clock_offset(&target, BackendAdapter::Nvapi, &invocation)
+            .err()
+            .expect("the NVAPI read has no driver window, so the flag is refused")
+            .to_string();
+        assert!(
+            err.contains("`nvoc-auto-optimizer macos-eval --plan <target>=<delta>`"),
+            "{err}"
+        );
+        assert!(err.contains("(`--macos-rm`)"), "{err}");
     }
 
     /// `get-vbios -i <file>` 离线模式：不触碰 GPU 发现/NvAPI，直接产出与
