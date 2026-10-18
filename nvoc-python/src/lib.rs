@@ -6349,11 +6349,13 @@ mod tests {
         );
 
         // The py-facing wrapper keeps both outcomes, and is built without an
-        // interpreter ever being asked for a message; `ok()` drops the `PyErr`
-        // without formatting it, which is what lets the shape be asserted here.
-        let value = normalize_query_clock_offset_macos(&settings, ClockDomain::Memory)
-            .ok()
-            .expect("the corroborated domain answers");
+        // interpreter ever being asked for a message: a `PyErr` is never
+        // formatted here, not even on the failure path (the literals below say
+        // why instead), because `PyErr`'s `Display` needs the interpreter.
+        let value = match normalize_query_clock_offset_macos(&settings, ClockDomain::Memory) {
+            Ok(value) => value,
+            Err(_) => panic!("the corroborated domain must answer"),
+        };
         assert_eq!(value["mhz"].as_f64(), Some(-0.126));
         assert_eq!(
             value.as_object().expect("the value is an object").len(),
