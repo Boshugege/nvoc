@@ -4,7 +4,7 @@ use clap::{
 };
 use nvoc_core::{
     BackendSet, ClearEdid, ClkVfDomainHint, ClockDomain, ConvertEnum, CoolerPolicy, CoolerTarget,
-    DisableNvapiThermalSim, FanCurvePointReadout, GetFanCurves, GetPowerMode, GpuId, GpuSelector,
+    DisableNvapiThermalSim, FanCurvePointReadout, GetFanCurves, GetPowerMode, GpuSelector,
     GpuTarget, Kilohertz, KilohertzDelta, MicrovoltsDelta, NvapiPerfFreqCap, OemOcScanner,
     OemOcScannerAction, PState, Percentage, PmgrArbiterProbe, QueryApiRestriction, QueryAutoBoost,
     QueryClockOffset, QueryDisplays, QueryDomainVfpPoints, QueryEdid, QueryFanInfo, QueryGpuInfo,
@@ -8493,10 +8493,11 @@ mod tests {
             "+8mhz",
         ])
         .expect("the flag parses against the NVAPI backend");
-        let target = GpuTarget::without_backends(GpuId(0x100), 0);
+        // The qualified path keeps `GpuId` out of the library import list, where
+        // it would be unused in a build without tests.
+        let target = GpuTarget::without_backends(nvoc_core::GpuId(0x100), 0);
         let err = get_clock_offset(&target, BackendAdapter::Nvapi, &invocation)
-            .err()
-            .expect("the NVAPI read has no driver window, so the flag is refused")
+            .expect_err("the NVAPI read has no driver window, so the flag is refused")
             .to_string();
         assert!(
             err.contains("`nvoc-auto-optimizer macos-eval --plan <target>=<delta>`"),
