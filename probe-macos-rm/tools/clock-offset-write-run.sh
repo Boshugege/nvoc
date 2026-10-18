@@ -249,19 +249,25 @@ if [ "$restore_bad" = yes ]; then
     echo "!! RESTORE NOT VERIFIED -- THE DEVICE MAY STILL CARRY THE STEP." >&2
     grep -h "clk-offset-restore\|clk-offset-pre-record\|clk-offset-readback" \
         "$bundle/write.txt" | sed 's/^/   /' >&2
-    # orig - seen: the step that lands the field back on its pre-step value if
-    # the device still holds what the read-back saw (the probe prints the same
-    # number in its alarm line, and this recomputes it from the log).
+    # The step to print comes from the probe's own alarm when there is one: it
+    # knows whether the read-back was usable, and when it was not (the GET itself
+    # failed, as it does in the reset-required state) its number is the inverse of
+    # the step that was attempted. The first real gated run showed why the
+    # recomputation below must not be trusted first: the failed GET left the
+    # 0xffffffff sentinel in the log, and `orig - (-1)` printed a corrective step
+    # of 1 kHz for a step that was 250 kHz.
     corr=$(python3 - "$bundle/write.txt" <<'PY' 2>/dev/null || true
 import re, sys
 text = open(sys.argv[1]).read()
-def last(tag, pattern):
-    hits = re.findall(pattern, text)
-    return hits[-1] if hits else None
-pre = last("pre", r"clk-offset-pre-record.*?field \+(\d+) current 0x[0-9a-f]+ \((-?\d+)\)")
-after = last("after", r"clk-offset-readback.*?field \+(\d+) = 0x[0-9a-f]+ \((-?\d+)\)")
-if pre and after and pre[0] == after[0]:
-    print("%d %s" % (int(pre[1]) - int(after[1]), pre[0]))
+alarm = re.search(r"clk-offset-restore-alarm.*?field \+(\d+).*?"
+                  r"the corrective step is ([+-]?\d+) kHz", text, re.S)
+if alarm:
+    print("%s %s" % (alarm.group(2), alarm.group(1)))
+    raise SystemExit
+pre = re.findall(r"clk-offset-pre-record.*?field \+(\d+) current 0x[0-9a-f]+ \((-?\d+)\)", text)
+after = re.findall(r"clk-offset-readback.*?field \+(\d+) = 0x[0-9a-f]+ \((-?\d+)\)", text)
+if pre and after and pre[-1][0] == after[-1][0] and after[-1][1] != "-1":
+    print("%d %s" % (int(pre[-1][1]) - int(after[-1][1]), pre[-1][0]))
 PY
 )
     if [ -n "$corr" ]; then
@@ -269,6 +275,8 @@ PY
         bit=$(printf '%s' "$cand" | cut -d: -f1)
         echo "   corrective single step (inverse of what is left applied):" >&2
         echo "     sudo OUT_ROOT=$out_root sh $0 $bit:$2:$1" >&2
+        echo "   ...but re-read first: if the field is not what the read-back" >&2
+        echo "   line above quotes, this step is the wrong one." >&2
     else
         echo "   (could not recompute the step from the log: read the lines above)" >&2
     fi

@@ -4314,6 +4314,12 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
                 others_same = 0;
         }
     }
+    /* "others unchanged" is a measurement, and a read-back that failed did not
+     * measure it: printing the default `yes` next to a GET 0x62 reads as a
+     * result. The first real gated run did exactly that (0x62 all through) and
+     * the line claimed the other value dwords were identical. */
+    const char *others_txt = (st2 != 0) ? "not measured (the read-back GET failed)"
+                                        : (others_same ? "yes" : "NO");
     nvx_emit(c, "V3.5c", "clk-offset-readback", st2,
              (st2 == 0 && same_field && others_same) ? NVX_V_OK : NVX_V_REJECTED,
              "after SET: field +%u = 0x%08x (%d), want 0x%08x (%d); other value "
@@ -4321,7 +4327,7 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
              st2 == 0 ? nvx_peek_u32(after, rec + field_off) : 0xffffffffu,
              st2 == 0 ? (int)nvx_peek_u32(after, rec + field_off) : -1,
              (NvU32)((int)orig + delta_khz), (int)orig + delta_khz,
-             others_same ? "yes" : "NO", st2);
+             others_txt, st2);
 
     /* 5. restore from the snapshot, then prove the block came back exactly.
      *
@@ -4383,8 +4389,8 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
              verified ? NVX_V_OK : NVX_V_REJECTED,
              "SET 0x%x, readback 0x%x, same-field %s, others-unchanged %s, "
              "restore %s -- a live-frequency change is NOT evidence either way",
-             st, st2, same_field ? "yes" : "no", others_same ? "yes" : "no",
-             identical ? "verified" : "FAILED");
+             st, st2, (st2 != 0) ? "not measured" : (same_field ? "yes" : "no"),
+             others_txt, identical ? "verified" : "FAILED");
     /* Three outcomes, three exit codes: verified, not verified with the block
      * back, not verified with the block NOT proven back (the runbook turns the
      * last one into an alarm rather than a footnote). */
