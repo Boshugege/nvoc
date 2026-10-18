@@ -527,10 +527,18 @@ mod tests {
         // The rated-TDP read stays refused for a different reason than a
         // missing field: its route is the NVAPI private trio
         // (0xED2BEA09/0x87BD35EF/0xFCBDF642), which this path never issues, so
-        // the number is not read -- it is not that the driver lacks it.
+        // the number is not read -- it is not that the driver lacks it. The
+        // reason is the shared constant, and it carries the measurement that
+        // backs that claim (our own capture answered NV_OK), which is what
+        // keeps "not wired in" from being read as "the driver has no value".
         let rated = validate(Command::GetRatedTdp).unwrap_err().to_string();
         assert!(rated.contains("unavailable on macOS RM"), "{rated}");
-        assert!(rated.contains("get-public-power-limit"), "{rated}");
+        assert!(
+            rated.contains(nvoc_core::RATED_TDP_UNWIRED_REASON),
+            "{rated}"
+        );
+        assert!(rated.contains("0x2080206e"), "{rated}");
+        assert!(!rated.contains("get-public-power-limit"), "{rated}");
     }
 
     #[test]
