@@ -169,7 +169,7 @@ fn gpu_id_selection_suggests_a_command_that_exists() {
         long,
         "no GPU matches --gpu 2457; use `nvoc-cli list` to see available indices"
     );
-    assert!(!long.contains("; use `nvoc list`"), "{long}");  // audit-command-names: quoted
+    assert!(!long.contains("; use `nvoc list`"), "{long}"); // audit-command-names: quoted
 }
 
 #[test]
