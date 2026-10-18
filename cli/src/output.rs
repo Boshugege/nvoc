@@ -3393,16 +3393,37 @@ fn format_scalar(key: &str, value: &Value) -> String {
     }
 }
 
+/// Keys whose value is an identifier, a row number or a count rather than a
+/// measurement.
+///
+/// The clock-offset view is the case that forced this: it carries `domain_bit`
+/// and `index` and `type_stamp` right next to `frequency_khz`, and a
+/// context-wide "this is a clock, so divide by 1000 and say MHz" rule rendered
+/// bit 1 as "0.001 MHz", the directory row 2 as "0.002 MHz", the `0x0808` type
+/// stamp as "2.056 MHz" and the record count 3 as "0.003 MHz". A counter is
+/// never a frequency, so these keys are rendered as the plain numbers they are
+/// and only the measuring keys are scaled.
+///
+/// `lanes` is deliberately *not* here: the PCI Express context renders it as
+/// `x16`, which is not a plain number.
+fn is_identifier_key(value_key: &str) -> bool {
+    value_key.ends_with("_bit")
+        || value_key.ends_with("_index")
+        || matches!(
+            value_key,
+            "index" | "type_stamp" | "records" | "mask" | "count" | "slot"
+        )
+}
+
 fn format_contextual_scalar(context_key: &str, value_key: &str, value: &Value) -> String {
     let Some(number) = value.as_f64() else {
         return format_scalar(value_key, value);
     };
     let context = context_key.to_ascii_lowercase();
-    // A bit index inside a frequency context is still an index. The clock-offset
-    // list carries `domain_bit` next to `frequency_khz`, and scaling it with its
-    // neighbours rendered bit 1 as "0.001 MHz". A bit is never a frequency, so it
-    // is rendered as the plain number it is.
-    if value_key.ends_with("_bit") {
+    // A bit index inside a frequency context is still an index (see
+    // [`is_identifier_key`]): a clock context does not turn a counter, a row
+    // number or a type stamp into a frequency.
+    if is_identifier_key(value_key) {
         return format_scalar(value_key, value);
     }
     if context.contains("frequency")
@@ -3589,9 +3610,12 @@ mod tests {
         let output = json!({
             "pstate": 8,
             "clock_offsets": [
-                {"domain_bit": 1, "frequency_khz": 1530000, "offset_khz": -1},
-                {"domain_bit": 16, "frequency_khz": 6000984, "offset_khz": -126},
+                {"domain_bit": 1, "index": 0, "type_stamp": 2056,
+                 "frequency_khz": 1530000, "offset_khz": -1},
+                {"domain_bit": 16, "index": 1, "type_stamp": 2313,
+                 "frequency_khz": 6000984, "offset_khz": -126},
             ],
+            "clock_offset_limits_khz": {"records": 1, "min_khz": -18750, "max_khz": 18750},
             "notes": ["offset channel: clock document 0x20809061: parsed"],
         });
         let rendered = format_get_settings_output(&output).join("\n");
@@ -3608,6 +3632,27 @@ mod tests {
             !rendered.contains("Domain Bit: 0.001 MHz"),
             "the bit is not scaled: {rendered}"
         );
+        // The device's own view carries the directory row number and the `0x0808`
+        // type stamp in the same record as `frequency_khz`, and the count of the
+        // records next to the limits: all three were rendered as MHz on the real
+        // device (row 2 as "0.002 MHz", the stamp as "2.056 MHz", one record as
+        // "0.001 MHz"), because the rule scaled every number in a clock context.
+        assert!(rendered.contains("Index: 0"), "row number: {rendered}");
+        assert!(
+            !rendered.contains("Index: 0.001 MHz"),
+            "the row number is not scaled: {rendered}"
+        );
+        assert!(rendered.contains("Type Stamp: 2056"), "stamp: {rendered}");
+        assert!(
+            !rendered.contains("Type Stamp: 2.056 MHz"),
+            "the stamp is not scaled: {rendered}"
+        );
+        assert!(
+            !rendered.contains("Records 0.001 MHz"),
+            "the record count is not scaled: {rendered}"
+        );
+        // The limit values are frequencies and stay scaled (18750 kHz = 18.75 MHz).
+        assert!(rendered.contains("18.75 MHz"), "limits: {rendered}");
     }
 
     #[test]
