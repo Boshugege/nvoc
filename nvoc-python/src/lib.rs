@@ -2669,7 +2669,7 @@ fn plan_clock_offset_step(
 ) -> PyResult<Py<PyAny>> {
     let gpu = gpu.to_string();
     // The request grammar is the core one, so this call accepts exactly the
-    // spellings `nvoc-cli ... --plan-delta` and `nvoc macos-eval --plan` accept.
+    // spellings `nvoc-cli ... --plan-delta` and `nvoc-auto-optimizer macos-eval --plan` accept.
     let requested = nvoc_core::parse_offset_target(target).map_err(invalid_value)?;
     let delta_khz = nvoc_core::parse_offset_delta(delta).map_err(invalid_value)?;
     let backends = backends.unwrap_or("macos-rm").to_string();

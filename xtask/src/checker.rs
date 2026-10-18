@@ -153,7 +153,8 @@ pub fn check() -> Res<()> {
 /// having no selftest at all, which is what stops a *new* tool from being added
 /// and never run: the directory is enumerated and an unlisted file fails.
 fn probe_tool_selftests(root: &std::path::Path) -> Res<()> {
-    const RUNNABLE: [&str; 5] = [
+    const RUNNABLE: [&str; 6] = [
+        "audit-command-names.py",
         "audit-entry-parity.py",
         "audit-live-attempts.py",
         "audit-matrix-claims.py",

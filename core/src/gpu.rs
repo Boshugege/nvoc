@@ -129,7 +129,8 @@ pub fn select_gpu_ids(gpu_ids: &[u32], selector: &GpuSelector) -> Result<Vec<u32
                 if input < 256 {
                     let id = gpu_ids.get(input).ok_or_else(|| {
                         Error::Custom(format!(
-                            "no GPU matches --gpu {}; use `nvoc list` to see available indices",
+                            "no GPU matches --gpu {}; use `nvoc-cli list` to see available \
+                             indices",
                             input
                         ))
                     })?;
@@ -149,7 +150,8 @@ pub fn select_gpu_ids(gpu_ids: &[u32], selector: &GpuSelector) -> Result<Vec<u32
                 }
 
                 return Err(Error::Custom(format!(
-                    "no GPU matches --gpu {}; use `nvoc list` to see available indices",
+                    "no GPU matches --gpu {}; use `nvoc-cli list` to see available \
+                      indices",
                     input
                 )));
             }

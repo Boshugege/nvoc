@@ -6,7 +6,8 @@ use nvoc_core::{
     PciAddress, QueryApiRestriction, QueryAutoBoost, QueryDisplays, QueryEdid, QueryPowerLimits,
     QueryPstateBaseVoltage, QueryVoltageBoost, VfpResetDomain, detect_gpu_type,
     find_matching_vfp_point, nvml_pstate_to_index, nvml_pstate_to_str,
-    parse_nvml_fan_control_policy, parse_nvml_pstate, run, select_targets, try_parse_nvml_pstate,
+    parse_nvml_fan_control_policy, parse_nvml_pstate, run, select_gpu_ids, select_targets,
+    try_parse_nvml_pstate,
 };
 use std::collections::BTreeMap;
 use std::str::FromStr;
@@ -144,6 +145,31 @@ fn gpu_id_selection_ok() {
     assert!(err.contains("did you mean --gpu=0?"));
 
     assert!(select_targets(&[], &GpuSelector::all()).is_err());
+}
+
+#[test]
+fn gpu_id_selection_suggests_a_command_that_exists() {
+    // The message ends with a suggestion, so it has to name the program that
+    // owns `list`. This workspace builds `nvoc-cli`; a message saying `nvoc
+    // list` sends the reader to a shell error. Both refusal sites are reached
+    // here, and comparing the whole rendered text also proves the source line
+    // continuations did not leave a stray double space behind.
+    let short = select_gpu_ids(&[0x100], &GpuSelector::from_specs(["2".to_string()]))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        short,
+        "no GPU matches --gpu 2; use `nvoc-cli list` to see available indices"
+    );
+
+    let long = select_gpu_ids(&[0x100], &GpuSelector::from_specs(["0x999".to_string()]))
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        long,
+        "no GPU matches --gpu 2457; use `nvoc-cli list` to see available indices"
+    );
+    assert!(!long.contains("; use `nvoc list`"), "{long}");  // audit-command-names: quoted
 }
 
 #[test]

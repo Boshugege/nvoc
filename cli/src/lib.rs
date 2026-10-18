@@ -6995,13 +6995,13 @@ fn get_clock_offset(
     // `--plan-delta` asks whether a step is bounded, which needs a window to
     // measure it against. This function's NVAPI/NVML paths report the delta
     // without the driver's range, so the flag is answered by the macOS RM
-    // backend (the arm in `macos_rm`) and by `nvoc macos-eval --plan`; an
+    // backend (the arm in `macos_rm`) and by `nvoc-auto-optimizer macos-eval --plan`; an
     // entry that accepts a flag and ignores it would be the worse answer.
     if option_one(invocation, "plan-delta").is_some() {
         return Err(CliError::new(
             "--plan-delta evaluates an offset step against the window the driver reports, and \
              this backend's offset read does not report one. Supported by the macOS RM backend \
-             (`--macos-rm`) and by `nvoc macos-eval --plan <target>=<delta>`.",
+             (`--macos-rm`) and by `nvoc-auto-optimizer macos-eval --plan <target>=<delta>`.",
         ));
     }
     let domain = option_domain(invocation, ClockDomain::Graphics)?;
