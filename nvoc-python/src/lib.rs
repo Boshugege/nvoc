@@ -2246,13 +2246,18 @@ fn clock_offset_backend(raw: Option<&str>) -> PyResult<&'static str> {
 /// entry: what is missing is the verification the gate waits for, and core's
 /// constant says which.
 fn macos_write_gate(entry: &str, backend: &str) -> PyResult<()> {
-    if backend == "macos-rm" {
-        return Err(PyRuntimeError::new_err(format!(
-            "{entry}: {}",
-            nvoc_core::MACOS_RM_WRITE_GATE_REASON
-        )));
+    match macos_write_gate_reason(entry, backend) {
+        Some(reason) => Err(PyRuntimeError::new_err(reason)),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// The gate's message as a plain string, so the decision is testable without a
+/// Python interpreter: this crate's tests run with `--no-default-features`
+/// (no `extension-module`, hence no interpreter), where even formatting a
+/// [`PyErr`] would panic.
+fn macos_write_gate_reason(entry: &str, backend: &str) -> Option<String> {
+    (backend == "macos-rm").then(|| format!("{entry}: {}", nvoc_core::MACOS_RM_WRITE_GATE_REASON))
 }
 
 /// The macOS RM offset read: the snapshot's own per-domain record, projected into
@@ -2266,18 +2271,25 @@ fn normalize_query_clock_offset_macos(
     settings: &nvoc_core::DeviceSettings,
     domain: ClockDomain,
 ) -> PyResultValue {
+    let mhz = clock_offset_macos_rm_mhz(settings, domain).map_err(to_py_err)?;
+    Ok(value_object([("mhz", f64_value(mhz))]))
+}
+
+/// The number behind [`normalize_query_clock_offset_macos`], or the reason there
+/// is none -- plain, so the projection can be tested without an interpreter.
+fn clock_offset_macos_rm_mhz(
+    settings: &nvoc_core::DeviceSettings,
+    domain: ClockDomain,
+) -> Result<f64, String> {
     let name = nvoc_core::public_offset_domain(domain).ok_or_else(|| {
-        invalid_value(format!(
+        format!(
             "this clock domain has no public offset name on macOS; the names the snapshot can \
              corroborate are {}",
             nvoc_core::PUBLIC_OFFSET_DOMAINS.join(", ")
-        ))
+        )
     })?;
-    let view = settings.clock_offset_view(name).map_err(to_py_err)?;
-    Ok(value_object([(
-        "mhz",
-        f64_value(f64::from(view.offset_khz) / 1000.0),
-    )]))
+    let view = settings.clock_offset_view(name)?;
+    Ok(f64::from(view.offset_khz) / 1000.0)
 }
 
 fn normalize_domain_vfp_points(
@@ -6302,6 +6314,10 @@ mod tests {
     /// The macOS offset read: one field, taken from the snapshot's own record,
     /// and a domain that same snapshot could not corroborate refused with core's
     /// reason -- not reported as an offset of zero, and not blamed on the host.
+    ///
+    /// Asserted on the plain projection, because this crate's tests run with
+    /// `--no-default-features` (no `extension-module`, hence no interpreter),
+    /// where even formatting a `PyErr` would panic.
     #[test]
     fn macos_rm_clock_offset_answers_from_the_snapshot_and_names_an_unnamed_domain() {
         let settings = nvoc_core::DeviceSettings {
@@ -6316,26 +6332,35 @@ mod tests {
             }]),
             ..Default::default()
         };
-        let value = normalize_query_clock_offset_macos(&settings, ClockDomain::Memory)
+        let mhz = clock_offset_macos_rm_mhz(&settings, ClockDomain::Memory)
             .expect("a domain this snapshot corroborated answers");
+        // The NVAPI branch's unit, so one field stays comparable across backends.
+        assert_eq!(mhz, -0.126);
+
+        let err = clock_offset_macos_rm_mhz(&settings, ClockDomain::Graphics)
+            .expect_err("a domain this snapshot did not corroborate cannot answer");
+        assert!(
+            err.contains("graphics is not named in this reading"),
+            "the refusal is core's own named reason, domain included: {err}"
+        );
+        assert!(
+            !err.contains("NVAPI/NVML"),
+            "the refusal must not blame the platform for the entry's gap: {err}"
+        );
+
+        // The py-facing wrapper keeps both outcomes, and is built without an
+        // interpreter ever being asked for a message; `ok()` drops the `PyErr`
+        // without formatting it, which is what lets the shape be asserted here.
+        let value = normalize_query_clock_offset_macos(&settings, ClockDomain::Memory)
+            .ok()
+            .expect("the corroborated domain answers");
         assert_eq!(value["mhz"].as_f64(), Some(-0.126));
         assert_eq!(
             value.as_object().expect("the value is an object").len(),
             1,
             "the macOS branch returns the same single field the NVAPI/NVML branches do"
         );
-
-        let err = normalize_query_clock_offset_macos(&settings, ClockDomain::Graphics)
-            .expect_err("a domain this snapshot did not corroborate cannot answer");
-        let text = err.to_string();
-        assert!(
-            text.contains("graphics is not named in this reading"),
-            "the refusal is core's own named reason: {text}"
-        );
-        assert!(
-            !text.contains("NVAPI/NVML"),
-            "the refusal must not blame the platform for the entry's gap: {text}"
-        );
+        assert!(normalize_query_clock_offset_macos(&settings, ClockDomain::Graphics).is_err());
     }
 
     /// The offset family's backend resolution and the write half: the read
@@ -6345,37 +6370,42 @@ mod tests {
     fn macos_rm_offset_backends_and_the_write_gate_name_the_right_layer() {
         // Absent or `auto` resolves to the platform's own backend, so a caller
         // that says nothing gets the one that exists on the host it runs on.
+        // `unwrap_or` rather than `unwrap`, so a failure never has to format the
+        // `PyErr` that none of these spellings should produce.
         assert_eq!(
-            clock_offset_backend(None).expect("a default exists"),
+            clock_offset_backend(None).unwrap_or("?"),
             fan_power_backends(cfg!(target_os = "macos"))
         );
         assert_eq!(
-            clock_offset_backend(Some("auto")).expect("auto resolves"),
+            clock_offset_backend(Some("auto")).unwrap_or("?"),
             fan_power_backends(cfg!(target_os = "macos"))
         );
         assert_eq!(
-            clock_offset_backend(Some(" macOS-RM ")).expect("the macOS spelling is a backend here"),
-            "macos-rm"
+            clock_offset_backend(Some(" macOS-RM ")).unwrap_or("?"),
+            "macos-rm",
+            "the macOS spelling is a backend here, as it is everywhere else"
         );
-        assert_eq!(clock_offset_backend(Some("nvapi")).expect("nvapi"), "nvapi");
+        assert_eq!(clock_offset_backend(Some("nvapi")).unwrap_or("?"), "nvapi");
         assert!(
             clock_offset_backend(Some("nvapi-cooler")).is_err(),
             "the cooler backends carry no clock offsets, and must still be refused"
         );
 
-        let gate = macos_write_gate("set_clock_offset", "macos-rm")
-            .expect_err("the macOS offset write is behind the gate");
-        let text = gate.to_string();
-        assert!(text.starts_with("set_clock_offset: "), "{text}");
+        let reason = macos_write_gate_reason("set_clock_offset", "macos-rm")
+            .expect("the macOS offset write is behind the gate");
+        assert!(reason.starts_with("set_clock_offset: "), "{reason}");
         assert!(
-            text.contains(nvoc_core::MACOS_RM_WRITE_GATE_REASON),
-            "{text}"
+            reason.contains(nvoc_core::MACOS_RM_WRITE_GATE_REASON),
+            "{reason}"
         );
         assert!(
-            !text.contains("NVAPI/NVML"),
-            "the gate is what is missing, not the host runtime: {text}"
+            !reason.contains("NVAPI/NVML"),
+            "the gate is what is missing, not the host runtime: {reason}"
         );
-        macos_write_gate("set_clock_offset", "nvml").expect("a non-macOS backend passes the gate");
+        assert!(
+            macos_write_gate_reason("set_clock_offset", "nvml").is_none(),
+            "a non-macOS backend passes the gate"
+        );
     }
 
     /// The macOS settings projection must report what it reads, and must name
