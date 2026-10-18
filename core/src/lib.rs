@@ -40,7 +40,7 @@ pub use ::nvapi::sys::gpu::power::undocumented::Wm2AcousticMode;
 pub use ::nvapi::{P0VoltageBounds, VoltRails};
 pub use conv::ConvertEnum;
 pub use error::Error;
-pub use gpu::{GpuSelector, nvapi_interface_version};
+pub use gpu::{GpuSelector, nvapi_interface_version, select_gpu_ids};
 pub use gpu_type::{
     ArchOcPrior, FabricDomain, FabricTree, GpuOcParams, GpuType, GpuVoltageLimitParams,
     GpuVoltageLockParams, OcPriorPoint,
