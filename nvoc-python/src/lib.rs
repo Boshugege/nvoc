@@ -2260,6 +2260,26 @@ fn macos_write_gate_reason(entry: &str, backend: &str) -> Option<String> {
     (backend == "macos-rm").then(|| format!("{entry}: {}", nvoc_core::MACOS_RM_WRITE_GATE_REASON))
 }
 
+/// The same gate for the entries that take no backend argument: on macOS every
+/// backend resolves to the native RM one, so the gate is what is missing there,
+/// and elsewhere these entries keep the sentence their backend has always given
+/// (`None`).
+fn macos_write_gate_here_reason(entry: &str) -> Option<String> {
+    if cfg!(target_os = "macos") {
+        macos_write_gate_reason(entry, "macos-rm")
+    } else {
+        None
+    }
+}
+
+/// [`macos_write_gate_here_reason`] as a refusal.
+fn macos_write_gate_here(entry: &str) -> PyResult<()> {
+    match macos_write_gate_here_reason(entry) {
+        Some(reason) => Err(PyRuntimeError::new_err(reason)),
+        None => Ok(()),
+    }
+}
+
 /// The macOS RM offset read: the snapshot's own per-domain record, projected into
 /// the same `mhz` field the NVAPI and NVML branches return, so a caller reads one
 /// field whatever the backend.
@@ -4638,6 +4658,14 @@ fn reset_pstate_base_voltages(gpu: &str) -> PyResult<()> {
 
 #[pyfunction]
 fn set_pstate_clock_offset(gpu: &str, pstate: &str, domain: &str, delta: i32) -> PyResult<()> {
+    // This entry carries no backend argument, so the platform decides which one
+    // it would write through: on macOS that is the native RM backend, whose read
+    // twin (`get-pstate-global-freq-offset`) answers, so the refusal names the
+    // gate instead of a runtime the host does not have. Note that no macOS
+    // record carries a P-state index -- the snapshot's offsets are per domain --
+    // so which field this P-state argument would address is itself part of what
+    // the gated verification has to settle.
+    macos_write_gate_here("set_pstate_clock_offset")?;
     let inventory = {
         let mut inventory_cache = lock_inventory_cache();
         inventory_cache.entry(BackendSet::Nvapi)?
@@ -4965,6 +4993,10 @@ fn reset_cooler_levels(gpu: &str) -> PyResult<()> {
 
 #[pyfunction]
 fn reset_pstate_clock_offsets(gpu: &str, offsets: Vec<(String, String)>) -> PyResult<()> {
+    // Same shape as `set_pstate_clock_offset`: the reset half of the family
+    // whose read answers on macOS, so the macOS refusal is the gate, not a
+    // missing runtime.
+    macos_write_gate_here("reset_pstate_clock_offsets")?;
     let inventory = {
         let mut inventory_cache = lock_inventory_cache();
         inventory_cache.entry(BackendSet::Nvapi)?
@@ -6408,6 +6440,29 @@ mod tests {
             macos_write_gate_reason("set_clock_offset", "nvml").is_none(),
             "a non-macOS backend passes the gate"
         );
+
+        // The entries with no backend argument resolve the platform the same way
+        // the reads do, so on macOS they name the gate too; elsewhere they keep
+        // the sentence their backend has always given, which is why this
+        // assertion is written per platform.
+        let here = macos_write_gate_here_reason("set_pstate_clock_offset");
+        if cfg!(target_os = "macos") {
+            let reason = here.expect("the offset write is behind the gate on macOS too");
+            assert!(reason.starts_with("set_pstate_clock_offset: "), "{reason}");
+            assert!(
+                reason.contains(nvoc_core::MACOS_RM_WRITE_GATE_REASON),
+                "{reason}"
+            );
+            assert!(
+                macos_write_gate_here_reason("reset_pstate_clock_offsets").is_some(),
+                "the reset half of the same family answers to the same gate"
+            );
+        } else {
+            assert!(
+                here.is_none(),
+                "off macOS the backend's own sentence is still the right one"
+            );
+        }
     }
 
     /// The macOS settings projection must report what it reads, and must name
