@@ -121,11 +121,15 @@ if [ "$(id -u)" -ne 0 ]; then
         echo "  0x1b before the GSP sees it, which would look like the driver" >&2
         echo "  refusing the field instead of the process." >&2
         echo "  Either rerun as: sudo OGKM=$ogkm OUT_ROOT=$out_root $0 $cand" >&2
-        echo "  or authorise just this binary, once:" >&2
-        echo "    sudo tee /etc/sudoers.d/nvoc-probe >/dev/null <<EOF" >&2
-        echo "    mac ALL=(root) NOPASSWD: $root/probe-macos-rm, $root/probe-macos-rm-idle" >&2
-        echo "    EOF" >&2
-        echo "    sudo chmod 440 /etc/sudoers.d/nvoc-probe && sudo visudo -c" >&2
+        echo "  or authorise just these two binaries, once -- paste this block" >&2
+        echo "  as it stands: a here-document's terminator has to start at the" >&2
+        echo "  beginning of its line, so the indentation above does not carry" >&2
+        echo "  into the block:" >&2
+        echo "sudo tee /etc/sudoers.d/nvoc-probe >/dev/null <<EOF" >&2
+        echo "mac ALL=(root) NOPASSWD: $root/probe-macos-rm, $root/probe-macos-rm-idle" >&2
+        echo "EOF" >&2
+        echo "sudo chmod 440 /etc/sudoers.d/nvoc-probe && sudo visudo -c" >&2
+        echo "sudo -n -l $root/probe-macos-rm && echo readable-here" >&2
         exit 4
     fi
 fi
