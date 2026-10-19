@@ -4257,13 +4257,23 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
                  field_off);
         return -1;
     }
-    if (delta_khz == 0 || delta_khz > NVX_CLKOFF_STEP_MAX ||
-        delta_khz < -NVX_CLKOFF_STEP_MAX) {
+    /* A zero step is allowed and is the sharpest content test there is: the
+     * block then goes back BYTE-IDENTICAL to the driver's own reply, so a
+     * refusal cannot be blamed on what the caller chose to write. (It was
+     * refused until the first gated runs made the case: the harness wanted
+     * something to move.) Only the upper bound is a real single-step limit. */
+    if (delta_khz > NVX_CLKOFF_STEP_MAX || delta_khz < -NVX_CLKOFF_STEP_MAX) {
         nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_SKIP,
                  "delta %d kHz out of the single-step window +-%d kHz "
                  "(this harness is not a sweep tool)", delta_khz,
                  NVX_CLKOFF_STEP_MAX);
         return -1;
+    }
+    if (delta_khz == 0) {
+        nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_OK,
+                 "delta 0 kHz: a no-op step -- the block is sent back "
+                 "byte-identical to the snapshot, which is what makes a refusal "
+                 "attributable to the call rather than to the value");
     }
 
     const unsigned rec = NVX_CLKOFF_HDR + NVX_CLKOFF_STRIDE * domain_bit;
