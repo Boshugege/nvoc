@@ -1827,3 +1827,21 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 - **无 GUI**：用包内 `idat`／`idat64`＋`-A -S<script.py>` 批处理，输入 `~/Shared/nvfw/nvidia/610.57.04/gsp_tu10x.bin`（只读，复制一份到 `outputs/` 外再分析）。
 - 步骤：①用 `extract-gsp-method-table.py` 的同一份表定位 `0x2080901b`／`0x2080d01c` 两行的**处理函数地址**；②从 handler 反查常量 `60`／`64`／`±18750`／12 个 dword 偏移的引用，确认记录布局；③看 SET handler 是否比较 stamp、是否读 `+8` 当控制字、是否在成功后置 reset-required；④看 GET handler 是否把值交给某个 re-clock 路径。
 - 产出：桶 C 里第 1–4 条各自升格或塌掉，**不**依赖再写设备（只读分析），因此不受"一次重启一次实验"限制。
+## 一百十二、IDA 的接入路线选型：官方有 MCP 但主路径是前台插件，按用户指令走 `idalib-mcp` 无头多开（只读静态分析，不吃重启窗口）
+
+**① 查证结果** ✔（`api.github.com` 搜索 + 各 README 原文）
+- 官方**有**：`HexRaysSA/ida-mcp`（1278★）。它**不是纯前台**——README 第 12 行就要求"IDA 9.4+ 带 idalib、Python 3.11+"，第 43 行明写"Without the GUI plugin, IDA MCP will still work headlessly"。但它的默认可发现路径仍是**装进 GUI 的插件**（Draft 期就是按插件装的）。
+- `mrexodia/ida-pro-mcp`（13001★）README §181「Transports & Headless MCP」、§216「Headless idalib Session Model」：`idalib-mcp` 是**supervisor**，每个打开的数据库各起一个 idalib worker 进程，worker 在 host-local 发现目录登记，有 `prefer_headless`（默认）／`force_headless`（永不采用运行中的 GUI）两种选择 ⇒ 正是用户说的"基于 idalib、可无头多开"。该 idalib 路径由 Willi Ballenthin 贡献。
+- 因此**按用户指令选 `idalib-mcp`**：不要求开着 GUI、可并发多库、被杀掉不会牵连 GUI。
+
+**② 安装（机器侧，仓库外）**
+1. 解压 `ida-pro_95_x64mac.app.zip`（696 MB）到 `~/Tools/`，`xattr -dr com.apple.quarantine`（**只对 `~/Tools` 生效，不再对自己签名**）。
+2. 先确认 `.app/Contents/MacOS/idalib` 存在（9.5 beta 的 `.app` 是否随包带 idalib 未验；缺就改用 Hex-Rays 的独立 `idalib` 包）。
+3. `uv`（机器上不一定有，需要装）→ `uv run "<app>/Contents/MacOS/idalib/python/py-activate-idalib.py"` 激活全局 idalib。
+4. `uv tool install ida-pro-mcp` 或克隆后 `uv run`（README §86 装的是 `idalib-mcp`）。
+
+**③ 驱动方式（本会话没有 MCP 客户端）**：先起 `uv run idalib-mcp --host 127.0.0.1 --port 8745`（**loopback**，不开公网），用**一个小 JSON-RPC 客户端脚本**按 MCP 走；若 SSE 折腾，退一步用 `idalib-mcp --stdio` 或**直接调 idalib 的 Python**（`idapro.open_database` + `ida_*`）——分析目的（找 handler、顺常量引用）用 Python 就够，MCP 只是多一层包装。
+
+**④ 目标（与 §一百十一桶 C 对齐）**：只读，依次回答——记录布局（60 字节头、64 步长、stamp、`+4` 掩码、12 个值 dword 偏移）是否与实测一致；SET handler（`0x2080d01c`）是否读 `+8` 当控制字、是否比较 stamp、成功后是否置 reset-required；GET handler 是否把值交给 re-clock。**不写设备**，因此与"一次重启一次实验"不冲突。
+
+**⑤ 边界** ✗：IDA 9.5 是 **beta** 构建（`ida95b1`），`idalib` 与 RISC-V 模块在该 beta 上的可用性未验；GSP bin 是 TU10x（RISC-V，Falcon 派生的非 x86 核），若 IDA 的 RISC-V 模块认不出入口（无符号的 ELF 段），就先用方法表里的地址在段偏移上定位函数，而不是从头自动分析。
