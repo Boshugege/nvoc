@@ -4186,6 +4186,10 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
 #define NVX_CLKOFF_STRIDE    64u
 #define NVX_CLKOFF_MASK_OFF  4u
 #define NVX_CLKOFF_STEP_MAX  1000   /* kHz: one minimal step (proposal G4) */
+/* Per-record stamp: the measured geometry puts it at +60 in every 64-byte
+ * record (stamps at 60+64i). Every driver-written change bumps it, so a
+ * caller that changes a value without bumping is "stale by construction". */
+#define NVX_CLKOFF_STAMP_OFF 60u
 
 static const unsigned nvx_clkoff_value_offs[] = {
     8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 52u, 56u
@@ -4233,7 +4237,7 @@ static NvU32 nvx_clkoff_send_set(nvx_ctx *c, unsigned bit, unsigned char *buf)
  * NVK itself issues PERF_BOOST (see docs/.../nvk-perf-boost-internal.md), so a
  * live frequency rise can come from the driver, not from this write. */
 int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
-                              unsigned field_off, int delta_khz)
+                              unsigned field_off, int delta_khz, int bump_stamp)
 {
     if (NVX_IDLE_ONLY) {
         nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_GATED,
@@ -4303,11 +4307,20 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
     unsigned char block[NVX_CLKOFF_SIZE];
     memcpy(block, snapshot, NVX_CLKOFF_SIZE);
     nvx_poke_u32(block, rec + field_off, (NvU32)((int)orig + delta_khz));
+    if (bump_stamp) {
+        /* The record is marked fresh the way the driver marks it: stamp + 1. */
+        NvU32 stamp = nvx_peek_u32(snapshot, rec + NVX_CLKOFF_STAMP_OFF);
+        nvx_poke_u32(block, rec + NVX_CLKOFF_STAMP_OFF, stamp + 1);
+        nvx_emit(c, "V3.5b0", "clk-offset-stamp-bump", 0, NVX_V_OK,
+                 "record @%u stamp 0x%08x -> 0x%08x (the block is not stale by "
+                 "construction)", rec, stamp, stamp + 1);
+    }
     st = nvx_clkoff_send_set(c, domain_bit, block);
     nvx_emit(c, "V3.5b", "clk-offset-set", st,
              st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-             "domain bit %u field +%u -> 0x%08x (rc 0x%x %s)", domain_bit,
-             field_off, (NvU32)((int)orig + delta_khz), st, nvx_status_name(st));
+             "domain bit %u field +%u -> 0x%08x%s (rc 0x%x %s)", domain_bit,
+             field_off, (NvU32)((int)orig + delta_khz),
+             bump_stamp ? " with the stamp bumped" : "", st, nvx_status_name(st));
 
     /* 4. same-field readback + "every other value dword unchanged". */
     unsigned char after[NVX_CLKOFF_SIZE];
