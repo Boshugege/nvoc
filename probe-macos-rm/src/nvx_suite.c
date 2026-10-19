@@ -4236,8 +4236,24 @@ static NvU32 nvx_clkoff_send_set(nvx_ctx *c, unsigned bit, unsigned char *buf)
  * byte-identical to the snapshot.  RUSD/real-time kHz is NOT a criterion --
  * NVK itself issues PERF_BOOST (see docs/.../nvk-perf-boost-internal.md), so a
  * live frequency rise can come from the driver, not from this write. */
+/* Live graphics clock in kHz from the mapped RUSD page, -1 when unavailable.
+ * This is the only frequency source that does not need the control path, so it
+ * can be sampled while an offset is applied. */
+static int nvx_rusd_gpc_khz(nvx_ctx *c, NvU32 *khz)
+{
+    if (!c->rusd) return -1;
+    NV00DE_SHARED_DATA *sd = (NV00DE_SHARED_DATA *)c->rusd;
+    RUSD_CLK_PUBLIC_DOMAIN_INFOS clocks;
+    if (rusd_copy(&sd->clkPublicDomainInfos.lastModifiedTimestamp,
+                  &sd->clkPublicDomainInfos, &clocks, sizeof clocks) != 0)
+        return -1;
+    *khz = clocks.info[RUSD_CLK_PUBLIC_DOMAIN_GRAPHICS].actualClkKHz;
+    return 0;
+}
+
 int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
-                              unsigned field_off, int delta_khz, int bump_stamp)
+                              unsigned field_off, int delta_khz, int bump_stamp,
+                              int hold_sec)
 {
     if (NVX_IDLE_ONLY) {
         nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_GATED,
@@ -4351,6 +4367,26 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
              st2 == 0 ? (int)nvx_peek_u32(after, rec + field_off) : -1,
              (NvU32)((int)orig + delta_khz), (int)orig + delta_khz,
              others_txt, st2);
+
+    /* 4b. hold: sample the live clock WHILE the offset is applied. Nothing so
+     * far has shown that a written value reaches the hardware -- a read-back of
+     * the control block only shows the GSP stored it. */
+    if (hold_sec > 0) {
+        for (int t = 1; t <= hold_sec; ++t) {
+            sleep(1);
+            NvU32 gpc = 0;
+            int have = nvx_rusd_gpc_khz(c, &gpc) == 0;
+            nvx_emit(c, "V3.5c2", "clk-offset-hold", 0, have ? NVX_V_OK : NVX_V_SKIP,
+                     "t=+%ds while +%d kHz is applied: gpc=%s", t, delta_khz,
+                     have ? "" : "unavailable");
+            if (have) {
+                /* the previous line carries the sample as text; keep the number
+                 * parseable on its own too, so a reader need not re-parse prose */
+                nvx_emit(c, "V3.5c3", "clk-offset-hold-value", 0, NVX_V_OK,
+                         "t=+%ds gpc_khz=%u", t, gpc);
+            }
+        }
+    }
 
     /* 5. restore from the snapshot, then prove the block came back exactly.
      *
