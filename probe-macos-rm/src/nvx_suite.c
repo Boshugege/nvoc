@@ -4260,7 +4260,7 @@ static int nvx_rusd_gpc_khz(nvx_ctx *c, NvU32 *khz)
 
 int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
                               unsigned field_off, int delta_khz, int bump_stamp,
-                              int hold_sec)
+                              int hold_sec, int arm)
 {
     if (NVX_IDLE_ONLY) {
         nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_GATED,
