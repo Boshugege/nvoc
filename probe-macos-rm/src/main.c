@@ -213,6 +213,7 @@ static void usage(void)
         "                   census (paramSize oracle scan; SET twins never sent)\n"
         "  --rated-tdp-set C:A   gated WRITE: set RATED_TDP client C to action A\n"
         "  --clk-offset-set BIT:OFF:DELTA[:bump]\n"
+        "  --clk-offset-arm    with a SET: also set the control dword +8 to 1\n"
         "  --clk-offset-hold N  with a SET: sample the live clock N s while the\n"
         "                       offset is applied, before restoring\n"
         "                   gated WRITE: move ONE clock-domain value dword one\n"
@@ -243,7 +244,7 @@ int main(int argc, char **argv)
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
     int clk_offset_set = 0;
     unsigned clkoff_bit = 0, clkoff_off = 0;
-    int clkoff_delta = 0, clkoff_bump = 0, clkoff_hold = 0;
+    int clkoff_delta = 0, clkoff_bump = 0, clkoff_hold = 0, clkoff_arm = 0;
     int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
     int fan_read = 0, hwfs_read = 0;
     int anchor_read = 0;
@@ -303,6 +304,7 @@ int main(int argc, char **argv)
             }
             rated_tdp_set = 1;
         }
+        else if (!strcmp(argv[i], "--clk-offset-arm")) clkoff_arm = 1;
         else if (!strcmp(argv[i], "--clk-offset-hold") && i + 1 < argc) {
             unsigned long long v = 0;
             /* the second argument is the maximum VALUE, not a base or a width */
@@ -509,7 +511,7 @@ int main(int argc, char **argv)
          * the same sentence as a plain read-back failure (rc 1). */
         int wrc = nvx_stage3_clk_offset_set(&g_ctx, clkoff_bit, clkoff_off,
                                             clkoff_delta, clkoff_bump,
-                                            clkoff_hold);
+                                            clkoff_hold, clkoff_arm);
         if (wrc != 0) rc = wrc;
     }
 

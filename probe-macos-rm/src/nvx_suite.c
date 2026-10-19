@@ -4194,6 +4194,9 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
  * record (stamps at 60+64i). Every driver-written change bumps it, so a
  * caller that changes a value without bumping is "stale by construction". */
 #define NVX_CLKOFF_STAMP_OFF 60u
+/* +8 accepts only 0/1 while +12 accepts the whole range: +8 is read as the
+ * control word of the pair, so "--clk-offset-arm" sets it with the value. */
+#define NVX_CLKOFF_ARM_OFF   8u
 
 static const unsigned nvx_clkoff_value_offs[] = {
     8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 52u, 56u
@@ -4332,6 +4335,15 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
     unsigned char block[NVX_CLKOFF_SIZE];
     memcpy(block, snapshot, NVX_CLKOFF_SIZE);
     nvx_poke_u32(block, rec + field_off, (NvU32)((int)orig + delta_khz));
+    if (arm && field_off != NVX_CLKOFF_ARM_OFF) {
+        /* +8 takes only 0/1 while +12 takes the range: +8 looks like the control
+         * word of the pair. Arming it in the same block is the natural unit. */
+        NvU32 was = nvx_peek_u32(snapshot, rec + NVX_CLKOFF_ARM_OFF);
+        nvx_poke_u32(block, rec + NVX_CLKOFF_ARM_OFF, 1u);
+        nvx_emit(c, "V3.5b0", "clk-offset-arm", 0, NVX_V_OK,
+                 "control dword +%u 0x%08x -> 0x00000001 in the same block",
+                 NVX_CLKOFF_ARM_OFF, was);
+    }
     if (bump_stamp) {
         /* The record is marked fresh the way the driver marks it: stamp + 1. */
         NvU32 stamp = nvx_peek_u32(snapshot, rec + NVX_CLKOFF_STAMP_OFF);
@@ -4354,11 +4366,13 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
     if (st2 == 0) {
         same_field = (nvx_peek_u32(after, rec + field_off) ==
                       (NvU32)((int)orig + delta_khz));
+        /* compare against the block we SENT, not the snapshot: an armed or
+         * stamp-bumped block differs from the snapshot on purpose. */
         for (unsigned i = 0; i < sizeof nvx_clkoff_value_offs /
                                 sizeof nvx_clkoff_value_offs[0]; ++i) {
             unsigned off = nvx_clkoff_value_offs[i];
             if (off == field_off) continue;
-            if (nvx_peek_u32(after, rec + off) != nvx_peek_u32(snapshot, rec + off))
+            if (nvx_peek_u32(after, rec + off) != nvx_peek_u32(block, rec + off))
                 others_same = 0;
         }
     }
@@ -4371,7 +4385,7 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
     nvx_emit(c, "V3.5c", "clk-offset-readback", st2,
              (st2 == 0 && same_field && others_same) ? NVX_V_OK : NVX_V_REJECTED,
              "after SET: field +%u = 0x%08x (%d), want 0x%08x (%d); other value "
-             "dwords identical: %s; GET 0x%x", field_off,
+             "dwords as sent: %s; GET 0x%x", field_off,
              st2 == 0 ? nvx_peek_u32(after, rec + field_off) : 0xffffffffu,
              st2 == 0 ? (int)nvx_peek_u32(after, rec + field_off) : -1,
              (NvU32)((int)orig + delta_khz), (int)orig + delta_khz,
