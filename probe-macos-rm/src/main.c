@@ -115,7 +115,7 @@ static int parse_clk_offset_set(const char *spec, unsigned *bit,
         else return -1;
     }
     long d = strtol(c2 + 1, &end, 0);
-    if (*end || d < -1000 || d > 1000) return -1;
+    if (*end || d < -18750 || d > 18750) return -1;
     if (*bump == 0 && *(c2 + 1) == 0) return -1;
     *bit = (unsigned)b; *off = (unsigned)o; *delta = (int)d;
     return 0;

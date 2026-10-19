@@ -4185,7 +4185,11 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
 #define NVX_CLKOFF_HDR       60u
 #define NVX_CLKOFF_STRIDE    64u
 #define NVX_CLKOFF_MASK_OFF  4u
-#define NVX_CLKOFF_STEP_MAX  1000   /* kHz: one minimal step (proposal G4) */
+#define NVX_CLKOFF_STEP_MAX  1000   /* kHz: the preferred single step */
+/* The GSP's own range for this field: 0x20809025 +20/+24 = -18750/+18750 kHz,
+ * so one step of a full clock-table interval (+15000) is legal for the GSP
+ * even though it is larger than the preferred step. */
+#define NVX_CLKOFF_RANGE_KHZ 18750
 /* Per-record stamp: the measured geometry puts it at +60 in every 64-byte
  * record (stamps at 60+64i). Every driver-written change bumps it, so a
  * caller that changes a value without bumping is "stale by construction". */
@@ -4282,12 +4286,17 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
      * refusal cannot be blamed on what the caller chose to write. (It was
      * refused until the first gated runs made the case: the harness wanted
      * something to move.) Only the upper bound is a real single-step limit. */
-    if (delta_khz > NVX_CLKOFF_STEP_MAX || delta_khz < -NVX_CLKOFF_STEP_MAX) {
+    if (delta_khz > NVX_CLKOFF_RANGE_KHZ || delta_khz < -NVX_CLKOFF_RANGE_KHZ) {
         nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_SKIP,
-                 "delta %d kHz out of the single-step window +-%d kHz "
-                 "(this harness is not a sweep tool)", delta_khz,
-                 NVX_CLKOFF_STEP_MAX);
+                 "delta %d kHz outside the field's own range +-%d kHz", delta_khz,
+                 NVX_CLKOFF_RANGE_KHZ);
         return -1;
+    }
+    if (delta_khz > NVX_CLKOFF_STEP_MAX || delta_khz < -NVX_CLKOFF_STEP_MAX) {
+        nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_OK,
+                 "delta %d kHz is wider than the preferred single step +-%d kHz "
+                 "but inside the field's range +-%d kHz", delta_khz,
+                 NVX_CLKOFF_STEP_MAX, NVX_CLKOFF_RANGE_KHZ);
     }
     if (delta_khz == 0) {
         nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_OK,
