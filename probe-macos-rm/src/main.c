@@ -305,7 +305,8 @@ int main(int argc, char **argv)
         }
         else if (!strcmp(argv[i], "--clk-offset-hold") && i + 1 < argc) {
             unsigned long long v = 0;
-            if (parse_number(argv[++i], 8, &v) != 0 || v > 60) {
+            /* the second argument is the maximum VALUE, not a base or a width */
+            if (parse_number(argv[++i], 60, &v) != 0) {
                 fprintf(stderr, "invalid --clk-offset-hold (want 1..60 s)\n");
                 return 2;
             }
