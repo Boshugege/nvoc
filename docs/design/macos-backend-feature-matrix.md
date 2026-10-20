@@ -1845,3 +1845,17 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **④ 目标（与 §一百十一桶 C 对齐）**：只读，依次回答——记录布局（60 字节头、64 步长、stamp、`+4` 掩码、12 个值 dword 偏移）是否与实测一致；SET handler（`0x2080d01c`）是否读 `+8` 当控制字、是否比较 stamp、成功后是否置 reset-required；GET handler 是否把值交给 re-clock。**不写设备**，因此与"一次重启一次实验"不冲突。
 
 **⑤ 边界** ✗：IDA 9.5 是 **beta** 构建（`ida95b1`），`idalib` 与 RISC-V 模块在该 beta 上的可用性未验；GSP bin 是 TU10x（RISC-V，Falcon 派生的非 x86 核），若 IDA 的 RISC-V 模块认不出入口（无符号的 ELF 段），就先用方法表里的地址在段偏移上定位函数，而不是从头自动分析。
+## 一百十三、IDA 9.5 已装、idalib 已激活，卡在**许可证**（另：`ida-pro-mcp` 的安装卡在本机没有 OpenSSL 头）
+
+机器 2026-10-20 重启后健康（`uptime` 正常、anchor `forward ALIVE and healthy`、`gpc` 回基线 1530000 ⇒ 死机时留在会话里的偏移已随重启清掉），门禁补跑绿（`gate-20261020T060140Z`，`CI_EXIT=0`／16）。
+
+**装了什么** ✔
+- zip 在本机（有代理）下载后 scp 过去，`/tmp/ida95.zip` 696 441 377 B 校验一致；解到 `~/Tools/`，用包内 InstallBuilder `--mode unattended --prefix ~/Tools/IDA` 装成 `IDA Professional 9.5.app`，`xattr -dr com.apple.quarantine` 已清。
+- 安装树里**有** `idalib/`（含 `idapro-0.0.10-py3-none-any.whl`）和 `idat`，即官方确实给了无头件，§一百十二的"beta 可能不带 idalib"这一条**被否掉**。
+- `uv 0.13.3` 装好；持久 venv `~/Tools/idalib-venv`（Python 3.11.17）。
+
+**踩到并解决的坑** ✔：`py-activate-idalib.py` 只会 `pip install` 那个 wheel，而 `uv venv` 建的 venv 里**没有 pip**，脚本静默成功但什么都没装（`site-packages` 空、`import idapro` 失败）。改成 `uv pip install --no-index --force-reinstall <wheel>` 后再跑一次激活脚本 ⇒ `import idapro` OK、`open_database()` 一路走到许可证检查。
+
+**卡点（等用户）** ✗：`FATAL ERROR: Cannot continue without a valid license`（`idat` 与 idalib 都是）。机器上没有 `~/.idapro/*.hexlic`，安装包里也不带。需要一份 `idapro.hexlic` 放到 `~/.idapro/`，之后 `idat`／idalib／`idalib-mcp` 才动得了。
+
+**另一个坑（未解）** ✗：`uv tool install ida-pro-mcp` 失败在 `cryptography` 从源码构建——本机无 brew、无 OpenSSL 头（CLT SDK 里也没有 `openssl/opensslv.h`），`openssl-sys` 编译失败。可选解法：①为工具环境固定一个**有 wheel**的 `cryptography`（abi3 轮子若存在就不会编译）；②装一份 openssl 并给 `OPENSSL_DIR`；③绕开 MCP 直接用 idalib 的 Python（分析目的不变，只是少一层包装）。
