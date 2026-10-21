@@ -655,6 +655,29 @@ uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *s, uint32_t index, 
     return status ? failure(error, cap, write ? "clock offset SET" : "clock offset GET", status) : 0;
 }
 
+/* Board-policy power contract: exact Linux610 NVML requests, never an arbitrary id. */
+uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *s, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap)
+{
+    size_t expected = kind == 0u ? 20000u : 12u;
+    if (!s || !block || kind > 2u || size != expected)
+        return failure(error, cap, "power ABI arguments", UINT32_MAX);
+    unsigned char *b = block;
+    if (kind == 2u) {
+        uint32_t target, tail;
+        memcpy(&target, b + 4, 4); memcpy(&tail, b + 8, 4);
+        if (geteuid() != 0) return failure(error, cap, "power SET requires root", 0x1bu);
+        if (b[0] != 1 || b[1] != 0xfe || b[2] || b[3] || tail || target < 70000 || target > 100000)
+            return failure(error, cap, "power SET outside validated board/client/window", 0x1fu);
+    } else {
+        memset(block, 0, size);
+        if (kind == 1u) { b[0] = 1; b[1] = 0xfe; }
+    }
+    uint32_t cmd = kind == 0u ? 0x2080a618u : kind == 1u ? 0x2080a61du : 0x2080e61eu;
+    uint32_t status = nvx_rm_control(s->ctl, s->client, s->subdevice, cmd, block, (uint32_t)size);
+    return status ? failure(error, cap, "board power control", status) : 0;
+}
+
 /* The API handshake every batch of this control must carry: the driver checks
  * these four fields before it looks at the instruction list at all. */
 static void thermal_batch_init(NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS *p)

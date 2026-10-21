@@ -7,7 +7,13 @@ mod gpu_type;
 pub use gpu::nvapi_init_attempted;
 pub mod legacy_vbios_parser;
 mod macos_clock_control;
+#[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
+mod macos_control_transaction;
+mod macos_power;
 pub use macos_clock_control::ClockOffsetWriteReport;
+pub use macos_power::{
+    PowerLimitTarget, PowerLimitWriteReport, PowerPolicySettings, validate_macos_power_limit_watts,
+};
 pub mod macos_eval;
 pub mod macos_offset;
 pub mod macos_rm;
@@ -24,7 +30,7 @@ pub use macos_rm::{
     NamedClockOffset, OffsetStep, OffsetStepTarget, OffsetStepVerdict,
     POWER_POLICY_UNREADABLE_REASON, PSTATE_FREQ_TABLE_UNREADABLE_REASON, PUBLIC_OFFSET_DOMAINS,
     QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus, QueryMacosRmThermalView,
-    RATED_TDP_UNWIRED_REASON, SetMacosRmClockOffset, SettingsCapabilities,
+    RATED_TDP_UNWIRED_REASON, SetMacosRmClockOffset, SetMacosRmPowerLimit, SettingsCapabilities,
     THERMAL_LIMIT_UNREADABLE_REASON, THERMAL_SIM_UNREADABLE_REASON,
     THERMAL_THRESHOLDS_UNREADABLE_REASON, TempSensorView, ThermalReadOutcome, ThermalReadout,
     abi_layout, native_abi_layout, parse_offset_delta, parse_offset_target, plan_offset_step,

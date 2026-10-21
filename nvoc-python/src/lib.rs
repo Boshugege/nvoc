@@ -1475,6 +1475,16 @@ fn settings_macos_rm_to_map(
             f64_value(mw as f64 / 1000.0),
         );
     }
+    if let Some(policy) = settings.power_limit_policy {
+        map.insert("power_limit_current".into(), watts(policy.current_mw));
+        map.insert("power_limit_min".into(), watts(policy.minimum_mw));
+        map.insert("power_limit_default".into(), watts(policy.default_mw));
+        map.insert("power_limit_max".into(), watts(policy.maximum_mw));
+        map.insert(
+            "power_limit_policy".into(),
+            serde_json::to_value(policy).unwrap_or(Value::Null),
+        );
+    }
     if let Some(link_gen) = settings.pcie_link_gen {
         map.insert("pcie_link_gen".into(), u64_value(link_gen as u64));
     }
@@ -1613,6 +1623,7 @@ fn settings_macos_rm_to_map(
                 bool_value(caps.graphics_offset_write),
             ),
             ("memory_offset_write", bool_value(caps.memory_offset_write)),
+            ("power_limit_write", bool_value(caps.power_limit_write)),
         ]),
     );
     if !settings.unavailable.is_empty() {
@@ -1826,14 +1837,11 @@ fn fan_power_backends(macos: bool) -> &'static str {
 }
 
 fn normalize_power_limits(target: &GpuTarget<'_>) -> PyResultValue {
-    // macOS RM: same dispatch rule as the other families. The enforced wall and
-    // the requested limit are already in the snapshot this backend publishes,
-    // so the entry answers from them instead of failing on the missing NVML
-    // handle; the two range ends come back null with the reason, and the
-    // projection is core's, so this entry cannot state more than the backend.
+    // Shared native policy decoder supplies configuration and bounds;
+    // the independently sampled RUSD wall keeps its own field.
     if target.has_macos_rm() {
         let device = target.macos_rm().map_err(to_py_err)?;
-        let report = device.status().map_err(to_py_err)?.power_limit_report();
+        let report = device.power_limit_report().map_err(to_py_err)?;
         let value = serde_json::to_value(&report).map_err(to_py_err)?;
         return Ok(value);
     }
@@ -3010,7 +3018,26 @@ fn set_power_limit(py: Python<'_>, gpu: &str, backend: &str, value: u32) -> PyRe
         let gpu: &str = &gpu_own;
         let backend: &str = &backend_own;
 
-        let backend = parse_backend(backend)?;
+        let backend = match backend.trim().to_ascii_lowercase().as_str() {
+            "macos-rm" | "macos_rm" | "macosrm" => "macos-rm",
+            "auto" | "default" => fan_power_backends(cfg!(target_os = "macos")),
+            _ => parse_backend(backend)?,
+        };
+        if backend == "macos-rm" {
+            let mw = nvoc_core::validate_macos_power_limit_watts(value).map_err(to_py_err)?;
+            with_target(gpu, backend, |target| {
+                run(
+                    target,
+                    nvoc_core::SetMacosRmPowerLimit {
+                        target: nvoc_core::PowerLimitTarget::Milliwatts(mw),
+                        cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                    },
+                )
+                .map_err(to_py_err)?;
+                Ok(Value::Null)
+            })?;
+            return Ok(());
+        }
         let inventory = {
             let mut inventory_cache = lock_inventory_cache();
             inventory_cache.entry(if backend == "nvml" {
@@ -6587,6 +6614,7 @@ mod tests {
             pstate: Some(8),
             power_limit_mw: Some(100_000),
             power_limit_requested_mw: Some(100_000),
+            power_limit_policy: None,
             pcie_link_gen: Some(3),
             memory_total_bytes: Some(4_294_967_296),
             memory_used_bytes: Some(209_649_664),
@@ -6635,6 +6663,7 @@ mod tests {
                 settings_restore: false,
                 graphics_offset_write: false,
                 memory_offset_write: false,
+                power_limit_write: false,
             },
             notes: vec!["read: ...".to_string()],
         };

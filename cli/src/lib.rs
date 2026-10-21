@@ -651,7 +651,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 CommandSpec {
                     adapters: &BOTH_BACKENDS,
                     preferred: BackendAdapter::Nvml,
-                    ..CommandSpec::new("get-public-power-limit", Group::Power, "Read the power-limit range: --nvml (auto default) reports the NVML power-management limits in watts (min/current/max); --nvapi reports the ClientPowerPolicies TDP percent range (min/default/max) plus the mobile TGP watt range (tgp_range) when the private ClientTgpWatt family is exposed; macOS RM reports the enforced wall and the requested limit in watts, with the two range ends null and the reason attached (that section publishes no min/max constraint pair)")
+                    ..CommandSpec::new("get-public-power-limit", Group::Power, "Read the power-limit range: --nvml (auto default) reports the NVML power-management limits in watts (min/current/max); --nvapi reports the ClientPowerPolicies TDP percent range (min/default/max) plus the mobile TGP watt range (tgp_range) when the private ClientTgpWatt family is exposed; macOS RM reports the configured board limit and its min/default/max watts, with the RUSD enforced/requested wall reported separately")
                 },
             ),
             (Command::GetPublicTempLimit, CommandSpec::new("get-public-temp-limit", Group::Thermal, "Read the NVAPI public temp-limit range (min/default/max Celsius + throttle curve)")),
@@ -793,7 +793,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 Command::ResetPowerLimit,
                 CommandSpec {
                     options: Box::leak(Box::new(["policy-index"])),
-                    ..CommandSpec::new("reset-power-limit", Group::Power, "Reset NVAPI TGP to rated/default (mobile)")
+                    ..CommandSpec::new("reset-power-limit", Group::Power, "Reset NVAPI TGP to rated/default (mobile); macOS RM restores the board policy default watts")
                 },
             ),
             (Command::ResetPrivateForcedPstateLockUser, CommandSpec::new("reset-private-forced-pstate-lock-user", Group::Clock, "Release a force-locked pstate via SetForcePstate(pstate=16, set_type=0) — pstate=16 is the bitmask=0 sentinel (GetForcePstate returns 16 when no force active). IDA-verified as the most likely release path.")),
@@ -1105,7 +1105,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     "WATT",
                     "TGP in watts, for example 140 or 140W",
                 )])),
-                    ..CommandSpec::new("set-power-limit", Group::Power, "Set TGP in watts: NVAPI path writes the mobile TGP slider (ClientPowerPolicies, --policy-index); NVML path writes the power-management limit (nvidia-smi -pl). Auto prefers NVAPI")
+                    ..CommandSpec::new("set-power-limit", Group::Power, "Set TGP in watts: NVAPI path writes the mobile TGP slider (ClientPowerPolicies, --policy-index); NVML path writes the power-management limit (nvidia-smi -pl). Auto prefers NVAPI; macOS RM uses the validated board power policy in watts")
                 },
             ),
             (

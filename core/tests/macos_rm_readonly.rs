@@ -394,3 +394,31 @@ fn the_offset_channel_reports_domains_records_and_its_own_window() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires the validated macOS TU116 RM driver; GETs only"]
+fn shared_power_limits_read_the_board_policy_without_initializing_nvapi() {
+    let _serial = serial();
+    let inventory = discover_targets(BackendSet::MacosRm).unwrap();
+    let targets = inventory.targets();
+    let target = targets[0];
+    let policy = target.macos_rm().unwrap().power_policy_settings().unwrap();
+    assert_eq!(
+        (policy.minimum_mw, policy.default_mw, policy.maximum_mw),
+        (70_000, 100_000, 100_000)
+    );
+    let shared = run(&target, nvoc_core::QueryPowerLimits).unwrap().output;
+    assert_eq!((shared.min_watts, shared.max_watts), (70.0, 100.0));
+    assert!((70.0..=100.0).contains(&shared.current_watts));
+    let report = target.macos_rm().unwrap().power_limit_report().unwrap();
+    assert_eq!(
+        (report.min_watt, report.default_watt, report.max_watt),
+        (Some(70.0), Some(100.0), Some(100.0))
+    );
+    assert_eq!(
+        report.current_watt,
+        Some(f64::from(policy.current_mw) / 1000.0)
+    );
+    assert!(!nvapi_init_attempted());
+    println!("policy={policy:?}; shared={shared:?}; report={report:?}");
+}

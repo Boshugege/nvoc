@@ -202,6 +202,11 @@ uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, v
 uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *session, uint32_t index, uint32_t write,
     void *block, size_t size, char *error, size_t cap);
 
+/* Fixed board power GET-info(0,20000B), GET-client(1,12B), SET-client(2,12B).
+ * SET admits only board policy1/client0xfe and the validated70..100W window. */
+uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *session, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap);
+
 /* The public thermal read face: NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2
  * (0x20800513), an in-tree header-defined opcode batch whose read opcodes
  * (targets/sensors available, a sensor's reading, its reading range, its target

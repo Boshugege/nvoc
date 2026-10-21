@@ -54,6 +54,8 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::GetPstateGlobalFreqOffset
             | Command::SetPstateGlobalFreqOffset
             | Command::ResetPstateGlobalFreqOffset
+            | Command::SetPowerLimit
+            | Command::ResetPowerLimit
             // The fan read is allowed for the same reason the offset read is:
             // this backend does publish a tachometer reading per cooler, so a
             // wholesale refusal would read as "the backend cannot". The parts of
@@ -101,7 +103,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -113,7 +115,8 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     validate(command)?;
     // Validate the per-domain request before discovery or any GPU access.
     let write = clock_write_request(invocation, command)?;
-    let _interrupt = write.as_ref().map(|_| InterruptGuard::install());
+    let power_write = power_write_request(invocation, command)?;
+    let _interrupt = (write.is_some() || power_write.is_some()).then(InterruptGuard::install);
     let inventory = discover_targets(BackendSet::MacosRm)?;
     let targets = inventory.targets();
     let selected = select_targets(&targets, &gpu_selector(invocation))?;
@@ -144,6 +147,16 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "domain": domain_label(domain), "offset_mhz": f64::from(report.applied_khz)/1000.0,
                         "offset_khz": report.applied_khz, "original_offset_khz": report.original_khz,
                         "readback_verified": report.readback_verified, "other_bytes_preserved": report.other_bytes_preserved})
+                }
+                Command::SetPowerLimit | Command::ResetPowerLimit => {
+                    let report = run(&target, nvoc_core::SetMacosRmPowerLimit {
+                        target: power_write.ok_or_else(|| CliError::new("missing power write request"))?,
+                        cancelled: &interrupted,
+                    })?.output;
+                    json!({"applied": true, "backend": "macos-rm", "mode": "board-power-limit",
+                        "power_watt": f64::from(report.applied_mw)/1000.0, "power_mw": report.applied_mw,
+                        "original_power_mw": report.original_mw, "readback_verified": report.readback_verified,
+                        "other_bytes_preserved": report.other_bytes_preserved})
                 }
                 // Named domains only. Core compares each record's own published
                 // frequency with the live clock of the same snapshot and reports
@@ -182,7 +195,7 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 // read yields nulls, never 0 W.
                 Command::GetPublicPowerLimit => {
                     serde_json::to_value(
-                        run(&target, nvoc_core::QueryMacosRmStatus)?.output.power_limit_report(),
+                        device.power_limit_report()?,
                     )?
                 }
                 // The legacy three-sensor thermal view. The array root and the
@@ -225,6 +238,7 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "telemetry": true, "performance_writes": false,
                         "graphics_offset_write": device.clock_offset_write_supported(ClockDomain::Graphics),
                         "memory_offset_write": device.clock_offset_write_supported(ClockDomain::Memory),
+                        "power_limit_write": device.power_limit_write_supported(),
                     }));
                 }
             }
@@ -258,6 +272,31 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     })
 }
 
+fn power_write_request(
+    invocation: &Invocation,
+    command: Command,
+) -> CliResult<Option<nvoc_core::PowerLimitTarget>> {
+    if !matches!(command, Command::SetPowerLimit | Command::ResetPowerLimit) {
+        return Ok(None);
+    }
+    if option_one(invocation, "policy-index").is_some() {
+        return Err(CliError::new(
+            "macOS board power limit does not accept an NVAPI --policy-index",
+        ));
+    }
+    let target = if command == Command::ResetPowerLimit {
+        nvoc_core::PowerLimitTarget::Default
+    } else {
+        let value = invocation
+            .positionals
+            .first()
+            .ok_or_else(|| CliError::new("missing power limit in watts"))?;
+        let watts = parse_u32_unit(value, "w", "watt")?;
+        nvoc_core::PowerLimitTarget::Milliwatts(nvoc_core::validate_macos_power_limit_watts(watts)?)
+    };
+    Ok(Some(target))
+}
+
 fn clock_write_request(
     invocation: &Invocation,
     command: Command,
@@ -279,7 +318,14 @@ fn clock_write_request(
         0
     } else {
         // Existing SET means absolute target MHz, not a delta from the snapshot.
-        mhz_to_khz_i32(parse_i32_unit(&invocation.positionals[0], "mhz", "mhz")?)?
+        mhz_to_khz_i32(parse_i32_unit(
+            invocation
+                .positionals
+                .first()
+                .ok_or_else(|| CliError::new("missing clock offset in MHz"))?,
+            "mhz",
+            "mhz",
+        )?)?
     };
     nvoc_core::validate_clock_offset_request(
         domain,
@@ -487,7 +533,7 @@ mod tests {
 
     #[test]
     fn unsupported_commands_are_rejected_before_driver_access() {
-        let invocation = parse_args(["set-power-limit", "100", "--macos-rm"]);
+        let invocation = parse_args(["set-temp-limit", "70", "--macos-rm"]);
         assert!(
             invocation
                 .unwrap_err()
@@ -496,7 +542,7 @@ mod tests {
         );
         // Also check callers constructing Invocations without the parser.
         let mut invocation = parse_args(["get-info", "--macos-rm"]).unwrap();
-        invocation.command = Some(Command::SetPowerLimit);
+        invocation.command = Some(Command::SetFanSpeed);
         let error = run_invocation(&invocation).unwrap_err().to_string();
         assert!(error.contains("unavailable on macOS RM"));
         assert!(!error.contains("driver loaded"));
@@ -508,11 +554,7 @@ mod tests {
         // Stage-8 read face: throttle reasons are RM-backed now, so the
         // dedicated command joins the macOS allow-list.
         assert!(validate(Command::GetThrottleReasons).is_ok());
-        for command in [
-            Command::SetPowerLimit,
-            Command::SetTempLimit,
-            Command::SetFanSpeed,
-        ] {
+        for command in [Command::SetTempLimit, Command::SetFanSpeed] {
             let error = validate(command).unwrap_err().to_string();
             assert!(error.contains("unavailable on macOS RM"), "{error}");
         }
@@ -575,6 +617,28 @@ mod tests {
     }
 
     #[test]
+    fn power_writes_validate_watts_and_refuse_foreign_policy_selectors() {
+        for args in [
+            vec!["set-power-limit", "69", "--macos-rm"],
+            vec!["set-power-limit", "101", "--macos-rm"],
+            vec!["set-power-limit", "99", "--policy-index", "2", "--macos-rm"],
+        ] {
+            let invocation = parse_args(args).unwrap();
+            assert!(power_write_request(&invocation, invocation.command.unwrap()).is_err());
+        }
+        let invocation = parse_args(["set-power-limit", "99", "--macos-rm"]).unwrap();
+        assert!(matches!(
+            power_write_request(&invocation, Command::SetPowerLimit).unwrap(),
+            Some(nvoc_core::PowerLimitTarget::Milliwatts(99_000))
+        ));
+        let invocation = parse_args(["reset-power-limit", "--macos-rm"]).unwrap();
+        assert!(matches!(
+            power_write_request(&invocation, Command::ResetPowerLimit).unwrap(),
+            Some(nvoc_core::PowerLimitTarget::Default)
+        ));
+    }
+
+    #[test]
     fn the_fan_read_is_allowed_and_its_unfillable_fields_say_so() {
         // Stage 11 item 5, fan family. This backend does publish a tachometer
         // reading per cooler (the same snapshot `get-status` reports), so
@@ -592,18 +656,13 @@ mod tests {
     }
 
     #[test]
-    fn the_power_limit_read_is_allowed_while_its_write_half_stays_refused() {
-        // Stage 11 item 5, power family. The enforced wall and the requested
-        // limit are in the snapshot this backend already publishes, so the entry
-        // answers from them; the two range ends come back null with the reason,
-        // and no power SET is issued on any macOS path.
+    fn board_power_read_set_and_reset_are_allowed_while_other_policies_stay_refused() {
+        // Board milliwatts use the validated shared transaction. Separate
+        // percentage/rated-TDP families retain their own unsupported contracts.
         assert!(validate(Command::GetPublicPowerLimit).is_ok());
-        for command in [
-            Command::SetPowerLimit,
-            Command::ResetPowerLimit,
-            Command::SetPublicTgpPercent,
-            Command::GetRatedTdp,
-        ] {
+        assert!(validate(Command::SetPowerLimit).is_ok());
+        assert!(validate(Command::ResetPowerLimit).is_ok());
+        for command in [Command::SetPublicTgpPercent, Command::GetRatedTdp] {
             let error = validate(command).unwrap_err().to_string();
             assert!(error.contains("unavailable on macOS RM"), "{error}");
         }
@@ -691,7 +750,7 @@ mod tests {
         // `every_refused_read_of_the_three_families_names_its_layer`), because
         // the list ends by explaining a write gate, which is the wrong layer
         // for a read.
-        let list_shaped = validate(Command::SetPowerLimit).unwrap_err().to_string();
+        let list_shaped = validate(Command::SetTempLimit).unwrap_err().to_string();
         assert!(list_shaped.contains("supported commands:"), "{list_shaped}");
     }
 

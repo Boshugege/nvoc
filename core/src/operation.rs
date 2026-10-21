@@ -176,6 +176,14 @@ impl GpuOperation for QueryPowerLimits {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        if target.has_macos_rm() {
+            let policy = target.macos_rm()?.power_policy_settings()?;
+            return Ok(super::result::PowerLimits {
+                min_watts: policy.minimum_mw as f32 / 1000.0,
+                current_watts: policy.current_mw as f32 / 1000.0,
+                max_watts: policy.maximum_mw as f32 / 1000.0,
+            });
+        }
         let (min_watts, current_watts, max_watts) =
             low_nvml::query_nvml_power_watts(target.nvml()?, target.id.0).ok_or_else(|| {
                 Error::Custom(format!(
@@ -204,6 +212,16 @@ impl GpuOperation for SetPowerLimit {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        if target.has_macos_rm() {
+            let mw = crate::validate_macos_power_limit_watts(self.watts)?;
+            let report = target
+                .macos_rm()?
+                .set_power_limit(crate::PowerLimitTarget::Milliwatts(mw), &|| false)?;
+            return Ok(AppliedValue {
+                requested: self.watts,
+                applied: report.applied_mw / 1000,
+            });
+        }
         low_nvml::set_nvml_power_limit(target.nvml()?, target.id.0, self.watts)?;
         Ok(AppliedValue {
             requested: self.watts,

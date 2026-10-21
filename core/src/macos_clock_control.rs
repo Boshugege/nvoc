@@ -56,59 +56,14 @@ mod transaction {
         })
     }
 
-    pub(crate) trait ClockControl {
-        fn get(&mut self) -> Result<[u8; BYTES], Error>;
-        fn set(&mut self, block: &[u8; BYTES]) -> Result<(), Error>;
-    }
+    pub(crate) use crate::macos_control_transaction::ControlBlock as ClockControl;
 
     fn value(block: &[u8; BYTES], selected: Selection) -> i32 {
         let at = selected.value();
         i32::from_le_bytes(block[at..at + 4].try_into().expect("fixed size"))
     }
 
-    struct Rollback<'a, T: ClockControl> {
-        io: &'a mut T,
-        original: [u8; BYTES],
-        selected: Selection,
-        armed: bool,
-    }
-
-    impl<T: ClockControl> Rollback<'_, T> {
-        fn restore(&mut self) -> Result<(), Error> {
-            // One bounded retry; verify even if SET reports refusal, since it may
-            // have done nothing or applied the bytes before returning an error.
-            let mut detail = String::new();
-            for _ in 0..2 {
-                let set = self.io.set(&self.original);
-                match self.io.get() {
-                    Ok(block) if block == self.original => {
-                        self.armed = false;
-                        return Ok(());
-                    }
-                    result => detail = format!("SET {set:?}, readback {result:?}"),
-                }
-            }
-            Err(Error::Custom(format!(
-                "RESTORE NOT VERIFIED for {}: original {} kHz; {detail}",
-                self.selected.name,
-                value(&self.original, self.selected)
-            )))
-        }
-    }
-
-    impl<T: ClockControl> Drop for Rollback<'_, T> {
-        fn drop(&mut self) {
-            if self.armed {
-                // Explicit paths report restore failures; Drop only covers unwinding.
-                // SIGKILL, process abort and power loss cannot execute this fallback.
-                if let Err(error) = self.restore() {
-                    eprintln!("macOS RM: {error}");
-                }
-            }
-        }
-    }
-
-    pub(crate) fn apply<T: ClockControl>(
+    pub(crate) fn apply<T: ClockControl<BYTES>>(
         io: &mut T,
         domain: ClockDomain,
         target: i32,
@@ -156,51 +111,19 @@ mod transaction {
             readback_verified: true,
             other_bytes_preserved: true,
         };
-        if cancelled() {
-            return Err(Error::Custom("clock offset cancelled before SET".into()));
-        }
-        if target == original_khz {
-            return Ok(report);
-        }
         let mut wanted = original;
         wanted[at..at + 4].copy_from_slice(&target.to_le_bytes());
-        let mut rollback = Rollback {
+        crate::macos_control_transaction::write_block(
             io,
             original,
-            selected,
-            armed: true,
-        };
-        let outcome = (|| {
-            rollback.io.set(&wanted)?;
-            let after = rollback.io.get()?;
-            if after != wanted {
-                return Err(Error::Custom(format!(
-                    "clock readback mismatch: wanted {target} kHz, saw {} kHz or changed other bytes",
-                    value(&after, selected)
-                )));
-            }
-            if cancelled() {
-                return Err(Error::Custom("clock offset cancelled after SET".into()));
-            }
-            Ok(())
-        })();
-        match outcome {
-            Ok(()) => {
-                rollback.armed = false; // Successful ordinary SET persists like existing backends.
-                Ok(report)
-            }
-            Err(error) => {
-                let restored = rollback.restore();
-                // Explicit retries are complete. Do not hide a third write in Drop.
-                rollback.armed = false;
-                match restored {
-                    Ok(()) => Err(Error::Custom(format!(
-                        "{error}; original block restored and verified"
-                    ))),
-                    Err(restore) => Err(Error::Custom(format!("{error}; {restore}"))),
-                }
-            }
-        }
+            wanted,
+            cancelled,
+            format!(
+                "{} clock offset: original {original_khz} kHz, target {target} kHz",
+                selected.name
+            ),
+        )?;
+        Ok(report)
     }
 
     #[cfg(test)]
@@ -229,7 +152,7 @@ mod transaction {
                 fault,
             }
         }
-        impl ClockControl for Fake {
+        impl ClockControl<BYTES> for Fake {
             fn get(&mut self) -> Result<[u8; BYTES], Error> {
                 self.gets += 1;
                 if self.fault == "snapshot" || self.fault == "get" && self.gets == 2 {
