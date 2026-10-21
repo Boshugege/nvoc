@@ -1859,3 +1859,47 @@ Metal 校验器作为补充**。功能表据此确认选择依据与已/未实�
 **卡点（等用户）** ✗：`FATAL ERROR: Cannot continue without a valid license`（`idat` 与 idalib 都是）。机器上没有 `~/.idapro/*.hexlic`，安装包里也不带。需要一份 `idapro.hexlic` 放到 `~/.idapro/`，之后 `idat`／idalib／`idalib-mcp` 才动得了。
 
 **另一个坑（未解）** ✗：`uv tool install ida-pro-mcp` 失败在 `cryptography` 从源码构建——本机无 brew、无 OpenSSL 头（CLT SDK 里也没有 `openssl/opensslv.h`），`openssl-sys` 编译失败。可选解法：①为工具环境固定一个**有 wheel**的 `cryptography`（abi3 轮子若存在就不会编译）；②装一份 openssl 并给 `OPENSSL_DIR`；③绕开 MCP 直接用 idalib 的 Python（分析目的不变，只是少一层包装）。
+
+## 一百十四、无头 IDA 落地：方法表记录的真实布局，以及 `0x2080901b` / `0x2080d01c` 的 handler 骨架（只读静态读，桶 B）
+
+**① 能力状态（先说坏消息）**
+- GUI 装好、`~/.idapro/idapro.hexlic` 就位、两处 RSA 模数被替换（`search` → `replace`，两个文件各 2 处）、两个 dylib 各自 `codesign --force --deep --sign -` 之后：
+  - **`idat -A` 仍然是坏的**：`Failed to initialize IDA as library (error code 2)`，`rc=2`，且 `ida.log` 根本不生成。
+  - **`idalib` 是通的**：`import idapro; idapro.open_database(...)` 返回 0，`get_library_version()` = `(9, 5, 261001)`。
+  - 结论：后续一律走 idalib 的 Python，不再试 `idat`。
+- 两个坑记下来：脚本命名 `dis.py` 会遮蔽标准库 `dis`，`inspect` 一导入就崩在环形 import 上，改名 `idadis.py`；`set_processor_type` 在 `ida_idp` 而不在 `ida_ida`，`load_binary_file` 是 7 参（多了 `binoff`/`nbytes`）。最终发现这两步都多余：**`gsp_tu10x.bin` 自己就是 ELF64（`e_machine` 243），直接 `open_database` 就行**。
+
+**② 方法表记录布局（对 `extract-gsp-method-table.py` 输出的更正）**
+- 那个 TSV 的第 5 列是**记录所在偏移**，不是 `pFunc`。真实布局是 32 字节步长，`pFunc` 在 `+0x10`，值是镜像虚拟地址（基址 `0x4000000`）：
+
+```
++0x00 methodId   +0x04 paramSize   +0x08 pClassInfo   +0x10 pFunc   +0x18 flags   +0x1c accessRight
+```
+
+- 文件偏移换算：`.fwimage` 段 `addr=0`、`off=0x40`，所以 `off_file = 0x40 + (pFunc - 0x4000000)`。布局不是猜的——`0x2080901a/1b/1c/1d/1e` 五行正好按 `0x20` 间距连续排列且 `paramSize` 各不相同。
+- 两条：
+  - GET `0x2080901b` 记录 @`0x63678`，`paramSize=2108`，`pFunc=0x4d3b464` → 文件 `0xd3b4a4`
+  - SET `0x2080d01c` 记录 @`0x65ad8`，`paramSize=2108`，`pFunc=0x4d5c3c0` → 文件 `0xd5c400`
+- **两条的 `paramSize` 都是 2108**：这是我们此前只靠实测才敢说的"这对 id 互为读写孪生"，现在有了固件侧的独立证据。
+
+**③ 骨架（`riscv`/64 位，从 `addi sp,sp,-0x30` 序言起读）**
+
+GET（`0xd3b464`）：
+
+```
+a5 = *(a0+0x158); s1 = *(a5+0xe0)                 ; 引擎/通道对象
+a5 = *(s1+0x1f88); if (!a5) return 0x56           ; 上下文未建
+a5 += 0x1000; a0 = *(a5+0x1148); if (!a0) → 0x5f2d188 报错
+a5 = *(a0+0x20); if (!a5) → 0x5f2d158; a5 = *(a5)
+a1 = 0; jalr a5                                   ; 前置（加锁/取快照）
+if (!a0) → 0x5f2d188; a5 = *(a0+0x38); jr a5       ; 尾部尾调用，真正拷出
+```
+
+SET（`0xd5c3c0`）同形，但**多两道前置门槛**：`*(s1+0x2050)` 非空且 `lbu +0x4f4` 非零（否则跳 `0xd5c51c`）；随后 `lbu`( `*(*(s1+0x1f88)+0x1148)` `+0x179` ) 非零则跳 `0xd5c5ac`。
+
+- 这解释了此前"`+8` 取 `≥2` 就回 `0x62`"为什么只在 SET 侧出现：GET 根本没有这两级分支，两条 id 不是同一段代码的两个方向，而是两套各自带门的封装。
+- 失败/前置路径返回的立即数这次看到 `0x56`（上下文未建）和 `0x40`；它们与实测见过的 `0x62`/`0x65` 同属一张状态表，要把它对上名字还得靠 `pClassInfo`。
+
+**④ 边界** ✓ 全部只读（库建在 `/tmp`），设备未动；**"值是否到达硬件"这一条没有变化**。IDA 是 `ida95b1` beta 构建，反汇编结果也还没与该固件的签名/版本交叉验证，所以本条只到"链在哪、门在哪"这一层。
+
+**⑤ 下一步**：`*(a0+0x20)` 和 `*(a0+0x38)` 都是对象 vtable 槽，顺着它们找到真正 memcpy 那 2108 字节、读 `+4` 掩码、落地 12 个值 dword 的段，以及 `+8` 控制字与 stamp 的比较点，再回看 `0x62` 的产生处。
