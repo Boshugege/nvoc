@@ -1,4 +1,4 @@
-/* Shared C ABI for the read-only macOS RM backend.
+/* Shared C ABI for the macOS RM backend.
  *
  * This header is the C-side source of truth for the struct layouts and the
  * entry-point signatures that core/src/macos_rm.rs declares in its
@@ -195,6 +195,12 @@ uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *session, nvoc_rm_sample *
     3 /* 776 bytes: live per-domain frequency and raw extra fields */
 uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, void *out,
                                       size_t size, char *error, size_t cap);
+
+/* Private core-only transaction transport. The Rust backend serializes the
+ * entire transaction and validates identity/mode/range. SET requires root and
+ * forwards only record index zero; it never accepts an arbitrary RM id. */
+uint32_t nvoc_macos_rm_session_core_clock(nvoc_rm_session *session, uint32_t write,
+    void *block, size_t size, char *error, size_t cap);
 
 /* The public thermal read face: NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2
  * (0x20800513), an in-tree header-defined opcode batch whose read opcodes

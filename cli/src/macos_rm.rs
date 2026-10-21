@@ -52,6 +52,8 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             // Refusing the command outright would read as "the backend cannot",
             // which is exactly what it can.
             | Command::GetPstateGlobalFreqOffset
+            | Command::SetPstateGlobalFreqOffset
+            | Command::ResetPstateGlobalFreqOffset
             // The fan read is allowed for the same reason the offset read is:
             // this backend does publish a tachometer reading per cooler, so a
             // wholesale refusal would read as "the backend cannot". The parts of
@@ -99,8 +101,9 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. Performance writes stay gated twice over: the clock SET twin (0x2080D01C, one category byte over from the read: `0x2080901B` + 0x40 on the legacy-non-privileged byte and +1 on the message id) is a 0xC0-0xFF write id, so this unprivileged client is refused with 0x1b before the GSP sees it, and even behind that gate no write is issued until the field identity, the bounded step and the restore path are verified on the device.",
-            command.name()
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core only), reset-pstate-global-freq-offset --domain core, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            command.name(),
+            nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
     }
 }
@@ -108,6 +111,9 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
 pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Execution> {
     // Refuse unsupported commands before opening IOKit or allocating RM objects.
     validate(command)?;
+    // Validate the per-domain request before discovery or any GPU access.
+    let write = clock_write_request(invocation, command)?;
+    let _interrupt = write.as_ref().map(|_| InterruptGuard::install());
     let inventory = discover_targets(BackendSet::MacosRm)?;
     let targets = inventory.targets();
     let selected = select_targets(&targets, &gpu_selector(invocation))?;
@@ -128,6 +134,16 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 Command::GetStatus => serde_json::to_value(run(&target, nvoc_core::QueryMacosRmStatus)?.output)?,
                 Command::GetSettings => {
                     serde_json::to_value(run(&target, nvoc_core::QueryMacosRmSettings)?.output)?
+                }
+                Command::SetPstateGlobalFreqOffset | Command::ResetPstateGlobalFreqOffset => {
+                    let (domain, khz) = write.ok_or_else(|| CliError::new("missing clock write request"))?;
+                    let report = run(&target, nvoc_core::SetMacosRmClockOffset {
+                        domain, khz, cancelled: &interrupted,
+                    })?.output;
+                    json!({"applied": true, "backend": "macos-rm", "mode": "domain-offset",
+                        "domain": domain_label(domain), "offset_mhz": f64::from(report.applied_khz)/1000.0,
+                        "offset_khz": report.applied_khz, "original_offset_khz": report.original_khz,
+                        "readback_verified": report.readback_verified, "other_bytes_preserved": report.other_bytes_preserved})
                 }
                 // Named domains only. Core compares each record's own published
                 // frequency with the live clock of the same snapshot and reports
@@ -238,6 +254,37 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
         },
         results,
     })
+}
+
+fn clock_write_request(
+    invocation: &Invocation,
+    command: Command,
+) -> CliResult<Option<(ClockDomain, i32)>> {
+    if !matches!(
+        command,
+        Command::SetPstateGlobalFreqOffset | Command::ResetPstateGlobalFreqOffset
+    ) {
+        return Ok(None);
+    }
+    if command == Command::ResetPstateGlobalFreqOffset && option_one(invocation, "domain").is_none()
+    {
+        return Err(CliError::new(
+            "macOS reset requires --domain core; an all-domain reset is not yet validated",
+        ));
+    }
+    let domain = option_domain(invocation, ClockDomain::Graphics)?;
+    let khz = if command == Command::ResetPstateGlobalFreqOffset {
+        0
+    } else {
+        // Existing SET means absolute target MHz, not a delta from the snapshot.
+        mhz_to_khz_i32(parse_i32_unit(&invocation.positionals[0], "mhz", "mhz")?)?
+    };
+    nvoc_core::validate_clock_offset_request(
+        domain,
+        khz,
+        option_one(invocation, "pstate").is_some(),
+    )?;
+    Ok(Some((domain, khz)))
 }
 
 /// The `--plan-delta` half of the offset entry: one request, published as the
@@ -461,7 +508,6 @@ mod tests {
         assert!(validate(Command::GetThrottleReasons).is_ok());
         for command in [
             Command::SetPowerLimit,
-            Command::SetPstateGlobalFreqOffset,
             Command::SetTempLimit,
             Command::SetFanSpeed,
         ] {
@@ -481,14 +527,49 @@ mod tests {
         // uncorroborated domain is refused instead of an uncorroborated number
         // being printed.
         assert!(validate(Command::GetPstateGlobalFreqOffset).is_ok());
-        // The write half of the same pair keeps the terse capability refusal:
-        // there the driver really does refuse, so no layer needs naming.
-        let write = validate(Command::SetPstateGlobalFreqOffset)
-            .unwrap_err()
-            .to_string();
-        assert!(write.contains("unavailable on macOS RM"), "{write}");
-        assert!(write.contains("0x2080D01C"), "{write}");
-        assert!(!write.contains("named"), "{write}");
+        assert!(validate(Command::SetPstateGlobalFreqOffset).is_ok());
+        assert!(validate(Command::ResetPstateGlobalFreqOffset).is_ok());
+    }
+
+    #[test]
+    fn clock_writes_validate_absolute_target_and_explicit_domain_contract() {
+        let set = parse_args(["set-pstate-global-freq-offset", "15", "--macos-rm"]).unwrap();
+        assert_eq!(
+            clock_write_request(&set, Command::SetPstateGlobalFreqOffset).unwrap(),
+            Some((ClockDomain::Graphics, 15_000))
+        );
+        let reset = parse_args([
+            "reset-pstate-global-freq-offset",
+            "--domain",
+            "core",
+            "--macos-rm",
+        ])
+        .unwrap();
+        assert_eq!(
+            clock_write_request(&reset, Command::ResetPstateGlobalFreqOffset).unwrap(),
+            Some((ClockDomain::Graphics, 0))
+        );
+        for args in [
+            vec![
+                "set-pstate-global-freq-offset",
+                "15",
+                "--pstate",
+                "P0",
+                "--macos-rm",
+            ],
+            vec!["set-pstate-global-freq-offset", "19", "--macos-rm"],
+            vec![
+                "set-pstate-global-freq-offset",
+                "15",
+                "--domain",
+                "memory",
+                "--macos-rm",
+            ],
+            vec!["reset-pstate-global-freq-offset", "--macos-rm"],
+        ] {
+            let invocation = parse_args(args).unwrap();
+            assert!(clock_write_request(&invocation, invocation.command.unwrap()).is_err());
+        }
     }
 
     #[test]

@@ -6,6 +6,8 @@ mod gpu_type;
 
 pub use gpu::nvapi_init_attempted;
 pub mod legacy_vbios_parser;
+mod macos_clock_control;
+pub use macos_clock_control::ClockOffsetWriteReport;
 pub mod macos_eval;
 pub mod macos_offset;
 pub mod macos_rm;
@@ -22,10 +24,11 @@ pub use macos_rm::{
     NamedClockOffset, OffsetStep, OffsetStepTarget, OffsetStepVerdict,
     POWER_POLICY_UNREADABLE_REASON, PSTATE_FREQ_TABLE_UNREADABLE_REASON, PUBLIC_OFFSET_DOMAINS,
     QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus, QueryMacosRmThermalView,
-    RATED_TDP_UNWIRED_REASON, SettingsCapabilities, THERMAL_LIMIT_UNREADABLE_REASON,
-    THERMAL_SIM_UNREADABLE_REASON, THERMAL_THRESHOLDS_UNREADABLE_REASON, TempSensorView,
-    ThermalReadOutcome, ThermalReadout, abi_layout, native_abi_layout, parse_offset_delta,
-    parse_offset_target, plan_offset_step, public_offset_domain, unnamed_offset_reason,
+    RATED_TDP_UNWIRED_REASON, SetMacosRmClockOffset, SettingsCapabilities,
+    THERMAL_LIMIT_UNREADABLE_REASON, THERMAL_SIM_UNREADABLE_REASON,
+    THERMAL_THRESHOLDS_UNREADABLE_REASON, TempSensorView, ThermalReadOutcome, ThermalReadout,
+    abi_layout, native_abi_layout, parse_offset_delta, parse_offset_target, plan_offset_step,
+    public_offset_domain, unnamed_offset_reason, validate_clock_offset_request,
 };
 mod nvapi;
 pub mod nvml;

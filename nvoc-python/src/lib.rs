@@ -1608,6 +1608,10 @@ fn settings_macos_rm_to_map(
             ("settings_write", bool_value(caps.settings_write)),
             ("settings_restore", bool_value(caps.settings_restore)),
             ("performance_writes", bool_value(caps.settings_write)),
+            (
+                "graphics_offset_write",
+                bool_value(caps.graphics_offset_write),
+            ),
         ]),
     );
     if !settings.unavailable.is_empty() {
@@ -2239,19 +2243,6 @@ fn clock_offset_backend(raw: Option<&str>) -> PyResult<&'static str> {
     }
 }
 
-/// Refuse a write the macOS RM backend cannot accept, naming the gate.
-///
-/// The read half of the same family answers, so a platform-level "NVAPI and NVML
-/// are not available here" would be true of the host and misleading about the
-/// entry: what is missing is the verification the gate waits for, and core's
-/// constant says which.
-fn macos_write_gate(entry: &str, backend: &str) -> PyResult<()> {
-    match macos_write_gate_reason(entry, backend) {
-        Some(reason) => Err(PyRuntimeError::new_err(reason)),
-        None => Ok(()),
-    }
-}
-
 /// The gate's message as a plain string, so the decision is testable without a
 /// Python interpreter: this crate's tests run with `--no-default-features`
 /// (no `extension-module`, hence no interpreter), where even formatting a
@@ -2278,6 +2269,16 @@ fn macos_write_gate_here(entry: &str) -> PyResult<()> {
         Some(reason) => Err(PyRuntimeError::new_err(reason)),
         None => Ok(()),
     }
+}
+
+fn macos_clock_target_khz(mhz: f64) -> Result<i32, String> {
+    let khz = (mhz * 1000.0).round();
+    if !mhz.is_finite() || !(-18_750.0..=18_750.0).contains(&khz) {
+        return Err(
+            "macOS additive clock target must be finite and within -18.75..18.75 MHz".into(),
+        );
+    }
+    Ok(khz as i32)
 }
 
 /// The macOS RM *read* faces that have no source in this backend: name the layer
@@ -2933,15 +2934,29 @@ fn set_clock_offset(
             )));
         }
         let backend = clock_offset_backend(Some(backend))?;
-        // On macOS the offset read answers from the snapshot and this write does
-        // not yet: say which layer that is, not that the host lacks a runtime.
-        macos_write_gate("set_clock_offset", backend)?;
         let domain = parse_domain(domain)?;
+        if backend == "macos-rm" {
+            // Preserve the public MHz target contract, while rejecting per-Pstate
+            // semantics the RM domain control does not implement.
+            let khz = macos_clock_target_khz(value).map_err(invalid_value)?;
+            nvoc_core::validate_clock_offset_request(domain, khz, pstate.is_some())
+                .map_err(to_py_err)?;
+            with_target(gpu, backend, |target| {
+                run(
+                    target,
+                    nvoc_core::SetMacosRmClockOffset {
+                        domain,
+                        khz,
+                        cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                    },
+                )
+                .map_err(to_py_err)?;
+                Ok(Value::Null)
+            })?;
+            return Ok(());
+        }
         let inventory = {
             let mut inventory_cache = lock_inventory_cache();
-            // The macOS spelling never reaches this line today (the gate above
-            // refuses it), so when the gate opens this is the table to extend --
-            // the read half already resolves it through `with_target`.
             inventory_cache.entry(if backend == "nvml" {
                 BackendSet::Nvml
             } else {
@@ -6438,6 +6453,15 @@ mod tests {
     /// answers on macOS, so the write names the gate rather than a host runtime
     /// that does not exist there.
     #[test]
+    fn macos_clock_targets_preserve_fractional_mhz_and_reject_nonfinite_or_outside_window() {
+        assert_eq!(macos_clock_target_khz(0.25).unwrap(), 250);
+        assert_eq!(macos_clock_target_khz(-15.0).unwrap(), -15_000);
+        for value in [f64::NAN, f64::INFINITY, -18.751, 18.751, 1e30] {
+            assert!(macos_clock_target_khz(value).is_err());
+        }
+    }
+
+    #[test]
     fn macos_rm_offset_backends_and_the_write_gate_name_the_right_layer() {
         // Absent or `auto` resolves to the platform's own backend, so a caller
         // that says nothing gets the one that exists on the host it runs on.
@@ -6608,6 +6632,7 @@ mod tests {
                 settings_read: true,
                 settings_write: false,
                 settings_restore: false,
+                graphics_offset_write: false,
             },
             notes: vec!["read: ...".to_string()],
         };

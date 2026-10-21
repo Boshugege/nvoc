@@ -2335,3 +2335,33 @@ Python 构建缺口也已定位并修复：原 `cargo build -p pynvoc` 在 macOS
 测试与产物：core 单测 122 passed，新增反例覆盖 signed kHz、目录 index≠domain bit、type03、相对模式、type不符、频率缺失、三读拒绝和重复域；真实导入扩展后 Python import/参数验证测试 52 passed、0 skipped。全门禁及最终构建/实机复测见本批仓库外产物及 INDEX。初次 Python 查询使用错误的序号而非 PCI id 返回 no GPU selected，在写入前结束，之后按发现 id 更正重跑；保留失败日志，不当硬件故障。原始闭环 `outputs/stage-consumer-offset-read-20261021T155644Z/`，构建/测试日志 `consumer-offset-*-20261021.txt`；此后最终 session 身份/close 增量的复测另记本批最终目录。
 
 最终补记：session 身份校验/显式 close 与门禁说明更正后的最终构建 `cargo build -p nvoc-cli -p pynvoc --locked` exit0；同一读数闭环在 `stage-consumer-offset-read-20261021T160227Z/` 再现（stock 0 → 核心0.25/显存0 → 全部恢复0，两个消费者一致、前后healthy）。最终 `cargo xtask ci` 使用指定三环境变量 **CI_EXIT=0**；`consumer-offset-ci-20261021.txt`；实际导入扩展的 Python import/validation **52/52、0 skip** 单独记录在 `consumer-offset-python-tests-20261021.txt`，不能用全门禁内未加载扩展的 skip 替代该证据。显式只读硬件测试 `the_offset_channel_reports_domains_records_and_its_own_window -- --ignored --nocapture` 的最终结果见 `consumer-offset-hardware-read-20261021.txt`。
+
+
+## 一百三十七、核心偏移接入共享事务、正式 CLI/Python，产品同负载 A/B/A 实测
+
+选择依据：§一百三十五/一百三十六已分别确认 selector-zero、signed i32 kHz、directory index 编址、真实核心 +15 MHz 和公共读数。由此实现集中后端事务，再验证原有消费者命令，而不是直接打开全局设置开关。
+
+实现与契约：
+
+- `SetMacosRmClockOffset` 复用共享 operation/run 分发。Rust 事务在同一 transport mutex 下 GET2108 B 快照，仅修改 record0 的 `+12..+16`，SET 后比较全部2108 B；目标是**绝对配置偏移**，不是在当前值上累加。原成功 SET 持续生效，与现有 setter 一致；失败或合作式取消则恢复原快照，最多两次恢复尝试，并完整比较。恢复未确认明确报 `RESTORE NOT VERIFIED`。Drop 只兜底 unwind，不宣称 SIGKILL、abort 或断电恢复。
+- 原生桥只接受固定 GET/SET 与完整2108 B，不提供任意 RM id；SET 要求 root。每次校验发现/会话 PCI、device、RM identity，限定已测 `10de:2187` / `610.57.04`，并重新读取 directory/range，要求 index0 唯一对应 domain1/type0808、范围仍为 ±18750 kHz。快照必须 selector0，目标与原值均在范围内，单次变化幅度≤18750 kHz。其它字节完整保留。
+- 正式 CLI `set-pstate-global-freq-offset <integer MHz> --macos-rm` 支持核心；`reset-pstate-global-freq-offset --domain core --macos-rm` 将偏移设0。reset要求显式域，避免把核心归零冒充全域恢复。显式 `--pstate`、其它域和越界值在 discovery 前拒绝。输出包含原值、目标、模式、回读和保留结果。SIGINT 使用已有 InterruptGuard。
+- `pynvoc.set_clock_offset(gpu, 'macos-rm', 'core', MHz, None)` 进入同一事务，保留小数 MHz→舍入 kHz；拒绝 P-state/其它域/非有限或越界目标，detach期间合作式检查 Python signals。GPU使用发现的id。NVAPI/NVML原分支保持。Python `reset_core_clocks` 的完整解锁语义尚未接入，当前可用 set target0 只重置加法偏移。
+- `graphics_offset_write` 是独立能力；`SETTINGS_WRITE_SUPPORTED` / `SETTINGS_RESTORE_SUPPORTED` 仍false，表示通用整组设置/恢复尚未完成，不能误启用其它控制族、服务闭环或无人值守优化。进程内互斥不等于跨进程排他，外部工具并发写不具备原子性保证。
+
+实际验证（桶 A）：
+
+| 产品动作 | 实测结果 |
+| --- | --- |
+| CLI 设1 MHz → Python设0.25 MHz → CLI显式core reset | 0→1000→250→0 kHz；Python的0.25替换1，没有累加；显存配置保持0。前后四种mask各2108 B全部一致，共8432 B；两端anchor healthy |
+| 正式CLI在同一10秒NVK负载中设15 MHz，再恢复0 | 稳定前段1950000 → 写入段1965000 → 恢复段1950000 kHz；RM776与稳定段RUSD一致。显存6000984 kHz保持，负载/监控exit0；四种mask完整恢复8432 B，前后healthy |
+| 权限/请求拒绝 | 非root正式CLI返回RM `0x1b`，偏移不变；CLI/Python越界、显式P-state、显存请求在无效GPU选择之前报告对应契约错误 |
+| 事务故障回归 | SET已应用后报错、readback GET失败、其它字节变化、写后取消均精确恢复；快照失败/模式错误不写；恢复失败有显式诊断；绝对值、no-op、步长/范围边界有单测 |
+
+原始产物：仓库外 `outputs/stage-product-core-set-final-20261022T012500Z/`、`stage-product-core-aba-20261022T013100Z/`、`stage-product-core-rejections-20261022T013000Z/`。目录名只是标识，实际时间以 events/log 内记录为准。首批 `stage-product-core-set-20261022T010000Z/` 的比对脚本用 re.match 漏掉带前缀的十六进制行，误报失败；改用 re.search 后对原始日志复核全部一致，保留失败记录。最终批使用修正后的解析器，未依靠重新写入掩盖问题。
+
+验证：测试机 core128、CLI92、Python Rust18（`--no-default-features --lib`）通过；真实扩展导入的 import/validation52/52、0skip。默认extension-module的Rust嵌入测试链接失败，按既有测试契约关闭该feature运行；不把链接失败当硬件故障。全门禁的Python GPU skip不能代替真实扩展测试。最终指定三个环境变量的 `cargo xtask ci`、原生构建和当前源复测结果见本批INDEX与日志。
+
+分档：**核心加法偏移公共core/CLI/Python SET、回读、核心归零、保存原值恢复已实现并实测**。模拟故障/取消与恢复失败属单测覆盖，未宣称实机强制造错。仅10秒低强度图形负载，不是稳定性验收。显存写、相对模式、锁频/解锁、全设置恢复、UI交互和自动优化仍未因此完成；完整阶段0→12目标继续。
+
+最终源补记：`cargo xtask ci` 使用规定三环境变量 **CI_EXIT=0**，`cargo build -p nvoc-cli -p pynvoc --locked` **BUILD_EXIT=0**；在最终原生二进制上再次运行产品设值/覆盖/reset与同负载A/B/A，产物 `stage-product-core-set-head-20261021T162544Z/`、`stage-product-core-aba-head-20261021T162544Z/`。再次1950→1965→1950 MHz，完整8432 B恢复；两批verdict通过，顶层SHA256SUMS已生成。源码manifest标识测试时的文件内容；此补记仅文档增量。测试机另一checkout的59个dirty文件保持不变。
