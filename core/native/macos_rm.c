@@ -597,7 +597,7 @@ static const struct {
     {0x20809019u, 12336u}, /* domain directory */
     {0x20809025u, 7188u},  /* per-domain offset range */
     {0x2080901bu, 2108u},  /* domain control: the current values */
-    {0x20809061u, 776u},   /* clock document: frequency + current offset, kHz */
+    {0x20809061u, 776u},   /* live per-domain frequency; other fields uninterpreted */
 };
 
 /* Byte offset of the control block's record-selection mask. The handler *reads*

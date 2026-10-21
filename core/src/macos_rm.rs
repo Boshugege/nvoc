@@ -125,18 +125,10 @@ pub const SETTINGS_RESTORE_SUPPORTED: bool = false;
 /// Why an entry that *writes* through this backend is refused while the read
 /// half answers.
 ///
-/// The missing layer here is a *verification*, not a control and not a
-/// privilege: the write id is located (see [`WRITE_NEEDS_PRIVILEGE_REASON`]), the
-/// current value and the driver's window are already readable
-/// (`get-pstate-global-freq-offset`, `get-settings`), and what no read can supply
-/// is the proof that the field moved -- a single bounded step, the same field
-/// read back, and the restore target being the value that same read found, which
-/// is what [`SETTINGS_WRITE_SUPPORTED`] waits for.
-///
-/// It exists so a write entry can say this instead of a platform-level "NVAPI
-/// and NVML do not exist here", which is true of the *host* and misleading about
-/// the *entry*: the same backend answers the matching read.
-pub const MACOS_RM_WRITE_GATE_REASON: &str = "this backend is read-only until one write has been verified on the device: the current value and the driver's own window are already read by the matching entry (get-pstate-global-freq-offset, get-settings), but only issuing a bounded step and reading the same field back can show that the field moved, and the restore target has to be the value that same read found; until then the backend's write gate is closed by construction (SETTINGS_WRITE_SUPPORTED is false), so the missing layer is the verification, not the control";
+/// The probe established core additive kHz and recovery. The missing layer for
+/// this public backend is now the transactional SET/restore implementation and
+/// validation through consumers, rather than field identity or driver existence.
+pub const MACOS_RM_WRITE_GATE_REASON: &str = "core +15 MHz has been verified through the probe with same-load stock/step/restore and byte-exact recovery; the public backend still has no transactional SET/restore implementation (SETTINGS_WRITE_SUPPORTED is false), so configuration writes through this entry remain unavailable until that implementation and consumer-level validation are completed";
 
 /// Why a family that needs a *write* is listed as unavailable: the write half of
 /// these ids carries the legacy privileged bits, so an unprivileged client is
@@ -196,41 +188,12 @@ pub const PSTATE_FREQ_TABLE_UNREADABLE_REASON: &str = "the per-pstate clock tabl
 
 pub const VOLTAGE_BOOST_UNREADABLE_REASON: &str = "the boost *write* is a SET and sits behind the same privilege gate -- but the family is not read-blind: the client side exposes a read of it as the volt-rails control (a percentage), and the read we actually issued is the internal boost-sync info, which the driver answered 0x56 NOT_SUPPORTED, so this is refused rather than absent; the in-tree copy also carries a controllable window measured live on this very card model at R465 (minimum 300 mV, step 6.25 mV, maximum 1300 mV, default 1000 mV, matching the rail clamp floor), which must be re-measured at R610 rather than reused; the RM endpoint behind the volt-rails escape is still not located (see notes)";
 
-/// The two clock-offset families are the one family where a summary sentence
-/// would overstate the gap: the driver answers a per-domain offset
-/// *range*, and the current offset is measured **zero** rather than missing --
-/// on a background that cannot miss a write, the domain-control GET writes its
-/// value dwords and they are all zero, so no offset is applied. The measurement
-/// is exactly as wide as the selection mask that produced it: the mask at +4 is
-/// an input whose value changes the reply (the seed sweep is the behaviour
-/// proof), the recorded run seeded it with `0xFF`, and that reaches the first
-/// eight of the ten entries the directory itself declares -- its head carries
-/// `+4 = 0x3ff`, ten consecutive row bits, plus the union of those rows' domain
-/// bits -- so the zero is measured for those eight and unchecked for the last
-/// two, which the rows name as MSD (id 21) and HOST (id 5). The domains this
-/// backend is about, core (id 0, row 0) and memory (id 4, row 2), are both
-/// inside the measured window: the two unchecked rows are not them, which is
-/// what limits this caveat to the peripheral domains. Whether the handler also *echoes* the seed back is not settled by that
-/// run: the seed overwrote the probe's `0xA5` background, so "left alone" and
-/// "echoed" look identical in it; the runbook's `0x1` and `0x3FF` seeds separate
-/// them, and `0x1` additionally distinguishes index-addressing from
-/// domain-bit-addressing. What is
-/// still open is *which* of those twelve dwords is the offset (the slot identity
-/// needed to write one), so the family stays unwritable. The session does carry
-/// the block now, so the *window* is reported as measured data in
-/// [`DeviceSettings::clock_offset_limits_khz`]; only the offset itself stays out
-/// of the numbers, because saying "0" would assert a slot identity this backend
-/// does not have.
-pub const CLOCK_OFFSET_UNREADABLE_REASON: &str = "current offset measured 0 for the records the measured selection mask reaches (0x2080901B seeded at +4 with 0xFF wrote its value dwords as zero on an 0xA5 background, where a field the handler skipped would have kept 0xA5, so the zero is a write and not a missing reading); the directory itself declares ten entries (its head carries +4 = 0x3ff, ten consecutive row bits, alongside the union of those rows' domain bits 0x38007f) and 0xFF selects the first eight, so the last two are unmeasured until the offset runbook's wider mask answers -- those two are the MSD (id 21) and HOST (id 5) rows, so the core and memory domains this backend reports (rows 0 and 2, ids 0 and 4) are inside the measured window; the window the driver enforces is reported as measured data in clock_offset_limits_khz; which of the twelve value dwords carries the offset is not yet pinned, so no SET is issued -- the offset itself *is* reported, but from a different read than that one (0x20809061, see clock_offsets in this projection), which is why the older 0x2080901B slot identity is what stays out of the numbers and out of the queued write; the documented NVAPI view of this same command calls slot 0 the signed kHz offset with its neighbours range/voltage terms, but that ordering is for the caller's 8-slot record and not for our 12-dword one, and its own author marks the order unconfirmed, so the queued write (bit 0, value at record +8 = slot 0) tests that hypothesis first rather than a random dword; on the same authority the write set is per record type, and the type-03 record took only its stamp here while the V1 set includes 3, so the runbook must not assume a type-03 record accepts a value (see notes)";
+/// Configuration reads use the directory plus selector-zero control records.
+/// Writes still require the separately validated transactional backend.
+pub const CLOCK_OFFSET_UNREADABLE_REASON: &str = "configured additive offsets are read from 0x2080901b record +12 with selector +8 equal to 0, joined through the directory by record index; missing reads, type mismatches and relative modes are not reported as zero; core +15 MHz has been verified by the probe with byte-exact restore, while the public settings write path is not yet connected (see notes)";
 
-/// One domain's offset, as the clock document reports it.
-///
-/// This is the *current value* the write gate asks for, and the only offset this
-/// backend reports with a number attached. Two fields carry the corroboration
-/// rather than a guess: `frequency_khz` is what the same record published for the
-/// domain (two of them are bit-for-bit the live graphics and memory clocks RUSD
-/// reported in the same session), and `domain_bit` is the device's own, not a
-/// name this frontend invented.
+/// Configured additive delta from a control record, joined to the directory's
+/// domain bit and the clock document's live frequency. These are separate GETs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ClockOffsetReading {
     /// The device's domain bit, as the document carries it. No name is attached
@@ -239,7 +202,7 @@ pub struct ClockOffsetReading {
     pub domain_bit: u32,
     /// The frequency the record published for that domain, in kHz.
     pub frequency_khz: u32,
-    /// The signed offset the record published, in kHz.
+    /// Configured additive offset from the matching control record, in kHz.
     pub offset_khz: i32,
 }
 
@@ -262,7 +225,7 @@ pub struct NamedClockOffset {
     pub domain_bit: u32,
     /// The frequency the record published, in kHz (equal to that live clock).
     pub frequency_khz: u32,
-    /// The signed offset the record published, in kHz.
+    /// Configured additive offset from the matching control record, in kHz.
     pub offset_khz: i32,
     /// The comparison behind the name, spelled out so it can be falsified.
     pub corroboration: String,
@@ -355,13 +318,10 @@ pub struct DeviceSettings {
     /// as returned. `None` when that block was refused or malformed, so an
     /// unread directory is never an empty capability list.
     pub clock_offset_domains: Option<Vec<ClockOffsetDomain>>,
-    /// The offsets the driver currently applies, per domain, from the clock
-    /// document (`0x20809061`). `None` when that block was refused or malformed,
-    /// so an unread offset is never an offset of zero -- which is the whole
-    /// reason this is not a plain `Vec`.
-    ///
-    /// Read-only evidence, not a capability: the write gate is unchanged, and the
-    /// queued write is what would prove these numbers move when one is set.
+    /// Configured additive offsets from control (`0x2080901b`), joined through
+    /// the directory to live clock-document frequencies. `None` if one required
+    /// read failed. Relative modes and mismatched identities are omitted with
+    /// reasons, rather than being reported as zero. Reading is not SET capability.
     pub clock_offsets: Option<Vec<ClockOffsetReading>>,
     /// The subset of `clock_offsets` this backend can put a *name* on, because
     /// the record's published frequency equalled the live clock of the same
@@ -390,7 +350,7 @@ pub struct ClockOffsetView {
     pub domain: String,
     /// The device's bit for that record, as the document carries it.
     pub domain_bit: u32,
-    /// The offset the clock document publishes for this domain, in kHz.
+    /// Configured additive kHz read from this domain's control record.
     pub offset_khz: i32,
     /// The frequency that record published, in kHz: the value that named the
     /// domain, kept so a reader can redo the comparison that did it.
@@ -470,7 +430,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             "responder: these ids are answered by the GSP firmware, not by a host RM table row (NVRM forwards legacy ids with bit 0x8000 set), so every parameter block is sized against the GSP's own export table rather than the NVAPI caller struct.".into(),
             "read: P-state, enforced/requested power limit, PCIe generation, board/SKU and memory sizes come from the same RM snapshot as get-status; sensor readings are separate (see get-status).".into(),
             "write: refused before the driver is opened, and on this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids is one category byte over (0x2080901B -> 0x2080D01C: the 0x80-0xBF legacy-non-privileged byte gains 0x40 and the message id advances by one), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). A write would additionally need a readable current value, a bounded step and a verified restore, and the GSP must not be in the RESET_REQUIRED state.".into(),
-            "clock domains/offsets: 0x20809019 answers NV_OK with a directory whose 32 record slots carry 10 populated mask bits, and 0x20809025 answers NV_OK with a per-domain offset range (three entries, +-18750 kHz). The NVAPI caller struct is a shape hint, not a verified mapping: this driver rejects the caller-side sizes (2520 and 2404) with 0x1f, the record stride it accepts is 384 bytes against the caller struct's 72, and the field at +4 is the record's mask bit where the caller struct has a clock type. The caller struct is also marked Pascal only. The +-int16 pair of the Gpc/M directory rows (+-1000 and -1000/+3000) is *not* the caller-visible window: the in-tree NVAPI copy's IDA note puts rangeMax/Min at RM+80/+84 of the caller's own record layout, and every populated row of the directory carries type 0 there, which means no range information. The window this backend reports instead comes from the range block, and the copy locates its meaning: 0x20809025 is its RM id, its ClkFreqController record carries 1638400 max VF kHz and a -18750/+18750 pair that the note calls the frequency-offset floor and ceiling (the +-18.75 MHz control span), so the pair is in kHz and reads as an offset span rather than an absolute limit. What is not reconciled is the record base: the copy's caller geometry is 0x4C + 32x0x60 where this driver's RM block is 20 + 32x224, and the two records are matched by content, not by a proven field map. 0x2080901B also answers NV_OK, but every value slot of its 64-byte records is written as zero at stock (an 0xA5 pre-seed shows the writes as 0xA5A5A5A5 -> 0), so which slot holds the current offset cannot be fixed from a stock read alone -- and the type stamp is the only non-zero field it returns. The write set is type-conditional and all-or-nothing (the seven type-08/09 entries of a full selection write twelve value dwords each, the single type-03 entry writes its stamp only), so the type split narrows the block but still cannot name the offset slot.".into(),
+            "clock-domain configuration is read from 0x20809019 directory and 0x2080901b control: selector +8 = 0 means signed i32 kHz at record +12; relative/unknown modes remain unavailable as additive kHz. RM776 supplies live frequency only. The control mask selects directory indices, not public domain bits; the current 0xff read mask covers the first eight records. Probe validation demonstrated core +15 MHz and exact restoration; public SET remains separately gated. The measured 0x20809025 range records report +/-18750 kHz, without a proven per-domain range mapping".into(),
             "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
     }
@@ -571,47 +531,49 @@ fn apply_offset_channel(
         }
     }
 
-    // The one block that publishes an offset rather than a window or a set of
-    // unlabelled dwords, so it is the one that fills a structured field. It is
-    // also listed in the note below, the same way the other blocks report their
-    // outcome, so a caller reading `None` can see whether the block was refused,
-    // malformed or simply not requested.
-    match &channel.clock_document {
-        Parsed(document) if document.entries.is_empty() => {
-            outcomes.push("the clock document carried no entry, so no offset is listed".into());
+    // Configuration comes from the control record, not the clock document's
+    // previously guessed extra dword. Index joins and domain-bit joins are
+    // distinct: memory is directory index 2 but public domain bit 0x10.
+    match (&channel.directory, &channel.control, &channel.clock_document) {
+        (Parsed(directory), Parsed(control), Parsed(document)) => {
+            let mut offsets = Vec::new();
+            for record in &control.records {
+                let mut domains = directory.entries.iter().filter(|d| d.index == record.index);
+                let Some(domain) = domains.next() else {
+                    outcomes.push(format!("control record {} has no directory entry", record.index));
+                    continue;
+                };
+                if domains.next().is_some()
+                    || domain.domain_bit == 0
+                    || directory.entries.iter().filter(|d| d.domain_bit == domain.domain_bit).count() != 1
+                    || domain.type_stamp != record.type_stamp
+                {
+                    outcomes.push(format!("control record {} has an ambiguous or mismatched directory identity", record.index));
+                    continue;
+                }
+                let Some(offset_khz) = record.additive_offset_khz() else {
+                    outcomes.push(format!("control record {} does not publish additive kHz (type {:#06x}, selector {:?})", record.index, record.type_stamp, record.value_dwords.first().map(|v| *v as u8)));
+                    continue;
+                };
+                let mut clocks = document.entries.iter().filter(|d| d.domain_bit == domain.domain_bit);
+                let Some(clock) = clocks.next() else {
+                    outcomes.push(format!("domain bit {:#x} has no clock-document frequency", domain.domain_bit));
+                    continue;
+                };
+                if clocks.next().is_some() || clock.frequency_khz == 0 {
+                    outcomes.push(format!("domain bit {:#x} has no unique nonzero frequency", domain.domain_bit));
+                    continue;
+                }
+                offsets.push(ClockOffsetReading {
+                    domain_bit: domain.domain_bit,
+                    frequency_khz: clock.frequency_khz,
+                    offset_khz,
+                });
+            }
+            outcomes.push(format!("current offsets: {} additive control records; frequencies from 0x20809061, configured kHz from 0x2080901b +12", offsets.len()));
+            settings.clock_offsets = Some(offsets);
         }
-        Parsed(document) => {
-            // Reported bit by bit: only `0x10` can be *named* from the in-tree
-            // NVAPI copy (as MCLK, which the frequency it published agrees with),
-            // so promoting the rest to named domains would guess at names rather
-            // than report measured values.
-            settings.clock_offsets = Some(
-                document
-                    .entries
-                    .iter()
-                    .map(|entry| ClockOffsetReading {
-                        domain_bit: entry.domain_bit,
-                        frequency_khz: entry.frequency_khz,
-                        offset_khz: entry.offset_khz,
-                    })
-                    .collect(),
-            );
-            let listed = document
-                .entries
-                .iter()
-                .map(|entry| {
-                    format!(
-                        "bit {:#x} at {} kHz with offset {} kHz",
-                        entry.domain_bit, entry.frequency_khz, entry.offset_khz
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("; ");
-            outcomes.push(format!("current offsets: {listed}"));
-        }
-        Refused(_) | Malformed(_) => {
-            outcomes.push("no offset is listed for this reason".into());
-        }
+        _ => outcomes.push("no offset is listed: directory, control and clock-document reads are required; an RM776 extra dword is not a configured offset".into()),
     }
 
     settings
@@ -639,7 +601,7 @@ fn namable_domains(status: &DeviceStatus) -> [(&'static str, Option<u32>); 4] {
 ///
 /// This is the one comparison that can name a domain without a header that names
 /// clock domains: the document publishes, per domain bit, the frequency it holds
-/// *and* the offset it applies, and `get-status` reports the live clock for the
+/// while the control publishes its configured delta; `get-status` reports the live clock for the
 /// public domains. Equality is required to be exact and unique -- a tie names
 /// neither record rather than picking one -- so the failure direction is "left
 /// unnamed", never "misnamed". Every outcome is written into `notes`, so a reader
@@ -647,8 +609,8 @@ fn namable_domains(status: &DeviceStatus) -> [(&'static str, Option<u32>); 4] {
 ///
 /// This does *not* read the offset off a frequency move (the rule that a realtime
 /// frequency change must never stand in for a successful offset write): both
-/// numbers come from the same snapshot, and the offset reported is the document's
-/// own field; the frequency only decides *which* record the name refers to.
+/// numbers come from a read-only batch, and the configured offset is read from
+/// control +12; the frequency only decides which domain the name refers to.
 fn corroborate_named_offsets(settings: &mut DeviceSettings, status: &DeviceStatus) {
     let Some(offsets) = settings.clock_offsets.clone() else {
         // The channel was not read this time; `apply_offset_channel` already put
@@ -1558,10 +1520,9 @@ impl Device {
 
     /// Reads the driver-visible configuration without changing anything.
     ///
-    /// Uses the same single RM snapshot as [`Device::status`], so the
-    /// configuration readback and the telemetry cannot disagree about the
-    /// device, and a device that changed identity behind the session is
-    /// rejected instead of being reported under the old name.
+    /// Telemetry and private control blocks use separate reads. Both sessions
+    /// must match this device identity; values across the reads are not atomic.
+    /// Explicitly closes the control session so release failures reach notes.
     pub fn settings(&self) -> Result<DeviceSettings, Error> {
         let snapshot = self.refreshed_snapshot()?;
         let info = device_from_snapshot(&snapshot).info;
@@ -1571,7 +1532,24 @@ impl Device {
         // one part of this read the GSP can refuse on its own (a wedge answers
         // 0x62 per block). Neither may fail the settings read: both land in the
         // notes as evidence instead of turning into a value.
-        match MacosRmSession::open().and_then(|mut session| session.read_offset_channel()) {
+        let offset_channel = MacosRmSession::open().and_then(|mut session| {
+            if session.identity()
+                != (
+                    self.info.pci_address.clone(),
+                    self.info.device_id,
+                    self.info.rm_gpu_id,
+                )
+            {
+                session.close()?;
+                return Err(Error::Custom(
+                    "macOS RM offset session device changed; rediscover GPUs".into(),
+                ));
+            }
+            let channel = session.read_offset_channel();
+            session.close()?;
+            channel
+        });
+        match offset_channel {
             Ok(channel) => apply_offset_channel(&mut settings, &channel),
             Err(error) => settings
                 .notes
@@ -3603,72 +3581,133 @@ mod tests {
         }
     }
 
-    /// A projection with no window, as `settings_from` leaves it before any
-    /// channel read, so the tests start from the state a caller sees when the
-    /// block was never requested.
-    /// The clock document is the one block that publishes an offset, so it is the
-    /// one that fills the structured field, and it does so from the captured
-    /// payload rather than from one built to match the parser.
-    #[test]
-    fn the_clock_document_fills_the_offsets_and_a_refusal_leaves_them_absent() {
+    fn configured_channel() -> macos_offset::OffsetChannelSnapshot {
         use macos_offset::OffsetBlockRead::{Parsed, Refused};
+        let directory = macos_offset::parse_directory(OFFSET_DIRECTORY_FIXTURE).unwrap();
+        let mut block = vec![0u8; macos_offset::OFFSET_CONTROL_BYTES];
+        block[4..8].copy_from_slice(&0xffu32.to_le_bytes());
+        for entry in &directory.entries {
+            let at = 60 + entry.index * 64;
+            block[at..at + 2].copy_from_slice(&entry.type_stamp.to_le_bytes());
+        }
+        block[72..76].copy_from_slice(&15_000i32.to_le_bytes());
+        let memory = 60 + 2 * 64 + 12;
+        block[memory..memory + 4].copy_from_slice(&(-15_000i32).to_le_bytes());
+        macos_offset::OffsetChannelSnapshot {
+            directory: Parsed(directory),
+            control: Parsed(macos_offset::parse_control(&block).unwrap()),
+            range: Refused(0x62),
+            clock_document: Parsed(
+                macos_offset::parse_clock_document(CLK_DOCUMENT_FIXTURE).unwrap(),
+            ),
+        }
+    }
 
-        let document = macos_offset::parse_clock_document(CLK_DOCUMENT_FIXTURE)
-            .expect("the captured document parses at its declared geometry");
+    #[test]
+    fn configured_offsets_join_control_index_to_domain_and_use_signed_khz() {
         let mut settings = bare_settings();
-        apply_offset_channel(
-            &mut settings,
-            &macos_offset::OffsetChannelSnapshot {
-                directory: Refused(0x62),
-                range: Refused(0x62),
-                control: Refused(0x62),
-                clock_document: Parsed(document),
-            },
+        apply_offset_channel(&mut settings, &configured_channel());
+        let offsets = settings.clock_offsets.unwrap();
+        assert_eq!(offsets.len(), 7, "type 03 is not a value-bearing control");
+        let graphics = offsets.iter().find(|o| o.domain_bit == 1).unwrap();
+        assert_eq!(
+            (graphics.frequency_khz, graphics.offset_khz),
+            (1_530_000, 15_000)
         );
-
-        let offsets = settings
-            .clock_offsets
-            .expect("the document carried offsets");
-        assert_eq!(offsets.len(), 11);
-        // The two that can be checked against something else: the graphics clock
-        // RUSD reported in the same session, and the bit the in-tree NVAPI copy
-        // names MCLK, whose frequency is that session's live memory clock.
+        let memory = offsets.iter().find(|o| o.domain_bit == 0x10).unwrap();
+        assert_eq!(
+            (memory.frequency_khz, memory.offset_khz),
+            (6_000_984, -15_000)
+        );
+        // Directory index 2 is memory, not the public domain bit 0x4.
         assert_eq!(
             offsets
                 .iter()
-                .find(|offset| offset.domain_bit == 1)
-                .map(|offset| (offset.frequency_khz, offset.offset_khz)),
-            Some((1_530_000, -1))
+                .find(|o| o.domain_bit == 4)
+                .unwrap()
+                .offset_khz,
+            0
         );
+        assert!(!offsets.iter().any(|o| o.domain_bit == 0x80000));
+        // The captured clock-document dwords are -1 / -126, not configured offsets.
+        let raw = macos_offset::parse_clock_document(CLK_DOCUMENT_FIXTURE).unwrap();
         assert_eq!(
-            offsets
+            raw.entries
                 .iter()
-                .find(|offset| offset.domain_bit == 0x10)
-                .map(|offset| (offset.frequency_khz, offset.offset_khz)),
-            Some((6_000_984, -126))
+                .find(|o| o.domain_bit == 1)
+                .unwrap()
+                .offset_khz,
+            -1
         );
+    }
 
-        // A refused document must leave the field absent rather than empty, or
-        // "the offset was not read" would look like "no offset is applied" --
-        // the distinction the whole channel exists to keep.
-        let mut wedged = bare_settings();
-        apply_offset_channel(
-            &mut wedged,
-            &macos_offset::OffsetChannelSnapshot {
-                directory: Refused(0x62),
-                range: Refused(0x62),
-                control: Refused(0x62),
-                clock_document: Refused(0x62),
-            },
-        );
-        assert_eq!(wedged.clock_offsets, None);
+    #[test]
+    fn relative_mode_type_mismatch_and_missing_frequency_are_not_zero_offsets() {
+        use macos_offset::OffsetBlockRead::Parsed;
+        let mut channel = configured_channel();
+        if let Parsed(control) = &mut channel.control {
+            control.records[0].value_dwords[0] = 1; // signed /4096, not kHz
+            control.records[1].type_stamp = 0x0808; // directory says 0x0909
+        }
+        if let Parsed(document) = &mut channel.clock_document {
+            document.entries.retain(|e| e.domain_bit != 0x10);
+        }
+        let mut settings = bare_settings();
+        apply_offset_channel(&mut settings, &channel);
+        let offsets = settings.clock_offsets.unwrap();
+        assert!(!offsets.iter().any(|o| [1, 2, 0x10].contains(&o.domain_bit)));
         assert!(
-            wedged
+            settings
                 .notes
                 .iter()
-                .any(|note| note.contains("0x20809061") && note.contains("0x00000062")),
-            "the note names the block and its refusal: {:?}",
-            wedged.notes
+                .any(|n| n.contains("selector Some(1)"))
+        );
+        assert!(
+            settings
+                .notes
+                .iter()
+                .any(|n| n.contains("mismatched directory identity"))
+        );
+        assert!(
+            settings
+                .notes
+                .iter()
+                .any(|n| n.contains("no clock-document frequency"))
+        );
+    }
+
+    #[test]
+    fn incomplete_reads_cannot_fall_back_to_clock_document_extra_dwords() {
+        use macos_offset::OffsetBlockRead::Refused;
+        for missing in 0..3 {
+            let mut channel = configured_channel();
+            match missing {
+                0 => channel.directory = Refused(0x62),
+                1 => channel.control = Refused(0x62),
+                _ => channel.clock_document = Refused(0x62),
+            }
+            let mut settings = bare_settings();
+            apply_offset_channel(&mut settings, &channel);
+            assert_eq!(settings.clock_offsets, None);
+            assert!(settings.notes.iter().any(|n| n.contains("0x00000062")));
+        }
+    }
+
+    #[test]
+    fn ambiguous_domain_mapping_does_not_choose_a_control_record() {
+        use macos_offset::OffsetBlockRead::Parsed;
+        let mut channel = configured_channel();
+        if let Parsed(directory) = &mut channel.directory {
+            directory.entries[1].domain_bit = 1;
+        }
+        let mut settings = bare_settings();
+        apply_offset_channel(&mut settings, &channel);
+        assert!(
+            !settings
+                .clock_offsets
+                .unwrap()
+                .iter()
+                .any(|o| o.domain_bit == 1)
         );
     }
 

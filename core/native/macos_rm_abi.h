@@ -192,7 +192,7 @@ uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *session, nvoc_rm_sample *
 #define NVOC_RM_OFFSET_RANGE 1     /* 7188 bytes: per-domain offset range, kHz */
 #define NVOC_RM_OFFSET_CONTROL 2   /* 2108 bytes: domain control, current values */
 #define NVOC_RM_OFFSET_CLOCK_DOCUMENT \
-    3 /* 776 bytes: per-domain frequency and current offset, kHz */
+    3 /* 776 bytes: live per-domain frequency and raw extra fields */
 uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, void *out,
                                       size_t size, char *error, size_t cap);
 

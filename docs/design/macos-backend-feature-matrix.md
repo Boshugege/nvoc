@@ -2310,3 +2310,28 @@ call  0x18c1494 ; sd a0, 150h(s9)      ; 指针表 B
 - 公共产品入口仍未完成频率 SET 接入，不能因探针成功宣称 CLI/Python/GUI 设置已支持。下一步需要用确认的控制记录 `+12` 修正 `core/src/macos_offset.rs`/`apply_offset_channel` 的当前设置投影：旧实现将 RM776 的猜测字段报告成 offset，本批未验证该猜测。随后把已证明的快照/写/回读/恢复集中接入 macOS backend 和既有操作，继续原目标，不能只停在探针。
 
 最终验证补记：修改后的原生 idle/full 再构建通过；full 二进制对 `--clk-offset-arm` 返回 2，未创建 JSON 日志、未打开设备。runbook 实际发现过期 full 并自动重建，`0:12:250` 再次完整往返，产物 `stage-clkoffset-write-20261021T153924Z/`，`shasum -a 256 -c SHA256SUMS` 全 OK。最终源代码下再次执行同负载 A/B/A（`stage-offset-aba-20261021T154231Z/`）：1950 → 1965（三次）→ 1950 MHz，RM776/RUSD 同向吻合，完整 2108 B 恢复，前后 healthy。全门禁 `cargo xtask ci` 带指定三个环境变量返回 **CI_EXIT=0**（首个 A/B/A 批目录 `ci.txt`）；附加 probe CPU 回归 **31/31**，不含 GPU 写测试。公共 core/CLI/Python 频率 SET 仍不因这条探针验收自动启用。
+
+
+## 一百三十六、公共当前偏移改读已证实控制槽，CLI 与真实 Python 扩展读数闭环
+
+选择依据：§一百三十五 已定位记录 `+8` 为单位选择器、`+12` 为选择器 0 下的 signed i32 kHz。旧 `apply_offset_channel` 却把 `0x20809061` 的相邻 signed dword 猜为配置偏移，导致 stock 核心输出 -0.001 MHz、显存 -0.126 MHz；这是消费者可见的错误，必须先修正再接 SET。
+
+实现：`OffsetControlRecord::additive_offset_khz()` 只解释 type 08/09、selector 0 的第二个值 dword；公共 `clock_offsets` 以控制记录 index 连接 `0x20809019` 目录，再以目录的 domain bit 连接 RM776 的**实时频率**。保留现有 JSON 字段、单位和原 NVAPI/NVML 实现；RM776 的旧 raw 字段名为兼容保留，明确不再作为配置值。缺任一必要读、相对/未知模式、type 不符、重复域或缺少唯一非零频率均不伪造 0，有逐项原因。type03 不发布值。settings 的第二个 session 校验设备身份，显式 close 错误进入 notes；文档明确多次 GET 非原子。公共写入门禁的说明同步改为“探针已验证，产品事务 SET/restore 尚未接入”。
+
+Python 构建缺口也已定位并修复：原 `cargo build -p pynvoc` 在 macOS extension-module 下链接时缺少 `-undefined dynamic_lookup`，导致 `_PyBool_Type` 等导入宿主符号未解析。新增局部 `nvoc-python/build.rs`，仅 macOS 且 extension-module 启用时为 cdylib 添加这两个参数；不改依赖版本、不改其它平台、不把此参数施加给嵌入解释器的测试。测试机原生扩展成功构建，并在现有 Python 3.11 中从仓库外临时包导入，真实 GPU 发现返回 GTX 1650 SUPER、backend_macos_rm=true、nvapi/nvml=false。
+
+实际验证（桶 A）：测试机 `get-pstate-global-freq-offset --macos-rm` 与 `pynvoc.query_clock_offset` 共享相同 Rust 后端；先 stock，再由已验收探针保存 `0:12:250` 并 hold10秒，期间分别查询核心与显存，恢复后再查。
+
+| 阶段 | CLI 核心 kHz / MHz | Python 核心 MHz | CLI / Python 显存偏移 |
+| --- | --- | --- | --- |
+| stock | 0 / 0.0 | 0.0 | 0 / 0.0 |
+| 控制槽保存 250（查询发生在 hold 内） | 250 / 0.25 | 0.25 | 0 / 0.0 |
+| 原快照恢复 | 0 / 0.0 | 0.0 | 0 / 0.0 |
+
+探针 SET/同字段回读/其它值不变/全部2108 B恢复通过，前后 anchor healthy。这里的 250 kHz 验证的是**设置读取与单位**，不是频率效果（MHz 计算截断）；真实 +15MHz 效果仍由 §一百三十五 的同负载 A/B/A 举证。Python GPU 选择使用发现得到的 PCI GPU id `0x100`，不是 CLI 序号 0。
+
+分档：公共 core/CLI/Python **当前加法偏移读取已实现并实测**；本步不增加性能 SET。显存 SET、相对模式、跨平台运行及 GUI 图形交互仍未因此验收。原平台安全回归由全门禁覆盖的 mock/单测举证，未实际运行 Windows/Linux。
+
+测试与产物：core 单测 122 passed，新增反例覆盖 signed kHz、目录 index≠domain bit、type03、相对模式、type不符、频率缺失、三读拒绝和重复域；真实导入扩展后 Python import/参数验证测试 52 passed、0 skipped。全门禁及最终构建/实机复测见本批仓库外产物及 INDEX。初次 Python 查询使用错误的序号而非 PCI id 返回 no GPU selected，在写入前结束，之后按发现 id 更正重跑；保留失败日志，不当硬件故障。原始闭环 `outputs/stage-consumer-offset-read-20261021T155644Z/`，构建/测试日志 `consumer-offset-*-20261021.txt`；此后最终 session 身份/close 增量的复测另记本批最终目录。
+
+最终补记：session 身份校验/显式 close 与门禁说明更正后的最终构建 `cargo build -p nvoc-cli -p pynvoc --locked` exit0；同一读数闭环在 `stage-consumer-offset-read-20261021T160227Z/` 再现（stock 0 → 核心0.25/显存0 → 全部恢复0，两个消费者一致、前后healthy）。最终 `cargo xtask ci` 使用指定三环境变量 **CI_EXIT=0**；`consumer-offset-ci-20261021.txt`；实际导入扩展的 Python import/validation **52/52、0 skip** 单独记录在 `consumer-offset-python-tests-20261021.txt`，不能用全门禁内未加载扩展的 skip 替代该证据。显式只读硬件测试 `the_offset_channel_reports_domains_records_and_its_own_window -- --ignored --nocapture` 的最终结果见 `consumer-offset-hardware-read-20261021.txt`。

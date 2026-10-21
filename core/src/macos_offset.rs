@@ -7,33 +7,19 @@
 //! byte-exact (`48 + 32*384`, `20 + 32*224`, `60 + 32*64`, `8 + 32*24`) and
 //! every record stride and field offset used here was read back from the device.
 //!
-//! The fourth of them, the clock document, is the one that carries an actual
-//! offset: its records hold a domain bit, a frequency and a small signed value
-//! that is the domain's current offset in kHz. That reading is an inference from
-//! captured bytes, so it is stated with the two things that support it -- two of
-//! its frequencies are bit-for-bit the live graphics and memory clocks RUSD
-//! reports, and its non-zero magnitudes sit inside the +-18.75 MHz span the
-//! range block declares -- and with the falsifier: a controlled write must move
-//! the matching record.
+//! The control record carries the configured delta: record +8 selects units,
+//! and record +12 is signed i32 kHz when that selector is zero. This mapping is
+//! supported by the 610.57.04 firmware consumer and same-load stock/step/restore
+//! hardware validation. Selector one instead carries a signed i16 relative
+//! adjustment in units of 1/4096; it must not be reported as additive kHz.
 //!
-//! This module is deliberately platform-independent: it takes `&[u8]` and
-//! returns typed values, so it can be unit-tested without a GPU, an RM session
-//! or macOS. The FFI side ([`crate::macos_rm`]) only moves bytes.
+//! The clock document provides per-domain live frequencies. Its next dword was
+//! formerly guessed to be a configured offset; that guess is unverified and is
+//! no longer used to populate public settings. The raw field name is retained
+//! for compatibility with existing raw-block readers.
 //!
-//! Two naming caveats, because they are inferences rather than driver
-//! declarations:
-//!
-//! * the range block's two `i32` fields are called `min_khz`/`max_khz` because
-//!   they read `-18750`/`+18750` and the NVAPI caller struct orders the same
-//!   pair; no driver header names them on this platform. The in-tree NVAPI copy
-//!   does name the meaning: its IDA note on RM `0x20809025` calls the pair the
-//!   frequency-offset floor and ceiling, "the +-18.75 MHz control span", which
-//!   also fixes the unit as kHz for this magnitude;
-//! * which dword of a control record carries the *offset* is **not** decided
-//!   here -- the parser reports all twelve value dwords verbatim and leaves the
-//!   identification to a write/read-back experiment. The clock document is the
-//!   read that does not need that experiment: it publishes an offset per domain,
-//!   which is why it is parsed alongside the three control blocks.
+//! Parsing is platform-independent; the native bridge only moves bytes. The
+//! range container's +/-18750 kHz pair remains the separately measured window.
 
 use core::fmt;
 
@@ -189,6 +175,19 @@ pub struct OffsetControlRecord {
     /// The twelve value dwords `rec+8..rec+44` and `rec+52`/`rec+56` hold, in
     /// ascending byte order -- i.e. the bytes the handler actually wrote.
     pub value_dwords: Vec<u32>,
+}
+
+impl OffsetControlRecord {
+    /// Configured additive kHz, for value-bearing records in selector-zero mode.
+    /// Type 03 does not publish values; relative and unknown modes are absent.
+    pub fn additive_offset_khz(&self) -> Option<i32> {
+        if !matches!(self.type_stamp, 0x0808 | 0x0909)
+            || self.value_dwords.first().copied()? as u8 != 0
+        {
+            return None;
+        }
+        self.value_dwords.get(1).map(|value| *value as i32)
+    }
 }
 
 /// The parsed control block.
@@ -377,18 +376,11 @@ pub struct ClkDocumentEntry {
     /// this equals the live RUSD reading exactly (1 530 000 graphics,
     /// 6 000 984 memory), and no other field in the payload has that property.
     pub frequency_khz: u32,
-    /// The signed value the record carries, in kHz.
-    ///
-    /// This is the offset reading the goal asks for: the captured values are
-    /// small and signed (-5, -126, -244, -3904 kHz), of the same order as the
-    /// +-18.75 MHz span the range block declares. A controlled write that moves
-    /// this field would confirm it; nothing has written yet.
+    /// Raw signed dword at record +12, retained under its historical name.
+    /// Its interpretation as configured kHz is unverified. Public settings use
+    /// [`OffsetControlRecord::additive_offset_khz`] instead.
     pub offset_khz: i32,
-    /// The dword after the offset, as returned. It is not named: the captured
-    /// values (`0x00020002` on the records whose offset reads -1,
-    /// `0x00010000`/`0x00060000` on the records with a real offset) suggest it
-    /// distinguishes "no offset set" from "offset set", but that is a guess and
-    /// is kept raw.
+    /// Uninterpreted dword at record +16.
     pub flags: u32,
 }
 
@@ -419,12 +411,10 @@ pub struct OffsetChannelSnapshot {
     pub directory: OffsetBlockRead<OffsetDirectory>,
     /// `0x20809025`: the per-record offset bounds, in kHz.
     pub range: OffsetBlockRead<OffsetRange>,
-    /// `0x2080901b`: the current values. Every value dword reads zero at stock,
-    /// so a `Parsed` block means "no offset is applied" -- a measured zero,
-    /// not a missing reading.
+    /// `0x2080901b`: selected control records, including mode and configured delta.
+    /// A parsed block alone does not establish support for every record or mode.
     pub control: OffsetBlockRead<OffsetControl>,
-    /// `0x20809061`: the per-domain clock document, the one block that publishes
-    /// an actual offset rather than a window or a set of unlabelled dwords.
+    /// `0x20809061`: per-domain live frequency and uninterpreted extra fields.
     pub clock_document: OffsetBlockRead<ClkDocument>,
 }
 
