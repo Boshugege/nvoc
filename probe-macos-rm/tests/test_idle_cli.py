@@ -123,6 +123,14 @@ int nvx_stage4_clk_track(nvx_ctx *c, int seconds) {
     printf("FAKE clktrack %d\n", seconds);
     return 0;
 }
+int nvx_stage2_anchor_read(nvx_ctx *c) { (void)c; abort(); }
+int nvx_stage2_fan_read(nvx_ctx *c) { (void)c; abort(); }
+int nvx_stage2_hwfs_read(nvx_ctx *c) { (void)c; abort(); }
+int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned bit, unsigned off,
+                            int delta, int bump, int hold) {
+    (void)c; (void)bit; (void)off; (void)delta; (void)bump; (void)hold;
+    abort();
+}
 int nvx_stage3(nvx_ctx *c) { (void)c; abort(); }
 int nvx_stage5(nvx_ctx *c) { (void)c; abort(); }
 int nvx_close(int fd) { printf("FAKE close %d\n", fd); return 0; }
@@ -210,6 +218,41 @@ class IdleCli(unittest.TestCase):
                 result = self.run_cli(*args)
                 self.assertEqual(result.returncode, 2)
                 self.assertNotIn("FAKE", result.stdout)
+
+    def test_unit_selector_cannot_be_mistaken_for_an_enable_bit(self):
+        log = self.directory / "arm-must-not-open.jsonl"
+        result = self.run_cli(
+            "--write",
+            "--clk-offset-set",
+            "0:12:250",
+            "--clk-offset-arm",
+            "--jsonl",
+            str(log),
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("selects units", result.stderr)
+        self.assertNotIn("FAKE", result.stdout)
+        self.assertFalse(log.exists())
+
+    def test_malformed_offset_step_never_reaches_transport(self):
+        for spec in (
+            ":12:250",
+            "0::250",
+            "0:12:",
+            "0:12::bump",
+            "0:12:18751",
+            "0:12:-18751",
+            "0:12:99999999999999999999999",
+        ):
+            with self.subTest(spec=spec):
+                result = self.run_cli("--write", "--clk-offset-set", spec)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("invalid --clk-offset-set spec", result.stderr)
+                self.assertNotIn("FAKE", result.stdout)
+        result = self.run_cli("--clk-offset-hold", "0")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid --clk-offset-hold", result.stderr)
+        self.assertNotIn("FAKE", result.stdout)
 
     def test_independent_stages_prepare_prerequisites(self):
         for stage in ("1", "2", "4"):
@@ -454,6 +497,96 @@ class DecodeClkContainers(unittest.TestCase):
             result = self.run_tool(str(path))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("not the GSP paramSize", result.stdout + result.stderr)
+
+
+class ClockWriteRunbook(unittest.TestCase):
+    """Exercise runbook gates and artifact integrity without a GPU or sudo."""
+
+    def run_case(self, *, unhealthy=False, refused=False, stale=False):
+        import shutil
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "probe"
+            tools = root / "tools"
+            tools.mkdir(parents=True)
+            for name in ("clock-offset-write-run.sh", "record-run-provenance.py"):
+                shutil.copy2(ROOT / "tools" / name, tools / name)
+            fake_bin = root / "probe-macos-rm"
+            fake_bin.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = --anchor-read ]; then\n'
+                '  if [ "$TEST_UNHEALTHY" = 1 ]; then echo NV_OK;\n'
+                '  else echo "forward ALIVE and healthy"; fi\n'
+                "else\n"
+                '  touch "$TEST_WRITE_MARKER"\n'
+                '  if [ "$TEST_REFUSED" = 1 ]; then status=0x1b; else status=0x0; fi\n'
+                '  echo "clk-offset-verdict SET $status, readback 0x0, same-field yes, '
+                'others-unchanged yes, restore verified"\n'
+                "fi\n"
+            )
+            fake_bin.chmod(0o755)
+            fake_id = root / "id"
+            fake_id.write_text("#!/bin/sh\necho 0\n")
+            fake_id.chmod(0o755)
+            (root / "build.sh").write_text(
+                '#!/bin/sh\ntouch "$TEST_BUILD_MARKER" probe-macos-rm\n'
+            )
+            if stale:
+                (root / "src").mkdir()
+                (root / "src" / "changed.c").write_text("/* newer source */\n")
+                os.utime(fake_bin, (1, 1))
+            env = dict(os.environ)
+            env.update(
+                PATH=str(root) + os.pathsep + env["PATH"],
+                OUT_ROOT=str(root / "outputs"),
+                TEST_UNHEALTHY=str(int(unhealthy)),
+                TEST_REFUSED=str(int(refused)),
+                TEST_WRITE_MARKER=str(root / "write-ran"),
+                TEST_BUILD_MARKER=str(root / "build-ran"),
+            )
+            result = subprocess.run(
+                ["sh", str(tools / "clock-offset-write-run.sh"), "0:12:250"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            bundles = list((root / "outputs").iterdir())
+            self.assertEqual(len(bundles), 1)
+            bundle = bundles[0]
+            import hashlib
+
+            lines = [
+                line
+                for line in (bundle / "SHA256SUMS").read_text().splitlines()
+                if line and not line.startswith("#")
+            ]
+            self.assertTrue(any(line.endswith("README.txt") for line in lines))
+            for line in lines:
+                digest, name = line.split(maxsplit=1)
+                self.assertEqual(
+                    hashlib.sha256((bundle / name.strip()).read_bytes()).hexdigest(),
+                    digest,
+                    name,
+                )
+            return result, (root / "write-ran").exists(), (root / "build-ran").exists()
+
+    def test_unhealthy_verdict_refuses_write_even_with_an_nv_ok_line(self):
+        result, wrote, _ = self.run_case(unhealthy=True)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertFalse(wrote)
+
+    def test_refused_set_cannot_pass_from_readback_and_restore_alone(self):
+        result, wrote, _ = self.run_case(refused=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertTrue(wrote)
+        self.assertNotIn("SET + read-back + restore all verified", result.stdout)
+
+    def test_stale_binary_is_rebuilt_and_final_summary_is_in_the_digest(self):
+        result, wrote, built = self.run_case(stale=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(wrote)
+        self.assertTrue(built)
 
 
 if __name__ == "__main__":

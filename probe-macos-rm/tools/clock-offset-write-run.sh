@@ -15,32 +15,21 @@
 # the restored block byte-identical). What it cannot do is choose the candidate
 # for you, so this script refuses to run without one.
 #
-# Ordered candidates (see docs/reverse-engineering/nvapi/
-# rm-param-marshall-corrections-r610.md sections 27 and 50): the in-tree copy
-# records the caller layer's record field map, where its record+44 is the signed
-# kHz offset and its record+56 is the applied value. Those two caller offsets
-# sit 0x24 below the RM block's value slots, and that delta is *measured*, not
-# inferred: in the 0x20809025 container the caller's named REC_MIN_OFFSET /
-# REC_MAX_OFFSET (-18750/+18750) read back at RM rec+20/+24, with the same
-# values, and REC_MAX_KHZ at RM rec+8. So the RM slot the caller names as the
-# offset is rec+8, and that is the first case to try; +44 stays as the second
-# because the delta is only measured for the sibling container 0x20809025, and
-# if this container's value slots sit at a different delta the caller's own
-# number is the hedge. Readback should watch +56 as well as the written dword.
+# Confirmed additive core case (GSP 610.57.04, TU116):
+#   sh tools/clock-offset-write-run.sh 0:12:250
+# proves storage/readback/restore but the MHz calculation truncates 250/1000.
+#   sh tools/clock-offset-write-run.sh 0:12:15000
+# was separately verified under a bounded NVK load: 1965 -> 1980 -> 1965 MHz.
+# Record +8 selects units (0 = signed kHz at +12, 1 = i16 /4096 relative).
+# It is not an enable bit. Do not use the former --clk-offset-arm switch.
 #
-# Usage:
-#   sh tools/clock-offset-write-run.sh <bit>:<off>:<delta_khz>
-#
-#   sh tools/clock-offset-write-run.sh 0:8:250    # core domain, candidate +8 (first)
-#   sh tools/clock-offset-write-run.sh 0:44:250   # core domain, candidate +44 (hedge)
-#   sh tools/clock-offset-write-run.sh 2:8:250    # memory domain, same candidate
-#
-#   <bit>   index-space row (bit i selects record i), so 0 is the row whose
-#           1<<id names the core/GPU domain and 2 the memory domain
-#   <off>   record-relative field offset; must be one of the twelve measured
-#           value dwords 8,12,16,20,24,28,32,36,40,44,52,56 -- the probe
-#           rejects anything else rather than guessing
-#   <delta> kHz, one minimal step, capped at +-1000 by the probe
+# <bit> selects a directory index, NOT a public clock-domain bit; record 0
+# names graphics and record 2 names memory on the measured TU116 directory.
+# <off> must pass the probe's twelve-value-dword whitelist, even though the
+# argument parser alone admits 0..2108. Delta is limited to +/-18750.
+# Only +12 with selector 0 has additive-kHz evidence. Other offsets remain
+# explicit raw protocol experiments, not established frequency controls.
+# :bump changes the unidentified tail +60; no stamp semantic is established.
 #
 # Refuses to write unless: exactly one candidate is given (this is not a sweep
 # tool), the probe can run as root (the operator's own root, or a passwordless
@@ -71,8 +60,9 @@
 # 0x8000 and is not privileged, which is exactly why every read on this driver
 # has worked as the login user.
 #
-# A live frequency change is NOT a criterion either way: NVK issues its own
-# PERF_BOOST, so the verdict is the read-back and the restore, nothing else.
+# This runbook verifies storage/readback/restore only. Frequency effects need
+# a controlled stock -> step -> restored comparison inside the SAME load:
+# NVK's own PERF_BOOST makes a load-vs-idle frequency rise inconclusive.
 #
 # Output: $OUT_ROOT/stage-clkoffset-write-<stamp>/ with the anchor log and the
 # write log, so the run is reviewable after the fact.
@@ -81,7 +71,7 @@ set -eu
 
 if [ $# -ne 1 ]; then
     echo "usage: sh tools/clock-offset-write-run.sh <bit>:<off>:<delta_khz>" >&2
-    echo "  e.g. sh tools/clock-offset-write-run.sh 0:8:250" >&2
+    echo "  e.g. sh tools/clock-offset-write-run.sh 0:12:250" >&2
     exit 2
 fi
 cand=$1
@@ -135,7 +125,15 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 # 1. the write vehicle: the full profile, never the idle one.
+needs_build=no
 if [ ! -x "$root/probe-macos-rm" ]; then
+    needs_build=yes
+else
+    for source in "$root"/src/*.[ch] "$root/build.sh"; do
+        if [ "$source" -nt "$root/probe-macos-rm" ]; then needs_build=yes; fi
+    done
+fi
+if [ "$needs_build" = yes ]; then
     echo "building probe-macos-rm (profile full; the write path is compiled out" >&2
     echo "of the idle build)" >&2
     (cd "$root" && PROFILE=full OGKM="$ogkm" sh build.sh)
@@ -145,6 +143,13 @@ if [ ! -x "$root/probe-macos-rm" ]; then
     echo "output, so check for 'built probe-macos-rm (profile full)'" >&2
     exit 1
 fi
+
+for source in "$root"/src/*.[ch] "$root/build.sh"; do
+    if [ "$source" -nt "$root/probe-macos-rm" ]; then
+        echo "probe-macos-rm is still older than $source after build; refusing to write" >&2
+        exit 1
+    fi
+done
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 bundle="$out_root/stage-clkoffset-write-$stamp"
@@ -195,8 +200,8 @@ finish() {
 echo "== anchor (decides whether the GSP is able to answer at all) =="
 $sudo_cmd "$root/probe-macos-rm" --anchor-read > "$bundle/anchor.txt" 2>&1 && arc=0 || arc=$?
 echo "  rc=$arc -> $bundle/anchor.txt"
-if grep -q "NV_ERR_RESET_REQUIRED" "$bundle/anchor.txt" || \
-   ! grep -q "NV_OK" "$bundle/anchor.txt"; then
+if [ "$arc" -ne 0 ] || \
+   ! grep -q "forward ALIVE and healthy" "$bundle/anchor.txt"; then
     echo "  !! the GSP is not answering normally; NOT writing." >&2
     echo "     A 0x62 below would make a rejected write unreadable -- reboot" >&2
     echo "     first, then rerun this script. Nothing was written this run." >&2
@@ -223,6 +228,7 @@ grep -E "V3\.5[a-f]|clk-offset" "$bundle/write.txt" || \
 # format strings, so they do not depend on how the overall verdict token renders.
 verified=no
 if grep -q "clk-offset-verdict" "$bundle/write.txt" && \
+   grep -q "SET 0x0, readback 0x0" "$bundle/write.txt" &&
    grep -q "same-field yes" "$bundle/write.txt" && \
    grep -q "others-unchanged yes" "$bundle/write.txt" && \
    grep -q "restore verified" "$bundle/write.txt"; then
@@ -285,21 +291,23 @@ PY
     echo ""
 fi
 
-echo "note: a frequency change (or its absence) is not evidence; the lines above"
-echo "      are. Rerun the read runbook afterwards to confirm the blocks agree."
+echo "note: this verdict covers control storage and restore. A frequency effect"
+echo "      needs a separate comparison within the same bounded workload."
 
 # Digests last, so they cover the finished logs and the exit status. The exit
 # code says which of the three states the run ended in: 0 verified, 1 not
 # verified (block back), 2 not verified with the block NOT proven back.
-stamp_sums
-if [ "$verified" = yes ]; then
+if [ "$verified" = yes ] && [ "$restore_bad" = no ]; then
     printf 'write run: VERIFIED (SET + read-back + restore)\n' >> "$bundle/README.txt"
+    stamp_sums
     exit 0
 fi
 if [ "$restore_bad" = yes ]; then
     printf 'write run: RESTORE NOT VERIFIED -- device may still carry the step\n' \
         >> "$bundle/README.txt"
+    stamp_sums
     exit 2
 fi
 printf 'write run: not verified, block restored\n' >> "$bundle/README.txt"
+stamp_sums
 exit 1

@@ -84,9 +84,9 @@ static int parse_rated_tdp_set(const char *spec, NvU32 *client, NvU32 *action)
 
 /* `--clk-offset-set BIT:OFF:DELTA` -- BIT is the domain-bit index (bit i
  * selects record i of the 0x2080901b/0x2080d01c block), OFF must be one of
- * the twelve measured value dwords, DELTA is kHz and capped at one minimal
- * step.  The offset is deliberately NOT defaulted: gate G1 (which dword is
- * the offset) is still open, so the operator has to name it. */
+ * the twelve measured value dwords, DELTA is limited to +/-18750 raw units.
+ * Record +12 with selector +8 == 0 is additive kHz; other slots are raw
+ * experiments. The offset is explicit to avoid silently choosing a field. */
 static int parse_clk_offset_set(const char *spec, unsigned *bit,
                                 unsigned *off, int *delta, int *bump)
 {
@@ -100,13 +100,13 @@ static int parse_clk_offset_set(const char *spec, unsigned *bit,
     if (!c2) return -1;
     *c2 = 0;
     char *end;
+    errno = 0;
     long b = strtol(buf, &end, 0);
-    if (*end || b < 0 || b > 31) return -1;
+    if (errno || end == buf || *end || b < 0 || b > 31) return -1;
+    errno = 0;
     long o = strtol(c1 + 1, &end, 0);
-    if (*end || o < 0 || o > 2108) return -1;
-    /* A third colon is optional: ":bump" also moves the record's stamp by one,
-     * which is what a driver-written change does. Without it the block carries
-     * an old stamp while the value differs -- true of every gated run so far. */
+    if (errno || end == c1 + 1 || *end || o < 0 || o > 2108) return -1;
+    /* Optional raw tail experiment, not a proven freshness/stamp protocol. */
     *bump = 0;
     char *c3 = strchr(c2 + 1, ':');
     if (c3) {
@@ -114,9 +114,9 @@ static int parse_clk_offset_set(const char *spec, unsigned *bit,
         if (!strcmp(c3 + 1, "bump")) *bump = 1;
         else return -1;
     }
+    errno = 0;
     long d = strtol(c2 + 1, &end, 0);
-    if (*end || d < -18750 || d > 18750) return -1;
-    if (*bump == 0 && *(c2 + 1) == 0) return -1;
+    if (errno || end == c2 + 1 || *end || d < -18750 || d > 18750) return -1;
     *bit = (unsigned)b; *off = (unsigned)o; *delta = (int)d;
     return 0;
 }
@@ -213,15 +213,14 @@ static void usage(void)
         "                   census (paramSize oracle scan; SET twins never sent)\n"
         "  --rated-tdp-set C:A   gated WRITE: set RATED_TDP client C to action A\n"
         "  --clk-offset-set BIT:OFF:DELTA[:bump]\n"
-        "  --clk-offset-arm    with a SET: also set the control dword +8 to 1\n"
         "  --clk-offset-hold N  with a SET: sample the live clock N s while the\n"
         "                       offset is applied, before restoring\n"
         "                   gated WRITE: move ONE clock-domain value dword one\n"
         "                   minimal step (needs --write). BIT selects record BIT\n"
         "                   (mask bit i -> record i); OFF must be one of the\n"
         "                   twelve measured dwords 8,12,16,20,24,28,32,36,40,\n"
-        "                   44,52,56 -- gate G1 (field identity) is open, so the\n"
-        "                   offset is never guessed; |DELTA| <= 1000 kHz.\n"
+        "                   44,52,56; |DELTA| <= 18750 raw units. Record +12 is\n"
+        "                   additive kHz when record +8 is 0 (not an enable bit).\n"
         "                   Snapshot -> SET -> same-field readback -> restore ->\n"
         "                   byte-exact verify, all printed as V3.5a..e\n"
         "                   (needs --write; pre-record + readback + restore)\n"
@@ -244,7 +243,7 @@ int main(int argc, char **argv)
     int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
     int clk_offset_set = 0;
     unsigned clkoff_bit = 0, clkoff_off = 0;
-    int clkoff_delta = 0, clkoff_bump = 0, clkoff_hold = 0, clkoff_arm = 0;
+    int clkoff_delta = 0, clkoff_bump = 0, clkoff_hold = 0;
     int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
     int fan_read = 0, hwfs_read = 0;
     int anchor_read = 0;
@@ -304,11 +303,16 @@ int main(int argc, char **argv)
             }
             rated_tdp_set = 1;
         }
-        else if (!strcmp(argv[i], "--clk-offset-arm")) clkoff_arm = 1;
+        else if (!strcmp(argv[i], "--clk-offset-arm")) {
+            fprintf(stderr, "--clk-offset-arm is unsafe: record +8 selects units, "
+                            "not enablement; leave it at 0 for additive kHz "
+                            "in record +12 (1 selects a relative /4096 value)\n");
+            return 2;
+        }
         else if (!strcmp(argv[i], "--clk-offset-hold") && i + 1 < argc) {
             unsigned long long v = 0;
             /* the second argument is the maximum VALUE, not a base or a width */
-            if (parse_number(argv[++i], 60, &v) != 0) {
+            if (parse_number(argv[++i], 60, &v) != 0 || v == 0) {
                 fprintf(stderr, "invalid --clk-offset-hold (want 1..60 s)\n");
                 return 2;
             }
@@ -318,7 +322,7 @@ int main(int argc, char **argv)
             if (parse_clk_offset_set(argv[++i], &clkoff_bit, &clkoff_off,
                                      &clkoff_delta, &clkoff_bump) != 0) {
                 fprintf(stderr, "invalid --clk-offset-set spec "
-                                "(want BIT:OFF:DELTA, |DELTA| <= 1000 kHz)\n");
+                                "(want BIT:OFF:DELTA[:bump], |DELTA| <= 18750)\n");
                 return 2;
             }
             clk_offset_set = 1;
@@ -511,7 +515,7 @@ int main(int argc, char **argv)
          * the same sentence as a plain read-back failure (rc 1). */
         int wrc = nvx_stage3_clk_offset_set(&g_ctx, clkoff_bit, clkoff_off,
                                             clkoff_delta, clkoff_bump,
-                                            clkoff_hold, clkoff_arm);
+                                            clkoff_hold);
         if (wrc != 0) rc = wrc;
     }
 

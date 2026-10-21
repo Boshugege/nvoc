@@ -77,7 +77,7 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action);
  * any stage battery and never run implicitly. */
 int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
                               unsigned field_off, int delta_khz,
-                              int bump_stamp, int hold_sec, int arm);
+                              int bump_stamp, int hold_sec);
 /* Explicit, read-only Thermal System V2 GET batch (public opcode interface). */
 int nvx_stage2_thermal_read(nvx_ctx *c);
 /* Explicit, read-only fan-policy GET: the fan family's only named candidate. */

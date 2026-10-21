@@ -4174,10 +4174,9 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
  *   +4 is the INPUT domain mask: bit i selects record i
  *   a selected record i at 60 + 64*i gets 13 dwords written:
  *     +0 (u16 type stamp), +8 +12 +16 +20 +24 +28 +32 +36 +40 +44 +52 +56
- *   those twelve are the VALUE dwords, and all twelve are zero at stock on a
- *   non-zero background -- which is exactly why the field identity (gate G1)
- *   is still OPEN and why this harness will not guess: the operator must name
- *   the field offset, and it must be one of the twelve measured slots.
+ *   those twelve dwords read zero at stock. The subsequent GSP consumer trace
+ *   and same-load A/B/A identify +12 as additive kHz when selector +8 is 0.
+ *   The raw harness still requires an explicit field from the measured slots.
  */
 #define NVX_CLKOFF_CMD_GET   0x2080901bu
 #define NVX_CLKOFF_CMD_SET   0x2080d01cu
@@ -4190,13 +4189,13 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
  * so one step of a full clock-table interval (+15000) is legal for the GSP
  * even though it is larger than the preferred step. */
 #define NVX_CLKOFF_RANGE_KHZ 18750
-/* Per-record stamp: the measured geometry puts it at +60 in every 64-byte
- * record (stamps at 60+64i). Every driver-written change bumps it, so a
- * caller that changes a value without bumping is "stale by construction". */
+/* Experimental raw tail dword at record +60, not returned by GET.
+ * Its meaning as a stamp has NOT been established; additive kHz works without
+ * changing it. Retained only for explicit raw :bump experiments. */
 #define NVX_CLKOFF_STAMP_OFF 60u
-/* +8 accepts only 0/1 while +12 accepts the whole range: +8 is read as the
- * control word of the pair, so "--clk-offset-arm" sets it with the value. */
-#define NVX_CLKOFF_ARM_OFF   8u
+/* Record +8 selects the delta interpretation: 0 = signed kHz at +12;
+ * 1 = signed i16 /4096 relative adjustment at +12. It is NOT an enable bit.
+ * GSP 610.57.04: 0x4d53004, 0x4d62e94, 0x4d60180 (see matrix section 135). */
 
 static const unsigned nvx_clkoff_value_offs[] = {
     8u, 12u, 16u, 20u, 24u, 28u, 32u, 36u, 40u, 44u, 52u, 56u
@@ -4260,7 +4259,7 @@ static int nvx_rusd_gpc_khz(nvx_ctx *c, NvU32 *khz)
 
 int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
                               unsigned field_off, int delta_khz, int bump_stamp,
-                              int hold_sec, int arm)
+                              int hold_sec)
 {
     if (NVX_IDLE_ONLY) {
         nvx_emit(c, "V3.5", "clk-offset-set", 0, NVX_V_GATED,
@@ -4319,9 +4318,10 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
         return -1;
     }
     NvU32 orig = nvx_peek_u32(snapshot, rec + field_off);
+    NvU32 wanted = orig + (NvU32)delta_khz; /* Raw dword arithmetic, no signed overflow. */
     NvU32 stamp = nvx_peek_u32(snapshot, rec);
     nvx_emit(c, "V3.5a", "clk-offset-pre-record", st, NVX_V_OK,
-             "domain bit %u -> record @%u stamp 0x%08x; field +%u current 0x%08x "
+             "domain bit %u -> record @%u type-pair 0x%08x; field +%u current 0x%08x "
              "(%d); snapshot taken", domain_bit, rec, stamp, field_off,
              orig, (int)orig);
 
@@ -4334,40 +4334,30 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
     /* 3. SET: the snapshot with exactly one dword moved, one step. */
     unsigned char block[NVX_CLKOFF_SIZE];
     memcpy(block, snapshot, NVX_CLKOFF_SIZE);
-    nvx_poke_u32(block, rec + field_off, (NvU32)((int)orig + delta_khz));
-    if (arm && field_off != NVX_CLKOFF_ARM_OFF) {
-        /* +8 takes only 0/1 while +12 takes the range: +8 looks like the control
-         * word of the pair. Arming it in the same block is the natural unit. */
-        NvU32 was = nvx_peek_u32(snapshot, rec + NVX_CLKOFF_ARM_OFF);
-        nvx_poke_u32(block, rec + NVX_CLKOFF_ARM_OFF, 1u);
-        nvx_emit(c, "V3.5b0", "clk-offset-arm", 0, NVX_V_OK,
-                 "control dword +%u 0x%08x -> 0x00000001 in the same block",
-                 NVX_CLKOFF_ARM_OFF, was);
-    }
+    nvx_poke_u32(block, rec + field_off, wanted);
     if (bump_stamp) {
-        /* The record is marked fresh the way the driver marks it: stamp + 1. */
+        /* Explicit raw tail experiment; this is not a freshness protocol. */
         NvU32 stamp = nvx_peek_u32(snapshot, rec + NVX_CLKOFF_STAMP_OFF);
         nvx_poke_u32(block, rec + NVX_CLKOFF_STAMP_OFF, stamp + 1);
         nvx_emit(c, "V3.5b0", "clk-offset-stamp-bump", 0, NVX_V_OK,
-                 "record @%u stamp 0x%08x -> 0x%08x (the block is not stale by "
-                 "construction)", rec, stamp, stamp + 1);
+                 "record @%u raw tail +60 0x%08x -> 0x%08x (semantics "
+                 "unconfirmed)", rec, stamp, stamp + 1);
     }
     st = nvx_clkoff_send_set(c, domain_bit, block);
     nvx_emit(c, "V3.5b", "clk-offset-set", st,
              st == 0 ? NVX_V_OK : NVX_V_REJECTED,
              "domain bit %u field +%u -> 0x%08x%s (rc 0x%x %s)", domain_bit,
-             field_off, (NvU32)((int)orig + delta_khz),
-             bump_stamp ? " with the stamp bumped" : "", st, nvx_status_name(st));
+             field_off, wanted,
+             bump_stamp ? " with raw tail +60 bumped" : "", st, nvx_status_name(st));
 
     /* 4. same-field readback + "every other value dword unchanged". */
     unsigned char after[NVX_CLKOFF_SIZE];
     NvU32 st2 = nvx_clkoff_get(c, domain_bit, after);
     int same_field = 0, others_same = 1;
     if (st2 == 0) {
-        same_field = (nvx_peek_u32(after, rec + field_off) ==
-                      (NvU32)((int)orig + delta_khz));
-        /* compare against the block we SENT, not the snapshot: an armed or
-         * stamp-bumped block differs from the snapshot on purpose. */
+        same_field = (nvx_peek_u32(after, rec + field_off) == wanted);
+        /* Compare against the sent block; only the explicitly selected
+         * dword (and optional raw tail) was modified. */
         for (unsigned i = 0; i < sizeof nvx_clkoff_value_offs /
                                 sizeof nvx_clkoff_value_offs[0]; ++i) {
             unsigned off = nvx_clkoff_value_offs[i];
@@ -4388,19 +4378,19 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
              "dwords as sent: %s; GET 0x%x", field_off,
              st2 == 0 ? nvx_peek_u32(after, rec + field_off) : 0xffffffffu,
              st2 == 0 ? (int)nvx_peek_u32(after, rec + field_off) : -1,
-             (NvU32)((int)orig + delta_khz), (int)orig + delta_khz,
+             wanted, (int)wanted,
              others_txt, st2);
 
     /* 4b. hold: sample the live clock WHILE the offset is applied. Nothing so
-     * far has shown that a written value reaches the hardware -- a read-back of
-     * the control block only shows the GSP stored it. */
-    if (hold_sec > 0) {
+     * control-block readback only proves storage. The separate bounded
+     * stock/step/restored load experiment establishes frequency effects. */
+    if (hold_sec > 0 && st == 0 && st2 == 0 && same_field && others_same) {
         for (int t = 1; t <= hold_sec; ++t) {
             sleep(1);
             NvU32 gpc = 0;
             int have = nvx_rusd_gpc_khz(c, &gpc) == 0;
             nvx_emit(c, "V3.5c2", "clk-offset-hold", 0, have ? NVX_V_OK : NVX_V_SKIP,
-                     "t=+%ds while +%d kHz is applied: gpc=%s", t, delta_khz,
+                     "t=+%ds while candidate %+d is stored: gpc=%s", t, delta_khz,
                      have ? "" : "unavailable");
             if (have) {
                 /* the previous line carries the sample as text; keep the number
@@ -4470,7 +4460,7 @@ int nvx_stage3_clk_offset_set(nvx_ctx *c, unsigned domain_bit,
     nvx_emit(c, "V3.5e", "clk-offset-verdict", 0,
              verified ? NVX_V_OK : NVX_V_REJECTED,
              "SET 0x%x, readback 0x%x, same-field %s, others-unchanged %s, "
-             "restore %s -- a live-frequency change is NOT evidence either way",
+             "restore %s -- storage/restore verdict; frequency effect needs same-load A/B/A",
              st, st2, (st2 != 0) ? "not measured" : (same_field ? "yes" : "no"),
              others_txt, identical ? "verified" : "FAILED");
     /* Three outcomes, three exit codes: verified, not verified with the block

@@ -1,5 +1,20 @@
 # RM parameter marshalling — corrections from the macOS TU116 host
 
+> **2026-10-21 correction (supersedes the candidate-offset conclusions below):**
+> TU116 core additive kHz is **record +12 with selector +8 = 0**. Firmware
+> `0x4d53004`/`0x4d62e94` copy the record's 40 B delta structure at +8;
+> `0x4d60374` passes its object counterpart to `0x4d60180`. Selector 0 reads
+> signed i32 at structure +4 and divides by 1000 before adding MHz; selector 1
+> reads signed i16 there and applies a /4096 relative adjustment. It is not an
+> enable bit. The earlier six-byte/40 B trace at `0x4d41094` describes the
+> **group header**, not this per-domain record. A 250 kHz stored step truncates
+> to 0 MHz on the identified path. A same-load stock/step/restored experiment
+> measured **1965 -> 1980 -> 1965 MHz** for `0:12:15000`, with NV_OK and all
+> 2108 B restored. See [feature matrix section 135](../../design/macos-backend-feature-matrix.md#一百三十五核心加法偏移首次真实生效同负载-1965--1980--1965-mhz)
+> for evidence, scope and remaining consumer integration. Historical notes below
+> preserve the investigation record and do not override this measured mapping.
+
+
 > Status: read-only investigation record, 2026-10-17. Host: macOS 15.8.1 /
 > x86_64 / GTX 1650 SUPER (TU116, 10de:2187) / NullMoth 2.0.4 /
 > NVRM 610.57.04. No writes, no driver changes, no EFI/boot-args changes.
