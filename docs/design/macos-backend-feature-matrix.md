@@ -2256,3 +2256,19 @@ call  0x18c1494 ; sd a0, 150h(s9)      ; 指针表 B
 - 更正交接与 §一百二十六：`main.c` 的 parser 接受 off 0..2108，但 `nvx_stage3_clk_offset_set` 还有第二道十二个值 dword 白名单；不能把 parser 边界当实际写入边界。记录 `+0` 是类型字节对；`:bump` 实际修改记录 `+60`，该槽的 stamp 语义尚无独立证明。
 
 原始证据：仓库外 `outputs/stage-clkoffset-write-20261021T151653Z/`，含 provenance、anchor、write 和 SHA256SUMS。下一步在原状态已证实恢复的前提下判定 `+12` 与对冲候选 `+44`，保留单步快照/回读/恢复门禁。
+
+
+## 一百三十四、对冲槽往返与 stock NVK/Metal 基线
+
+选择依据：首个 `+12:250` 往返恢复已验证后，按既定顺序独立尝试 `+44:250`；继而用短时 stock 负载区分动态 Boost 和用户偏移，不从空闲频率推断设置语义。
+
+实测桶 A（同一份 FRESH 原生二进制，源码 HEAD `31aff9b`）：
+
+| 操作 | 实际结果与证据 |
+| --- | --- |
+| `0:44:250` 单域单字段 | SET/GET/恢复 NV_OK，回读 250，其余值 dword 相同，恢复全部 2108 B 一致；runbook exit 0；`outputs/stage-clkoffset-write-20261021T151853Z/` |
+| stock NVK 5 秒低强度负载 | 显式指定驱动包 NVK ICD 与 loader；`--vulkan-only --duration 5 --vulkan-width 320 --vulkan-height 180 --vulkan-iters 8 --vulkan-shells 1 --vulkan-particles 0`，exit 0；前后 anchor 健康；`outputs/stage-stock-nvk-20261021T152007Z/` |
+| 同期时钟遥测 | RM776 graphics 从 1530000 升至 1965000/1950000，再回到 1530000 kHz；RUSD 相邻采样有延迟。stock Boost 已证明空闲恒 1530 MHz 不是负载频率上限；不能将这次自然升频记作偏移效果 |
+| Metal 正确性基线 | 在测试机重建后，显式 `--gpu NVIDIA --verify --elements 4096 --iters 128`；设备名指向 GTX 1650 SUPER / NVMTL / NVK TU116-A，exit 0，全量 4096 元素，零 mismatch，`metal-verify.txt` |
+
+分档：`+44` 与 `+12` 的存储往返已实测，频率字段语义仍为调查未知；本次 NVK 仅是 5 秒图形负载，Metal 仅是上述整数内核的一次 stock 正确性检查，不等于超频稳定、浮点覆盖或显存全覆盖。IDA 9.5 idalib 已实开固件只读副本（版本 9.5.261001），后续继续核对组头/记录层次，不能把历史“静态到此为止”当作硬限制。
