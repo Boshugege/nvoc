@@ -233,3 +233,20 @@ class TestEdidAliases:
             pytest.fail(f"'{alias}' should be a valid domain alias")
         except RuntimeError:
             pass
+
+
+class TestMacosFanValidation:
+    """Invalid requests must fail before selecting an intentionally absent GPU."""
+
+    @pytest.mark.parametrize("fan", ["1", "99"])
+    def test_unvalidated_cooler_is_rejected_before_gpu(self, pynvoc, fan):
+        with pytest.raises(RuntimeError, match="cooler 0 only"):
+            pynvoc.set_fan("not-a-gpu", "macos-rm", fan, "manual", 35)
+
+    def test_percentage_range_is_checked_before_gpu(self, pynvoc):
+        with pytest.raises(RuntimeError, match=r"0\.\.100 percent"):
+            pynvoc.set_fan("not-a-gpu", "macos-rm", "0", "manual", 101)
+
+    def test_software_policy_is_distinct_from_firmware_auto(self, pynvoc):
+        with pytest.raises(ValueError, match="manual or auto"):
+            pynvoc.set_fan("not-a-gpu", "macos-rm", "0", "continuous", 35)

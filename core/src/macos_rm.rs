@@ -106,6 +106,7 @@ pub struct SettingsCapabilities {
     pub graphics_offset_write: bool,
     pub memory_offset_write: bool,
     pub power_limit_write: bool,
+    pub fan_percent_write: bool,
 }
 
 /// Whether this backend supports the bulk settings write contract.
@@ -125,7 +126,7 @@ pub const SETTINGS_RESTORE_SUPPORTED: bool = false;
 ///
 /// Graphics additive offset has a separate transactional route. Other families
 /// still need their own protocol, bounds, readback and recovery validation.
-pub const MACOS_RM_WRITE_GATE_REASON: &str = "bulk settings/restore and this control family remain unavailable (SETTINGS_WRITE_SUPPORTED is false); graphics and memory additive offsets have validated transactional SET routes and per-domain write capabilities; board power limits also have a validated route. Other controls and unattended optimization remain gated";
+pub const MACOS_RM_WRITE_GATE_REASON: &str = "bulk settings/restore and this control family remain unavailable (SETTINGS_WRITE_SUPPORTED is false); graphics and memory additive offsets have validated transactional SET routes and per-domain write capabilities; board power limits and cooler0 percentage/firmware-auto control also have validated routes. Other controls and unattended optimization remain gated";
 
 /// Why a family that needs a *write* is listed as unavailable: the write half of
 /// these ids carries the legacy privileged bits, so an unprivileged client is
@@ -147,15 +148,8 @@ pub const WRITE_NEEDS_PRIVILEGE_REASON: &str = "needs a write, and a private SET
 /// change must not be taken as proof that a write took effect.
 pub const POWER_WRITE_NEEDS_PRIVILEGE_REASON: &str = "board power-limit SET/rollback has a validated root-only route (0x2080a61d/0x2080e61e, policy1/client0xfe, 70..100 W on TU116/610.57.04); each write rechecks live metadata and the restore snapshot. RATED_TDP is a separate arbitration request, not wattage, and its controls are not enabled by board-limit support (see notes)";
 
-/// Fan control, the family whose published surface really is absent: the SDK's
-/// own `ctrl2080fan.h` is a FINN-generated file with no definitions, and no
-/// `NV2080_CTRL_CMD_*FAN*`/`*COOLER*` macro exists anywhere in the control-header
-/// tree. That is a fact about the published headers, not about the driver -- and
-/// since this round there is a *named* candidate instead of an unknown one, taken
-/// from the in-tree NVAPI copy rather than from a scan. Whether it has been
-/// answered yet is decided by artifacts, not by prose: see the reason string and
-/// `probe-macos-rm/tools/audit-live-attempts.py`.
-pub const FAN_CONTROL_UNREADABLE_REASON: &str = "no fan value is published yet, but this family now has a named candidate rather than an unknown one: the RM SDK declares no fan control at all (its only fan artifact is a 33-line FINN stub with no declarations, and no NV2080_CTRL_CMD_*FAN/COOLER* macro exists in the tree), so the id was taken from the in-tree NVAPI copy, which names the fan-policy command it wraps as RM 0x20800532 reached through escape 0x07000038 and filling a 232-byte internal fanPolicyInfo table (dword 0 = policy mask, byte +4 = active policy index); on this host only the private twin 0x20808532 is in the method table (paramSize 336, read half), and the read that was attempted with it answered 0x62 NV_ERR_RESET_REQUIRED while the public id answered 0x56 NV_ERR_NOT_SUPPORTED -- the same wall every GSP-forwarded control hits while the reset is pending, and the answer this host gives for public ids the chip lacks, so neither verdict says the command is missing; those two answers are prose-only, though, because the census of every .txt and .jsonl capture under outputs/ (probe-macos-rm/tools/audit-live-attempts.py) finds neither id in a returned status, so the candidate is prepared as probe --fan-read (336 B on an 0xA5 background, so an unwritten field keeps 0xA5 and a written zero stays distinguishable) and is part of the read battery, which makes the next healthy run the first artifact-backed measurement of this family; until then nothing about fan rpm, its range or its restore path is claimed (see notes)";
+/// Missing advanced fan configuration, separate from the implemented percentage/auto control.
+pub const FAN_CONTROL_UNREADABLE_REASON: &str = "cooler0 percentage/manual and firmware-auto control are implemented through the measured RM metadata/status/control protocol; hardware fan-policy/curve and FanStop configuration are not yet decoded or connected to this entry (see notes)";
 
 /// The VF family is the opposite case: its reads exist, are non-privileged, and
 /// have simply never been issued, because the current priority is the offset
@@ -299,6 +293,7 @@ pub struct DeviceSettings {
     /// Power limit the driver was asked for, which clamping may exceed.
     pub power_limit_requested_mw: Option<u32>,
     pub power_limit_policy: Option<crate::PowerPolicySettings>,
+    pub fan_control: Option<crate::FanControlSettings>,
     pub pcie_link_gen: Option<u32>,
     pub memory_total_bytes: Option<u64>,
     pub memory_used_bytes: Option<u64>,
@@ -414,6 +409,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
         power_limit_mw: status.power_limit_mw,
         power_limit_requested_mw: status.power_limit_requested_mw,
         power_limit_policy: None,
+        fan_control: None,
         pcie_link_gen: status.pcie_link_gen,
         memory_total_bytes: info.memory_total_bytes,
         memory_used_bytes: status.memory_used_bytes,
@@ -434,12 +430,14 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             graphics_offset_write: offset_writes_supported(info),
             memory_offset_write: offset_writes_supported(info),
             power_limit_write: offset_writes_supported(info),
+            fan_percent_write: offset_writes_supported(info),
         },
         notes: vec![
             "responder: these ids are answered by the GSP firmware, not by a host RM table row (NVRM forwards legacy ids with bit 0x8000 set), so every parameter block is sized against the GSP's own export table rather than the NVAPI caller struct.".into(),
             "read: P-state, enforced/requested power limit, PCIe generation, board/SKU and memory sizes come from the same RM snapshot as get-status; sensor readings are separate (see get-status).".into(),
-            "write: graphics/memory additive offsets and board power-limit writes are implemented; other control families remain unavailable. NVRM still enforces root for SET. On this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids is one category byte over (0x2080901B -> 0x2080D01C: the 0x80-0xBF legacy-non-privileged byte gains 0x40 and the message id advances by one), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). Graphics/memory SET validates identity, a readable current value, a bounded step and exact recovery; other control families still require independent validation. The GSP must not be in the RESET_REQUIRED state.".into(),
+            "write: graphics/memory additive offsets and board power-limit and cooler0 percentage/auto writes are implemented; other control families remain unavailable. NVRM still enforces root for SET. On this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids is one category byte over (0x2080901B -> 0x2080D01C: the 0x80-0xBF legacy-non-privileged byte gains 0x40 and the message id advances by one), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). Graphics/memory SET validates identity, a readable current value, a bounded step and exact recovery; other control families still require independent validation. The GSP must not be in the RESET_REQUIRED state.".into(),
             "clock-domain configuration is read from 0x20809019 directory and 0x2080901b control: selector +8 = 0 means signed i32 kHz at record +12; relative/unknown modes remain unavailable as additive kHz. RM776 supplies live frequency only. The control mask selects directory indices, not public domain bits; the current 0xff read mask covers the first eight records. Probe validation demonstrated core +15 MHz and exact restoration; public graphics/memory SET now uses a snapshot/SET/full-readback/rollback transaction; other writes remain separately gated. The measured 0x20809025 range records report +/-18750 kHz, without a proven per-domain range mapping".into(),
+            "fan: measured cooler0 metadata/status/control use fixed 1432/844/980-byte blocks. Settings read mode, target percentage, independent status percentage and RPM; manual/firmware-auto SET uses exact full-block verification/rollback. Curves/FanStop/RPM-target mode are separate and remain unavailable.".into(),
             "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
     }
@@ -1098,17 +1096,17 @@ pub struct FanCoolerReading {
 /// worse, to read a fabricated zero.
 #[derive(Debug, Clone, Serialize)]
 pub struct FanReport {
-    /// Coolers that reported a live reading in this snapshot. Not "coolers
-    /// fitted": see `notes`.
+    /// Device queries count fitted coolers from metadata, including zero RPM.
+    /// Telemetry-only projections count plausible nonzero readings; see notes.
     pub count: usize,
     pub coolers: Vec<FanCoolerReading>,
-    /// The three percentage fields of the common fan-info contract. `None`
-    /// because this backend has no source for them, with the reason in
-    /// `unavailable`: a null that a consumer can look up, never a zero standing
-    /// in for a value that was not read.
+    /// Rounded NVML-equivalent percentages. Telemetry-only projections leave
+    /// these absent; the device query fills them from fixed fan metadata/status.
     pub min_percent: Option<u32>,
     pub max_percent: Option<u32>,
     pub current_percent: Option<u32>,
+    pub target_percent: Option<f64>,
+    pub mode: Option<String>,
     pub unavailable: BTreeMap<String, String>,
     pub notes: Vec<String>,
 }
@@ -1279,10 +1277,14 @@ pub const THERMAL_CONTROLLER_UNREAD_REASON: &str = "the RUSD temperature section
 impl DeviceStatus {
     /// What this snapshot can say about the fans, and what it cannot.
     pub fn fan_report(&self) -> FanReport {
-        let unavailable = ["min_percent", "max_percent", "current_percent"]
-            .into_iter()
-            .map(|field| (field.to_string(), FAN_PERCENT_UNREADABLE_REASON.to_string()))
-            .collect();
+        let mut unavailable: BTreeMap<String, String> =
+            ["min_percent", "max_percent", "current_percent"]
+                .into_iter()
+                .map(|field| (field.to_string(), FAN_PERCENT_UNREADABLE_REASON.to_string()))
+                .collect();
+        for field in ["mode", "target_percent"] {
+            unavailable.insert(field.into(),"this telemetry snapshot has no fan control block; the device-level fan query reads mode and target separately".into());
+        }
         let mut notes = Vec::new();
         match self.unavailable.get("fan_rpm") {
             // The section itself was unusable, so an empty cooler list means
@@ -1307,6 +1309,8 @@ impl DeviceStatus {
             min_percent: None,
             max_percent: None,
             current_percent: None,
+            target_percent: None,
+            mode: None,
             unavailable,
             notes,
         }
@@ -1554,6 +1558,73 @@ impl Device {
         }
     }
 
+    pub fn fan_percent_write_supported(&self) -> bool {
+        offset_writes_supported(&self.info)
+    }
+
+    pub fn fan_control_settings(&self) -> Result<crate::FanControlSettings, Error> {
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(&|| false, |session| {
+                let _guard = lock_transport()?;
+                let mut io = NativeFanControl(session.handle);
+                let (info, status) = io.info_status()?;
+                let current = crate::macos_control_transaction::ControlBlock::get(&mut io)?;
+                crate::macos_fan::settings(&info, &status, &current)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            Err(Error::Custom(
+                "macOS fan control requires x86_64 macOS".into(),
+            ))
+        }
+    }
+    /// Metadata identifies a fitted cooler even when its current RPM is zero.
+    pub fn fan_report(&self) -> Result<FanReport, Error> {
+        let s = self.fan_control_settings()?;
+        let notes=vec!["cooler identity/range come from RM metadata/status; current_percent is rounded driver status feedback, distinct from the requested target_percent. GETs are not atomic. Target is a percentage request, not a physical RPM request.".into()];
+        Ok(FanReport {
+            count: 1,
+            coolers: vec![FanCoolerReading {
+                slot: s.slot,
+                rpm: s.rpm,
+            }],
+            min_percent: Some(s.min_percent as u32),
+            max_percent: Some(s.max_percent as u32),
+            current_percent: Some(s.current_percent.round() as u32),
+            target_percent: Some(s.target_percent),
+            mode: Some(s.mode.into()),
+            unavailable: BTreeMap::new(),
+            notes,
+        })
+    }
+    /// Success persists; cooperative cancellation/errors restore the exact original block.
+    pub fn set_fan_control(
+        &self,
+        slot: u32,
+        target: crate::FanControlTarget,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<crate::FanControlWriteReport, Error> {
+        crate::validate_macos_fan_request(slot, target)?;
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(cancelled, |session| {
+                let _guard = lock_transport()?;
+                let mut io = NativeFanControl(session.handle);
+                let (info, status) = io.info_status()?;
+                crate::macos_fan::apply(&mut io, &info, &status, target, cancelled)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let _ = cancelled;
+            Err(Error::Custom(
+                "macOS fan control requires x86_64 macOS".into(),
+            ))
+        }
+    }
+
     /// The measured board-policy bounds/default and this client's configured limit.
     pub fn power_policy_settings(&self) -> Result<crate::PowerPolicySettings, Error> {
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -1700,6 +1771,18 @@ impl Device {
             Err(error) => settings
                 .notes
                 .push(format!("board power policy: not read ({error})")),
+        }
+        match self.fan_control_settings() {
+            Ok(fan) => {
+                settings.fan_control = Some(fan);
+                settings.unavailable.remove("fan_control");
+            }
+            Err(error) => {
+                settings.unavailable.insert(
+                    "fan_control".into(),
+                    format!("fan control read failed: {error}"),
+                );
+            }
         }
         Ok(settings)
     }
@@ -1903,6 +1986,27 @@ fn validate_clock_preflight(
         ));
     }
     Ok(())
+}
+
+/// Percentage/auto control with cooperative cancellation and full-block rollback.
+pub struct SetMacosRmFanControl<'a> {
+    pub slot: u32,
+    pub target: crate::FanControlTarget,
+    pub cancelled: &'a dyn Fn() -> bool,
+}
+impl crate::GpuOperation for SetMacosRmFanControl<'_> {
+    type Output = crate::FanControlWriteReport;
+    fn kind(&self) -> crate::OperationKind {
+        match self.target {
+            crate::FanControlTarget::Auto => crate::OperationKind::ResetFanSpeed,
+            crate::FanControlTarget::Percent(_) => crate::OperationKind::SetFanSpeed,
+        }
+    }
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target
+            .macos_rm()?
+            .set_fan_control(self.slot, self.target, self.cancelled)
+    }
 }
 
 /// Board power operation with the existing watt setter's units and cooperative cancellation.
@@ -2256,6 +2360,14 @@ unsafe extern "C" {
         handle: *mut SessionOpaque,
         index: u32,
         write: u32,
+        block: *mut u8,
+        size: usize,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
+    fn nvoc_macos_rm_session_fan(
+        handle: *mut SessionOpaque,
+        kind: u32,
         block: *mut u8,
         size: usize,
         error: *mut u8,
@@ -3305,6 +3417,63 @@ impl OffsetBlock {
     }
 }
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+struct NativeFanControl(*mut SessionOpaque);
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl NativeFanControl {
+    fn transfer(&mut self, kind: u32, block: &mut [u8]) -> Result<(), Error> {
+        let mut error = [0u8; 256];
+        // SAFETY: the caller owns a live session and holds the transport lock;
+        // native code validates the fixed operation and exact writable buffer size.
+        let status = unsafe {
+            nvoc_macos_rm_session_fan(
+                self.0,
+                kind,
+                block.as_mut_ptr(),
+                block.len(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(Error::Custom(format!(
+                "macOS fan control failed: RM 0x{status:08x} {}",
+                text(&error)
+            )))
+        }
+    }
+    fn info_status(&mut self) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        let mut info = vec![0; crate::macos_fan::INFO_BYTES];
+        let mut status = vec![0; crate::macos_fan::STATUS_BYTES];
+        self.transfer(0, &mut info)?;
+        self.transfer(1, &mut status)?;
+        Ok((info, status))
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl crate::macos_control_transaction::ControlBlock<{ crate::macos_fan::BYTES }>
+    for NativeFanControl
+{
+    fn get(&mut self) -> Result<[u8; crate::macos_fan::BYTES], Error> {
+        let mut block = [0; crate::macos_fan::BYTES];
+        self.transfer(2, &mut block)?;
+        Ok(block)
+    }
+    fn set(&mut self, block: &[u8; crate::macos_fan::BYTES]) -> Result<(), Error> {
+        let mut block = *block;
+        self.transfer(4, &mut block)
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl crate::macos_fan::FanControl for NativeFanControl {
+    fn defaults(&mut self) -> Result<[u8; crate::macos_fan::BYTES], Error> {
+        let mut block = [0; crate::macos_fan::BYTES];
+        self.transfer(3, &mut block)?;
+        Ok(block)
+    }
+}
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 struct NativePowerControl(*mut SessionOpaque);
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -4442,6 +4611,7 @@ mod tests {
             power_limit_mw: None,
             power_limit_requested_mw: None,
             power_limit_policy: None,
+            fan_control: None,
             pcie_link_gen: None,
             memory_total_bytes: None,
             memory_used_bytes: None,
@@ -4460,6 +4630,7 @@ mod tests {
                 graphics_offset_write: false,
                 memory_offset_write: false,
                 power_limit_write: false,
+                fan_percent_write: false,
             },
             notes: Vec::new(),
         }
@@ -4863,7 +5034,7 @@ mod tests {
         assert_eq!(report.min_percent, None);
         assert_eq!(report.max_percent, None);
         assert_eq!(report.current_percent, None);
-        assert_eq!(report.unavailable.len(), 3);
+        assert_eq!(report.unavailable.len(), 5);
         for field in ["min_percent", "max_percent", "current_percent"] {
             assert_eq!(report.unavailable[field], FAN_PERCENT_UNREADABLE_REASON);
         }

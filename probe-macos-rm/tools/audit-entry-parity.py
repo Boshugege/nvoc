@@ -45,7 +45,6 @@ IMPLEMENTED = "已实现"
 # `Command::GetInfo` inside the `matches!` of the refusal path.
 VARIANT_RE = re.compile(r"Command::([A-Za-z0-9]+)")
 # The command string a variant is dispatched as, from the command table.
-SPEC_WINDOW = 400
 SPEC_RE = re.compile(r'CommandSpec::new\(\s*"([a-z0-9][a-z0-9-]*)"')
 MESSAGE_RE = re.compile(r"supported commands: ([^.]+)\.")
 ROW_RE = re.compile(r"^\|\s*`([a-z0-9][a-z0-9-]*)`\s*\|")
@@ -69,9 +68,12 @@ def allow_list(cli_src: str) -> list[str]:
 def variant_names(cli_lib: str) -> dict[str, str]:
     """Variant -> command string, from the command table."""
     mapping: dict[str, str] = {}
-    for match in VARIANT_RE.finditer(cli_lib):
-        window = cli_lib[match.end() : match.end() + SPEC_WINDOW]
-        spec = SPEC_RE.search(window)
+    variants = list(VARIANT_RE.finditer(cli_lib))
+    ends = [match.start() for match in variants[1:]] + [len(cli_lib)]
+    for match, end in zip(variants, ends):
+        # Descriptors can exceed 400 characters. Bound the search by the next
+        # variant so a long descriptor is read without borrowing its neighbour.
+        spec = SPEC_RE.search(cli_lib, match.end(), end)
         if spec:
             mapping.setdefault(match.group(1), spec.group(1))
     return mapping
@@ -82,7 +84,10 @@ def message_list(cli_src: str) -> list[str]:
     match = MESSAGE_RE.search(cli_src)
     if match is None:
         return []
-    return [part.strip() for part in match.group(1).split(",") if part.strip()]
+    # Refusal lists may include parameter/mode hints after the command name.
+    return [
+        part.strip().split()[0] for part in match.group(1).split(",") if part.strip()
+    ]
 
 
 def table_rows(matrix: str) -> list[tuple[int, str, str]]:
@@ -274,7 +279,9 @@ def verdicts(cli_src: str, cli_lib: str, matrix: str) -> list[tuple[bool, str]]:
     claims = [
         (number, command)
         for number, command, status in rows
-        if command not in allowed and IMPLEMENTED in status
+        if command not in allowed
+        and IMPLEMENTED in status
+        and not status.startswith("未实现")
     ]
     if claims:
         out.append((

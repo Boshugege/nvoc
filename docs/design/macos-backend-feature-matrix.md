@@ -161,13 +161,13 @@
 
 | 命令 | 原 NVOC 行为（摘要） | macOS RM 状态 |
 | --- | --- | --- |
-| `get-fan-curve` | Read the NVAPI fan-curve table (ClientFanPolicies, struct 0x200DC; desktop-only) | 未实现：访问驱动前拒绝，但点名缺失层（§一百六）：SDK 无风扇控制声明，候选 0x20808532@336 待健康窗测量 |
-| `get-fan-info` | Read fan/cooler info (NVML: count + min/max percent; NVAPI: per-cooler info via private FanCoolerGetInfo) | **部分已实现且实测**：入口已允许并实机跑通（`get-fan-info --macos-rm` rc=0），读数取**同一个 RUSD 快照**（逐槽转速 ＋ **驱动自己的 cooler slot**），契约里本后端没有来源的三个百分比字段返回 `null` 并附理由（RUSD 风扇段只发布转速，既无占空比也无转速区间，百分比需要自造标度）；不可用时**区分"未读到"与"没有风扇"**——设备实测（2026-10-18，wedge 中）返回 `count:0` ＋ "the fan section of this snapshot was not usable (RUSD allocation/mapping failed: 0x00000062) … 空列表意味着 not read，而不是 no fan"；健康会话下的转速读数来自阶段 2 全量遥测（Metal 负载 4243 rpm、`metal-recheck` 2517 rpm） |
-| `get-legacy-fan-policy` | Read fan-policy capabilities (ClientFanPoliciesGetInfo NDA 0x52B76D12: V2 raw block on modern drivers; legacy V1 decoded on R391-era — policy list… | 未实现：访问驱动前拒绝，但点名缺失层（§一百六）：SDK 无风扇控制声明，候选 0x20808532@336 待健康窗测量 |
+| `get-fan-curve` | Read the NVAPI fan-curve table (ClientFanPolicies, struct 0x200DC; desktop-only) | 未实现：硬件曲线表仍未解码；百分比/auto已另行实现。访问驱动前点名拒绝，见§140。 |
+| `get-fan-info` | Read fan/cooler info (NVML: count + min/max percent; NVAPI: per-cooler info via private FanCoolerGetInfo) | **已实现且实测**：固定RM metadata/status/control读面提供cooler0身份、RPM、0..100%范围、当前反馈百分比、目标百分比和auto/manual模式；停止时count仍为1。反馈与目标分别报告，CLI/Python/shared QueryFanInfo同源，见§140。 |
+| `get-legacy-fan-policy` | Read fan-policy capabilities (ClientFanPoliciesGetInfo NDA 0x52B76D12: V2 raw block on modern drivers; legacy V1 decoded on R391-era — policy list… | 未实现：legacy硬件policy表未接入；已实现的auto/manual控制见§140，不能据缺公开头宣称驱动无风扇实现。 |
 | `reset-fan-curve` | Reset one fan-curve slot to factory (Private FanPolicy path 0x2B2A2A45; works where restore-fan/cooler-settings is NOT_SUPPORTED, e.g. desktop 3060… | 未实现：macOS RM 在访问驱动前拒绝 |
-| `reset-fan-speed` | Restore fan/cooler control: default clears the NVAPI cooler level override (control-block bit0 — the only reset that unpins modern cards) / NVML fa… | 未实现：macOS RM 在访问驱动前拒绝 |
+| `reset-fan-speed` | Restore fan/cooler control: default clears the NVAPI cooler level override (control-block bit0 — the only reset that unpins modern cards) / NVML fa… | **已实现且实测**：GET-default验证后恢复firmware auto，CLI及Python两个auto/reset入口完整980B恢复通过；不冒充曲线/RPM reset，见§140。 |
 | `set-fan-curve` | Write one fan-curve slot (RMW: --curve idx --points ...). The written slot only drives the fan while the cooler policy is TemperatureContinuous (8)… | 未实现：macOS RM 在访问驱动前拒绝 |
-| `set-fan-speed` | Set fan speed: --percent (default) sets cooler level in percent (NVAPI SetCoolerLevels / NVML set_fan_speed); --rpm sets physical RPM via private F… | 未实现：macOS RM 在访问驱动前拒绝 |
+| `set-fan-speed` | Set fan speed: --percent (default) sets cooler level in percent (NVAPI SetCoolerLevels / NVML set_fan_speed); --rpm sets physical RPM via private F… | **百分比已实现且实测**：共享事务→CLI/Python，cooler0/all、manual、0..100%发布范围；产品35%→36%回读与转速响应通过。RPM/legacy --cooler/continuous策略不支持，见§140。 |
 | `set-fanstop-status` | Toggle fan stop / zero-RPM for a curve slot (FanArbiterSet NDA 0x44CD3014): on \| off | 未实现：macOS RM 在访问驱动前拒绝 |
 
 ### 时钟、偏移与 P-State 锁（`Clock`，20 项）
@@ -263,11 +263,11 @@
 | 消费者 | 现状 | 依据 / 缺口 |
 | --- | --- | --- |
 | `nvoc-core` | 已实现：`BackendSet::MacosRm` 分发 + `discover()`/`QueryMacosRmInfo`/`QueryMacosRmStatus`/`MacosRmSession` | 阶段 1 实机 5 项硬件测试通过 |
-| `nvoc-cli` | 查询/连续监控、核心显存偏移SET/reset、board功耗SET/reset已实现且实测 | 其它操作逐项状态见命令表及§137–139 |
-| `nvoc-python`（pynvoc） | 查询、偏移与board功耗公共读取/设置已实测，auto使用平台后端；设置字段保留单位和窄能力标记 | reset/解锁完整契约、UI长任务和其它控制族仍需继续；见§136–139 |
+| `nvoc-cli` | 查询/连续监控、核心显存偏移SET/reset、board功耗SET/reset、风扇百分比/auto已实现且实测 | 其它操作逐项状态见命令表及§137–140 |
+| `nvoc-python`（pynvoc） | 查询、偏移、board功耗与风扇百分比/auto公共读取/设置已实测，auto使用平台后端；设置字段保留单位和窄能力标记 | reset/解锁完整契约、UI长任务和其它控制族仍需继续；见§136–139 |
 | `gui` | **部分已实现**：原生后端不再硬编码 `"both"`，`discover_gpus`/`query_info`/`query_status`/`query_settings` 统一传共享后端串 `auto`（macOS 解析为 RM 只读路径）；NVAPI 专属面板（超频/VF/风扇）在 macOS 上仍按既有路径明确失败 | 客户端 `gui/tests/` 281 passed / 13 skipped、ruff 干净；macOS 实机由 pynvoc `auto` 端到端覆盖（`stage11-shared-entry-…`）；GUI 本体未在 macOS 跑（测试机无 customtkinter） |
 | `tui` | **部分已实现**：同 GUI，`NativeService` 统一传 `auto` | 客户端 `tui/tests/` 214 passed、ruff 干净；同 GUI 的 macOS 本体限制 |
-| `srv`（ControlBackend） | **只读部分已实现且实测**：后端持有类型泛化为 `Box<dyn ControlBackend>`；新增 `srv/src/macos.rs::MacosRmBackend`（复用 `nvoc_core::macos_rm` 快照，`supports_writes()=false`），`/status`/`/api/status`/`/api/gpus`/`/api/info`/`/api/history`/`/config` 可用；写入在访问驱动前被拒（`/mode?value=pid|manual`、`/fan` → 409；`/api/oc/*`、`/api/reset` → `ERR: read-only…`；`/oc_global` 由循环拒绝），控制模式钉在 `Auto` | 非 macOS 路径逐字未变（`supports_writes()=true`）；macOS 上**无闭环控制**——PID/风扇/manual 需要写通道（阶段 4–7 的同一外部条件）。证据：`stage11-srv-macos-…` + `stage11-srv-smoke-…`，review `review-stage11-srv-macos-backend-20261017.md` |
+| `srv`（ControlBackend） | **只读部分已实现且实测**：后端持有类型泛化为 `Box<dyn ControlBackend>`；新增 `srv/src/macos.rs::MacosRmBackend`（复用 `nvoc_core::macos_rm` 快照，`supports_writes()=false`），`/status`/`/api/status`/`/api/gpus`/`/api/info`/`/api/history`/`/config` 可用；写入在访问驱动前被拒（`/mode?value=pid|manual`、`/fan` → 409；`/api/oc/*`、`/api/reset` → `ERR: read-only…`；`/oc_global` 由循环拒绝），控制模式钉在 `Auto` | 非 macOS 路径逐字未变（`supports_writes()=true`）；macOS 上**无闭环控制**——PID/风扇/manual尚未接入现有共享控制与恢复，属于服务集成缺口。证据：`stage11-srv-macos-…` + `stage11-srv-smoke-…`，review `review-stage11-srv-macos-backend-20261017.md` |
 | `auto-optimizer` | **部分**：`stressor-external` 非 CUDA 构建在 macOS 可编译运行；新增只读 `macos-eval`（`195e7af`）走 `BackendSet::MacosRm` 选设备 + 原 Vulkan 负载 + Metal 校验 + RM 遥测，`settings_written=false`；报告新增 `under_load.throttle`（`50bb01b`：负载期间 reason mask 的按位并集 + 断言过的原因名 + 实际带 mask 的样本数——空 `active_reasons` 只表示"驱动没断言"，不等于"没读"）；原 NVAPI 命令、`has_nvapi` 筛选与默认 feature 均未改 | 阶段 10 后续：候选/SET/回读/接受-回退/恢复需 macOS 写通道；见 `review-stage10-*` |
 | `cli-stressor-cuda-rs`（`--vulkan-only` / `--vulkan`） | **已实现且实测**：原 Vulkan 渲染负载在 macOS 直接复用，只新增 loader/ICD 解析（`vulkan_loader`，`4993a42`）——自动使用 `/Library/GPUBundles/nvmtl/` 的 Khronos loader + NVK ICD，无需手工导出 env；`--vulkan-window` 仍限 Windows（macOS 固定 offscreen） | CUDA GEMM 与 CUDA+Vulkan 混合模式在 macOS 不可用（无 CUDA）；渲染负载不做读回比对，计算域校验见下一行 |
 | `stress-macos`（新增） | **已实现且实测**：Metal 计算负载 + bit-exact CPU 参考校验（`1dcf27a`）；自检、负例、限时负载、SIGINT 停止全部通过 | 补 `--vulkan-only` 缺的**计算正确性**维度；是校验器，不是 CUDA/OpenCL 负载的等价替代 |
@@ -284,13 +284,13 @@
 | 3 当前设置/范围/恢复基础 | 设置/范围/快照/恢复 | **部分完成**：偏移与board功耗有公共读取、范围、单项设置及回读/恢复，见§136–139；通用整组settings/restore未完成 | 继续各控制族与整组恢复 |
 | 4 核心/显存频率控制 | 偏移/锁频/reset | **偏移已实现且实测**：核心/显存±范围、独立域、CLI/Python、reset及原值恢复；核心+15和显存±15MHz实际效果见§137–138。锁频路径已继续静态审计，见§139 | 锁频/解锁的可达协议及验证 |
 | 5 功耗/温度/运行策略 | W/%、温度墙、Boost | **board功耗W控制已实现且实测**：70..100W、default100W、产品CLI/Python及恢复见§139。百分比/rated-TDP仲裁、温度策略和Boost仍各自待实现 | 温度策略、风扇及其恢复 |
-| 6 逐风扇/模式/曲线 | 风扇模式、曲线读写 | **逐风扇 RPM 读面已有**：RUSD 16 槽 → `fan_rpm`（最高实时值）+ `fan_rpms`（非零逐槽列表），负载中实测 `fan_rpm=1833`、`fan_rpms=[1833]`（`stage6-fan-read-20261017T060900Z`）；CLI/pynvoc 均已归一化（`cli/src/output.rs`、`nvoc-python/src/lib.rs:798`）（此前'只有最大 RPM'的说法过时）。**缺**：风扇百分比/模式、曲线读写、FanStop | 百分比/模式/曲线/FanStop 无公开 RM 读/写命令（**完整 CMD 宏扫描**：无 fan/cooler/acoustic 宏，见 §四）； **活表审计反证（新，2026-10-17）**：加载镜像 604 条活表里**没有任何 fan/cooler 类别行**——整个 cat 05 只有 `THERMAL_SYSTEM_EXECUTE_V2`；全仓被引用的 114 个 `0x2080xxxx` id 中只有 49 个在表内，**且全部出自公开 SDK**，风扇唯一的 RM cmd `0x20800532` 不在其中（Windows 侧走的是 escape `0x07000198`/`0x07000038`，无 macOS 对应物）⇒ 风扇控制在 kernel RM 侧**无实现体**，不是「未解码」；逐风扇 RPM 仍走 RUSD。见 `docs/reverse-engineering/nvapi/registered-vs-recorded-rm-ids-audit.md` |
+| 6 逐风扇/模式/曲线 | 风扇模式、曲线读写 | **cooler0百分比/auto已实现且实测**：metadata/status/control、零RPM身份、正式core/CLI/Python、35→36%及完整恢复见§140；RPM目标、硬件曲线和FanStop仍未实现 | 继续曲线/FanStop与服务集成；旧“kernel无风扇实现”推断已被私有GSP控制实测推翻 |
 | 7 V/F、电压点、高级超频 | 曲线点/偏移/导入导出 | 未开始：`vfpoints-get`(0x208090A2) 以 524 B 参数被接受但 payload 仅 1 个非零字，非曲线数据；该 ID 及 `rails-get-*` 在公开 OGKM 610.57.04 中**完全不存在**（非公开固件控制），公开面也无 VF 命令；该 ID 在本机所有 NVIDIA 二进制里 0 命中（review §6），即结构在固件侧。**追加（私有读面普查，2026-10-17）**：Windows 后端读 VF 曲线的三个私有 GET（`VFP_GET_INFO/STATUS/CONTROL` 0x20809021/22/23，SET 孪生 0x2080D024）在本驱动**全部 60 档尺寸 `0x1f`**（产物未存）（=命令在、参数块未构造出，见阶段 4 行）；只有 582.41 编号的 `0x20809061`（776 B，非曲线本体）可用，**曲线读取仍未打通**（`stage-clkvf-read-20261017T072432Z`）   **文档封送 pass（2026-10-17）**：VFP `0x20809061` 的 R610 whitelist 五档全 `0x1f`，但同 id 的 **776 B 形态**可读，得到 11 条每域 kHz 表（见阶段 4 行）；`0x20809062`/`0x20809023` 全部文档 stamp 仍 `0x1f` ⇒ **曲线本体仍未打通**，但频率域读数已达（`stage-clkdoc-20261017T074256Z`）  **活方法表反证（新，2026-10-17）**：活表里 cat 0x90/0xd0（CLK legacy）、0x32/0xb2（VOLT）、0xf2（VOLT privileged）**全部 0 行** ⇒ 私有 VF/电压 id 在 kernel RM 无注册、`rmapiutilGetControlInfo` 在本机无法解析；两个被接受的形态（`0x20809061@776`、`0x2080B201@≥2444`）在已加载 host 二进制里无任何字面量——**原因已查明：host 对这类 id 只测 legacy 位 `0x8000` 后整块转发，应答者是 GSP 固件**（见阶段 4 行与 `docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md`）；GSP 表内 VOLT 家族 **17 行**、CLK 家族 **87 行**（11:50Z 更正，旧 151/169 是 PERF/internal 家族），故私有 VF/电压 id **在 GSP 有实现体**（host 表 0 命中只说明它们不是 host 实现）。**活表审计（新，2026-10-17）**：cat 0x32(含 b2/f2 三种编码) 被引用 4 个 id（`0x2080b201/b202/b213/f214`）**在 host 活表里 0 命中**；全仓 114 个引用 id 中仅 49 个在表内且全部来自公开 SDK。**更正口径**：host 表无实现体 ≠ 本机无实现体——私有电压/VF 族经 legacy 位转发给 **GSP**，GSP 表内 VOLT 家族有 **17 行**（11:50Z 更正：旧记 151 行是 PERF 家族）（含 `0x2080b201=2444`/`0x2080b202=3232`/`0x2080b213=1036`/`0x2080f214=1036`(SET)），故这些 id **有 GSP 侧实现体**。**新的分层证据**：GSP 因私有 GET 被喂坏内容而整条 legacy 路径考机后（`0x65`→`0x62 NV_ERR_RESET_REQUIRED`），`0x2080B201@2444` **仍照常 `NV_OK` 返回 mask 0xFF + 800000/756250 µV**，而 `0x20809019/61` 全部 `0x62` ⇒ `0x2080b201` 是该族里**唯一不查 fault state 的 GSP handler**。**11:43Z 更正**：先前把这行读成「b201 不经 GSP 转发（host 应答或另一条非 legacy 通道）」是**错的**——尺寸边界实测证明它的 `>=2444` 门**随 GPU fault state 变化**（wedge 前同一请求 `0x1f`、wedge 中 `0x62`），而 host NVOC 门不随之为转移（同一次运行里 `0x2080122a@20` 仍 `0x1f`）⇒ 校验发生在**转发之后**，b201 由 GSP 应答，转发**是活的**（见 `gsp-method-table-and-legacy-forwarding.md` §7/§12 与「本轮追加六」）。见 `docs/reverse-engineering/nvapi/registered-vs-recorded-rm-ids-audit.md` **本轮追加七（2026-10-17，静态）**：VF 之前先要的是「12 个零值 dword 里哪个是 offset」——见阶段 4 行追加七与 `gsp-method-table-and-legacy-forwarding.md` §14.1/§14.3：`0x2080901b` 的 64 B 控制记录**确实被写满 12 个 value dword（stock 全 0）**，而 `0x20809019` 的同一序记录给的是**目录/范围**（`+44/+46` 有符号对）⇒ 偏移与曲线两步仍按原门槛走，VF 曲线继续后置。 |
 | 8 其余功能族 | VBIOS、显示/EDID、限频原因、运行策略、ECC/OEM/多卡 | **逐项判定**（详见 `stage8-throttle-reasons-20261017T064017Z/README.md` §2）：**限频原因＝完成**——RUSD `clkThrottleInfo.reasonMask` 已进 status，专用命令 `get-throttle-reasons` 本轮在 macOS 可用（9 条 NVML 词汇/顺序、`violation=null`），且该读数现由 core 的共享 `QueryThrottleReasons` 从 RM 快照解码——CLI 与 pynvoc `query_throttle_reasons(gpu,"auto"|"macos-rm")` 同源、不会各自漂移（`stage11-throttle-shared-20261017T065005Z`）；**VBIOS＝部分**——`BIOS_GET_SKU_INFO` 已读 board/sku/project（实测 NV_OK）、`get-vbios -i` 离线解析可用，但**版本串/镜像不可得**：公开 BIOS 命令族全为读且 GET_INFO_V2 只给 REVISION 数字，内核接口无 ROM escape（全树 ROM grep 仅命中寄存器 `NV_PES_XVU_ROM_ACCESS`），刷写＝NVAPI/Windows→N/A；**显示/EDID＝未接入（无可达证据）**——`NV0073_CTRL_CMD_SPECIFIC_GET_EDID_V2` 属 display class 0x0073，需 display 对象，macOS RM 链未暴露，未盲扫；NVAPI 显示 API→N/A；**API/运行策略＝N/A**（autoboost/ppab/whispermode2/dnotifier/pmgr-arbiter/api-restriction 均 NVAPI 读写，无运行时）；**ECC/OEM/Blackwell/移动＝N/A**（TU116 桌面、无 ECC、非 OEM、非 Blackwell）；**多卡＝本机单卡**（`GPU_GET_ATTACHED_IDS` 单 gpuId 0x100，后随 0xffffffff） | 逐项有依据；VBIOS 版本串/EDID 依赖未暴露的 RM 通道或 NVAPI，已按"未知/不适用"分开 |
 | 9 自动压力执行与验证器 | 限时负载、停止、结构化结果、正确性校验 | **主负载 + 校验器完成**。主负载＝原 `--vulkan-only` 渲染路径（零算法改动，仅补 loader/ICD 解析 `4993a42`）：无 env 冷启动 rc=0，5/10/30 s 阶梯与 60 s stock 负载 rc=0，错误路径（`--gpu-index` 越界 / `--pci-bus` 不匹配）rc=1，`--vulkan-window` 在非 Windows 回退 offscreen rc=0；同步遥测显示 util 峰值 100%/均值 83%、gfx 1.53→1.95 GHz、功耗 11.5→13.5 W、温度 54→62 ℃、风扇 1778→1920 rpm。校验器＝`stress-macos`（`1dcf27a`）：全量 bit-exact 比对、启动自检、负例 rc=1、60 s 限时 1206 次 dispatch/0 失败、SIGINT 优雅停止。**整体验收**（`stage9-accept-20261017T045311Z`）：3 组 feature 构建 + fmt/clippy/tests 全 rc=0；`--vulkan-only` 冷启动 rc=0、错误路径 rc=1/1/0、阶梯 rc=0；信号语义实测 `--vulkan-only` SIGINT rc=-2 / SIGTERM rc=-15（OS 默认处置、立即终止），`metal_check` `--stress 300` 收 SIGINT 后 rc=0 优雅停止。**HEAD 复跑**（`stage-vulkan-recheck-20261017T055856Z`，8/8 PASS）：无 env 冷启动 rc=0、`--gpu-index 0` 选中真设备 `GTX 1650 SUPER (NVK TU116-A)` PCI `0000:01:00.0`、越界索引 rc=1；loader=`/Library/GPUBundles/nvmtl/libvulkan.1.4.362.dylib`、ICD=`nvk_icd.json`→`libvulkan_nouveau.dylib`（**NVK，非 MoltenVK**） | 渲染负载无读回校验、`--vulkan-only` 无进程内取消（靠 SIGINT/SIGTERM 默认处置）；阶段 10 需把负载/校验器结果接进 optimizer 闭环 |
-| 10 自动扫描/优化/结果应用 | 受限闭环、保存/应用/恢复 | **部分：非 CUDA 构建 + 只读评测入口落地**。`--no-default-features --features stressor-external` 的 check/build rc=0；新增子命令 `macos-eval`（`195e7af`、证据 `stage10-eval-…`）：用 `BackendSet::MacosRm` 选设备（不再要求 `has_nvapi`），复用原 `cli-stressor-cuda-rs --vulkan-only` 限时负载 + NullMoth RM 遥测采样 + `stress-macos/metal_check --verify`，输出 `nvoc/macos-stock-eval/1`（pre/under_load/post、FPS、校验结论、`settings_written=false`）。实机 20 s：gfx 1950→1965 MHz、util 均值 87%/峰值 99%、power 12.5→13.5 W、temp 52→57.6 ℃、校验 pass。**无候选/SET/回读/接受-回退/恢复**：macOS 无公开写通道，这些仍不能跑。**HEAD 复跑**（`stage10-recheck-20261017T060320Z`）：`macos-eval --duration 8` rc=0，1530→1965 MHz、功率 11.4→13.6 W、温度 52.2→59.5 C、util max 100%、fan→2517 rpm，`metal_check` passed / 0 mismatch（全量 bit-exact），`settings_written=false`。"
-    "**追加（`50bb01b`，2026-10-17）**：报告新增 `under_load.throttle`——负载期间的 reason mask 并集 + 断言过的原因名 + 带 mask 的样本数；实机 `--duration 8 --interval 1` 得 `samples_with_mask=5, mask_any=0, active_reasons=[]`（stock 负载下驱动未断言任何限频原因），`stressor exit=0`、`metal_check passed`、`settings_written=false`（`stage11-throttle-shared-20261017T065005Z`） | 需要 macOS 写通道或非公开接口；在此之前闭环停在"预检+原状态快照+限时负载+校验"这半 |
-| 11 共享入口与界面集成 | core/CLI/Python/UI/srv | **部分完成**：查询、偏移和功耗已共享接入core/CLI/Python；GUI/TUI既有只读启动有证据，写面尚需能力/参数适配和实机交互；srv仍observe-only | 完成支持操作的UI及服务集成 |
+| 10 自动扫描/优化/结果应用 | 受限闭环、保存/应用/恢复 | **部分：非 CUDA 构建 + 只读评测入口落地**。`--no-default-features --features stressor-external` 的 check/build rc=0；新增子命令 `macos-eval`（`195e7af`、证据 `stage10-eval-…`）：用 `BackendSet::MacosRm` 选设备（不再要求 `has_nvapi`），复用原 `cli-stressor-cuda-rs --vulkan-only` 限时负载 + NullMoth RM 遥测采样 + `stress-macos/metal_check --verify`，输出 `nvoc/macos-stock-eval/1`（pre/under_load/post、FPS、校验结论、`settings_written=false`）。实机 20 s：gfx 1950→1965 MHz、util 均值 87%/峰值 99%、power 12.5→13.5 W、temp 52→57.6 ℃、校验 pass。**候选/接受-回退/结果应用闭环未接入**：核心/显存偏移、board功耗及风扇现在已有共享写入与恢复；优化器仍需从NVAPI具体调用适配到这些能力。**HEAD 复跑**（`stage10-recheck-20261017T060320Z`）：`macos-eval --duration 8` rc=0，1530→1965 MHz、功率 11.4→13.6 W、温度 52.2→59.5 C、util max 100%、fan→2517 rpm，`metal_check` passed / 0 mismatch（全量 bit-exact），`settings_written=false`。"
+    "**追加（`50bb01b`，2026-10-17）**：报告新增 `under_load.throttle`——负载期间的 reason mask 并集 + 断言过的原因名 + 带 mask 的样本数；实机 `--duration 8 --interval 1` 得 `samples_with_mask=5, mask_any=0, active_reasons=[]`（stock 负载下驱动未断言任何限频原因），`stressor exit=0`、`metal_check passed`、`settings_written=false`（`stage11-throttle-shared-20261017T065005Z`） | 需要接入现有macOS共享写入/恢复并完成候选评测；目前闭环停在"预检+原状态快照+限时负载+校验"这半 |
+| 11 共享入口与界面集成 | core/CLI/Python/UI/srv | **部分完成**：查询、偏移、功耗和风扇百分比/auto已共享接入core/CLI/Python；GUI/TUI既有只读启动有证据，写面尚需能力/参数适配和实机交互；srv仍observe-only | 完成支持操作的UI及服务集成 |
 | 12 全量回归与交付 | 完整覆盖、契约/CI/review | **持续进行**：逐步CI、小提交、fork同分支交付；历史绿灯不代替新控制实测。完整goal尚未完成 | 逐族回归并最终覆盖审计 |
 
 ## 四、已知限制（本表不得当成支持声明）
@@ -326,11 +326,11 @@
   `/status`/`/api/status`/`/api/gpus`/`/api/info`/`/api/history`/`/config` 可用，控制模式恒为
   `Auto`；`/mode?value=pid|manual`、`/fan` 返回 409，`/api/oc/*`、`/api/reset` 返回
   `ERR: read-only macOS backend…`，`/oc_global` 由控制循环拒绝。**不存在** macOS 风扇 PID 闭环、
-  手动占空比、偏移/限值写入——这些需要可写 RM/固件接口（与阶段 4–7 同一外部条件）。
+  手动占空比、偏移/限值写入——其中偏移、board功耗和风扇百分比/auto已有共享接口（§137–140），服务层尚未接入。
   非 macOS 平台走原 `NvapiBackend`，行为逐字未变。
 - `auto-optimizer` 在 macOS 上：可构建、`--help`、并新增只读 `macos-eval`（真实负载 + 遥测 + 校验），
   但**不能扫描/应用/恢复**——原 `optimize`/`autoscan` 按 `has_nvapi()` 选目标且 SET 全走 NVAPI，
-  本机 NVAPI/NVML 均缺库。真实闭环在拿到 macOS 写通道前无法运行，`macos-eval` 只是它的只读一半。
+  本机 NVAPI/NVML 均缺库。共享偏移/功耗/风扇写入已具备，真实闭环仍需优化器接线和验证；`macos-eval` 目前只承担评测部分。
 - 阶段 4–7 读通道调查结论（`review-stage4-7-read-channel-20261017.md`）：campaign GET
   `0x2080B201/0x2080B202/0x208090A2` 在公开 OGKM 中完全不存在（sanity grep 通过）；公开控制面里
   `ctrl2080volt.h`/`ctrl2080clkavfs.h` 不含任何命令、也无 VFP/VF-point 命令；NVAPI 私有 VF 入口在
@@ -2423,3 +2423,50 @@ RM776 domain0x10与RUSD显存读数一致；写入/恢复稳定段核心均19650
 阶段4余项调查：NVML普通range-lock helper实际发`0x2080e078`/16B count+pointer carrier，reset同命令；它在已测host/GSP两表均无行，未发送猜测替代SET。另一memory route依赖`0x2080a06e`状态、发`0x2080e06f`/8，前置及恢复尚未验证；不能据此宣称所有锁频均无实现。后续独立风扇线索：同版本NVML给出status GET`0x2080852f`/844、control GET`0x20808530`/980、SET`0x2080c531`/980；两条GET本轮均NV_OK，尚未写风扇。
 
 分档：**board功耗W读取/范围/SET/default reset/原值恢复及core/CLI/Python接入已实现且实测**，本轮实际写98/99W并恢复100W；70–100W为设备发布并逐写验证的窗口，不宣称每个值均单独实测。不支持任意放宽范围、百分比/RATED_TDP仲裁、温度策略、fan/VF写或自动优化。主功能表与阶段路线图同步反映当前状态，完整goal继续active。
+
+## 一百四十、cooler0百分比与firmware auto接入共享事务、正式CLI/Python
+
+选择依据：继续同版本Linux610.57.04 NVML的IDA9.5调用链，追到固定
+metadata/status/current/default/SET五种请求。命令及尺寸均核对1118行GSP表，
+完整协议见 [macos-fan-control-r610.md](../reverse-engineering/nvapi/macos-fan-control-r610.md)。
+公开SDK没有声明、host表没有行均不能推导GSP无风扇实现；旧阶段6的否定推断已由实测推翻。
+
+实现：
+
+- 固定GET-info `0x2080852e`/1432、GET-status `0x2080852f`/844、
+  GET-current/default `0x20808530`/980、SET `0x2080c531`/980。
+  metadata mask1识别cooler0，零RPM也保留count1。status发布0..100%范围及独立反馈。
+- manual只改原980B的mode+36与targetQ16+40；35%→22938。
+  auto先GET-default（header+16=1），验证mode0且其余校准/控制字节未变，
+  仅复制mode/target到原ordinary header0。完整回读与有界恢复复用既有事务。
+- 身份/版本/live mask/type/range校验，SET root门控，进程内transport mutex，
+  合作取消/错误后完整原块恢复；成功设置持久。不承诺SIGKILL/abort恢复。
+- 原共享QueryFanInfo/SetFanSpeed(manual)/ResetFanSpeed接macOS；带cancel操作同一device实现。
+  CLI set-fan-speed/reset-fan-speed与Python set_fan/manual/auto、reset_fan_speed接入；
+  显式NVAPI/NVML路径保留，auto/default按平台选后端。
+- 设置报告新增fan_control与窄能力fan_percent_write；bulk settings/restore、服务/优化器仍未启用。
+  current_percent是驱动反馈（公共NVML形状取整），target_percent保留Q16解码分数；不冒充RPM目标/PWM。
+
+实际验证：
+
+| 项目 | 结果 |
+| --- | --- |
+| 首次固定外部35%实验 | `stage-fan-control-roundtrip-20261021T172842Z`，SET/完整回读通过，RPM0→约1800，980B恢复，anchors healthy |
+| 正式产品CLI35%→Python36% | 最终`stage-product-fan-20261021T175023Z`，目标分别35.000610/36.000061%，短时观测RPM1409/1215、反馈50/43%；前批174112Z也通过（RPM1420/1790、反馈51/64%）。反馈与目标分别报告，不以短时RPM排序推断转速精度 |
+| 自动模式恢复 | 同批CLI reset、Python auto及无backend参数reset_fan_speed均恢复原auto；manual期间保存了GET-default原块，最终980B完全相同 |
+| 其它控制保持 | 同批power12B与四mask clock8432B前后一致；前后anchors明确healthy |
+| 权限/前置参数拒绝 | `stage-product-fan-rejections-20261021T174325Z`，nonroot0x1b；>100%、slot1、RPM、legacy cooler、continuous策略在选absent GPU前拒绝；980B不变 |
+
+分档：**cooler0百分比/模式读取、manual百分比SET、firmware-auto reset、原值恢复和
+core/CLI/Python接入已实现且实测**。0..100%为设备发布范围，实际短测35/36%，未逐值实测。
+RPM-target、FanStop配置、硬件/软件曲线、UI写入、服务闭环和自动扫描未因此完成；
+反馈百分比不等于目标，短时转速响应不等于热稳定或转速精度验收。完整阶段0→12目标继续。
+
+验证：最终指定三环境变量加仓库外本轮扩展的PYTHONPATH，`cargo xtask ci` **CI_EXIT=0**。
+core137、CLI94、Python Rust18；真实扩展import/validation **56 passed，0 skip**，
+点名GET-only硬件测试`shared_fan_info_reads_metadata_and_preserves_a_stopped_cooler` **1 passed**，
+未初始化NVAPI。全CI的Python完整套件56passed/10skipped不能代替上述真实导入覆盖。
+修正entry-parity脚本400字符查找窗口与命令参数提示解析，实际15个允许命令和102条命令表
+核对通过，长描述/相邻variant隔离/参数提示静态回归通过。GUI/TUI回归分别281passed/13skipped、214passed；未据此宣称UI新控制实机完成。
+日志`fan-{ci,build,python-import,shared-read,entry-parity}-20261022.txt`及source manifest、SHA256SUMS存仓库外。
+CI最初加载旧扩展导致新契约测试失败，改为显式加载本轮编译扩展后通过；旧源目录扩展未覆盖。

@@ -422,3 +422,27 @@ fn shared_power_limits_read_the_board_policy_without_initializing_nvapi() {
     assert!(!nvapi_init_attempted());
     println!("policy={policy:?}; shared={shared:?}; report={report:?}");
 }
+
+#[test]
+#[ignore = "requires the validated macOS TU116 RM driver; fan GETs only"]
+fn shared_fan_info_reads_metadata_and_preserves_a_stopped_cooler() {
+    let _serial = serial();
+    let inventory = discover_targets(BackendSet::MacosRm).unwrap();
+    let targets = inventory.targets();
+    let target = targets[0];
+    let device = target.macos_rm().unwrap();
+    let report = device.fan_report().unwrap();
+    let shared = run(&target, nvoc_core::QueryFanInfo).unwrap().output;
+    let settings = device.fan_control_settings().unwrap();
+    assert_eq!(report.count, 1);
+    assert_eq!(shared.count, 1);
+    assert_eq!((shared.min_speed, shared.max_speed), (Some(0), Some(100)));
+    assert_eq!(report.coolers[0].slot, 0);
+    assert_eq!(settings.slot, 0);
+    assert!((0.0..=100.0).contains(&settings.current_percent));
+    assert!((0.0..=100.0).contains(&settings.target_percent));
+    assert!(matches!(settings.mode, "auto" | "manual"));
+    assert!(device.fan_percent_write_supported());
+    assert!(!nvapi_init_attempted());
+    println!("settings={settings:?}; report={report:?}; shared={shared:?}");
+}

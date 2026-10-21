@@ -1133,6 +1133,15 @@ impl GpuOperation for QueryFanInfo {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        if target.has_macos_rm() {
+            let s = target.macos_rm()?.fan_control_settings()?;
+            return Ok(FanInfo {
+                count: 1,
+                min_speed: Some(s.min_percent as u32),
+                max_speed: Some(s.max_percent as u32),
+                current_speed: Some(s.current_percent.round() as u32),
+            });
+        }
         let nvml = target.nvml()?;
         let count = low_nvml::get_nvml_num_fans(nvml, target.id.0).ok_or_else(|| {
             Error::Custom(format!("failed to query fan count for GPU {}", target.id.0))
@@ -1168,6 +1177,20 @@ impl GpuOperation for SetFanSpeed {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        if target.has_macos_rm() {
+            if self.policy != FanControlPolicy::Manual {
+                return Err(Error::Custom("macOS fan percentage control requires manual policy; use reset-fan-speed for firmware auto".into()));
+            }
+            target.macos_rm()?.set_fan_control(
+                self.fan_index,
+                crate::FanControlTarget::Percent(self.level),
+                &|| false,
+            )?;
+            return Ok(AppliedValue {
+                requested: self.level,
+                applied: self.level,
+            });
+        }
         low_nvml::set_fan_speed(
             target.nvml()?,
             target.id.0,
@@ -1195,6 +1218,14 @@ impl GpuOperation for ResetFanSpeed {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        if target.has_macos_rm() {
+            target.macos_rm()?.set_fan_control(
+                self.fan_index,
+                crate::FanControlTarget::Auto,
+                &|| false,
+            )?;
+            return Ok(());
+        }
         low_nvml::set_default_fan_speed(target.nvml()?, target.id.0, self.fan_index)
     }
 }

@@ -18,7 +18,7 @@ pub(super) fn selected(backend: BackendChoice) -> bool {
 /// keeps the terse list.
 fn read_layer_refusal(command: Command) -> Option<(&'static str, &'static str)> {
     let reason = match command {
-        // The fan-control family: no published command exists at all.
+        // Hardware curve/policy configuration is separate from percentage control.
         Command::GetFanCurve | Command::GetFanPolicyInfo => {
             nvoc_core::FAN_CONTROL_UNREADABLE_REASON
         }
@@ -56,12 +56,10 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::ResetPstateGlobalFreqOffset
             | Command::SetPowerLimit
             | Command::ResetPowerLimit
-            // The fan read is allowed for the same reason the offset read is:
-            // this backend does publish a tachometer reading per cooler, so a
-            // wholesale refusal would read as "the backend cannot". The parts of
-            // the contract it has no source for (the three percentages) come
-            // back null with a reason in `unavailable`, not as a zero.
+            // Fixed metadata/status/control now provide percentage and mode too.
             | Command::GetFanInfo
+            | Command::SetFanSpeed
+            | Command::ResetFanSpeed
             // The power-limit read is allowed for the same reason. This backend
             // reads the enforced wall and the requested limit out of the same
             // snapshot as get-status, so refusing the entry wholesale would read
@@ -103,7 +101,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, set-fan-speed (percent/manual), reset-fan-speed, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -116,7 +114,9 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     // Validate the per-domain request before discovery or any GPU access.
     let write = clock_write_request(invocation, command)?;
     let power_write = power_write_request(invocation, command)?;
-    let _interrupt = (write.is_some() || power_write.is_some()).then(InterruptGuard::install);
+    let fan_write = fan_write_request(invocation, command)?;
+    let _interrupt = (write.is_some() || power_write.is_some() || fan_write.is_some())
+        .then(InterruptGuard::install);
     let inventory = discover_targets(BackendSet::MacosRm)?;
     let targets = inventory.targets();
     let selected = select_targets(&targets, &gpu_selector(invocation))?;
@@ -158,6 +158,13 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "original_power_mw": report.original_mw, "readback_verified": report.readback_verified,
                         "other_bytes_preserved": report.other_bytes_preserved})
                 }
+                Command::SetFanSpeed | Command::ResetFanSpeed => {
+                    let (slot,target_value)=fan_write.ok_or_else(|| CliError::new("missing fan request"))?;
+                    let report=run(&target,nvoc_core::SetMacosRmFanControl {
+                        slot,target:target_value,cancelled:&interrupted,
+                    })?.output;
+                    serde_json::to_value(report)?
+                }
                 // Named domains only. Core compares each record's own published
                 // frequency with the live clock of the same snapshot and reports
                 // a reason when no single record matched, so this arm has no
@@ -177,14 +184,10 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                     };
                     offset_entry_json(&settings, name, plan)?
                 }
-                // The fan-info contract: a cooler count plus, on NVML, three
-                // percentages. This backend publishes a tachometer reading per
-                // cooler slot and nothing else, so the percentages are null with
-                // the reason attached, and the readings carry the driver's own
-                // cooler slot -- the position in the published list is a position
-                // after the plausibility filter, which is not the cooler index.
+                // Metadata preserves a fitted cooler at zero RPM; status feedback
+                // and requested percentage are separate fields in the device report.
                 Command::GetFanInfo => {
-                    serde_json::to_value(run(&target, nvoc_core::QueryMacosRmStatus)?.output.fan_report())?
+                    serde_json::to_value(device.fan_report()?)?
                 }
                 // The power-limit contract (min/current/max watts). Two of the
                 // three read out of the same snapshot as get-status -- the
@@ -239,6 +242,7 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "graphics_offset_write": device.clock_offset_write_supported(ClockDomain::Graphics),
                         "memory_offset_write": device.clock_offset_write_supported(ClockDomain::Memory),
                         "power_limit_write": device.power_limit_write_supported(),
+                        "fan_percent_write": device.fan_percent_write_supported(),
                     }));
                 }
             }
@@ -270,6 +274,46 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
         },
         results,
     })
+}
+
+fn fan_write_request(
+    invocation: &Invocation,
+    command: Command,
+) -> CliResult<Option<(u32, nvoc_core::FanControlTarget)>> {
+    if !matches!(command, Command::SetFanSpeed | Command::ResetFanSpeed) {
+        return Ok(None);
+    }
+    if option_bool(invocation, "rpm", false)? || option_one(invocation, "cooler").is_some() {
+        return Err(CliError::new(
+            "macOS fan control supports percentage/auto only; --rpm and legacy --cooler are not validated; select --fan 0",
+        ));
+    }
+    let fan = option_one(invocation, "fan").unwrap_or("all");
+    let slot = if fan.eq_ignore_ascii_case("all") {
+        0
+    } else {
+        fan.parse::<u32>()
+            .map_err(|_| CliError::new("macOS --fan expects 0 or all"))?
+    };
+    let target = if command == Command::ResetFanSpeed {
+        nvoc_core::FanControlTarget::Auto
+    } else {
+        if !option_one(invocation, "policy")
+            .unwrap_or("manual")
+            .eq_ignore_ascii_case("manual")
+        {
+            return Err(CliError::new(
+                "macOS set-fan-speed requires manual policy; use reset-fan-speed for firmware auto; software continuous policy is not supported",
+            ));
+        }
+        let value = invocation
+            .positionals
+            .first()
+            .ok_or_else(|| CliError::new("missing fan percentage"))?;
+        nvoc_core::FanControlTarget::Percent(parse_u32_unit(value, "%", "percent")?)
+    };
+    nvoc_core::validate_macos_fan_request(slot, target)?;
+    Ok(Some((slot, target)))
 }
 
 fn power_write_request(
@@ -542,10 +586,41 @@ mod tests {
         );
         // Also check callers constructing Invocations without the parser.
         let mut invocation = parse_args(["get-info", "--macos-rm"]).unwrap();
-        invocation.command = Some(Command::SetFanSpeed);
+        invocation.command = Some(Command::SetTempLimit);
         let error = run_invocation(&invocation).unwrap_err().to_string();
         assert!(error.contains("unavailable on macOS RM"));
         assert!(!error.contains("driver loaded"));
+    }
+
+    #[test]
+    fn fan_requests_reject_foreign_modes_and_slots_before_discovery() {
+        for args in [
+            vec!["set-fan-speed", "101", "--macos-rm"],
+            vec!["set-fan-speed", "35", "--fan", "1", "--macos-rm"],
+            vec!["set-fan-speed", "1800", "--rpm", "--macos-rm"],
+            vec!["set-fan-speed", "35", "--cooler", "0", "--macos-rm"],
+            vec![
+                "set-fan-speed",
+                "35",
+                "--policy",
+                "continuous",
+                "--macos-rm",
+            ],
+            vec!["reset-fan-speed", "--fan", "1", "--macos-rm"],
+        ] {
+            let invocation = parse_args(args).unwrap();
+            assert!(fan_write_request(&invocation, invocation.command.unwrap()).is_err());
+        }
+        let set = parse_args(["set-fan-speed", "35", "--fan", "0", "--macos-rm"]).unwrap();
+        assert_eq!(
+            fan_write_request(&set, Command::SetFanSpeed).unwrap(),
+            Some((0, nvoc_core::FanControlTarget::Percent(35)))
+        );
+        let reset = parse_args(["reset-fan-speed", "--fan", "0", "--macos-rm"]).unwrap();
+        assert_eq!(
+            fan_write_request(&reset, Command::ResetFanSpeed).unwrap(),
+            Some((0, nvoc_core::FanControlTarget::Auto))
+        );
     }
 
     #[test]
@@ -554,7 +629,7 @@ mod tests {
         // Stage-8 read face: throttle reasons are RM-backed now, so the
         // dedicated command joins the macOS allow-list.
         assert!(validate(Command::GetThrottleReasons).is_ok());
-        for command in [Command::SetTempLimit, Command::SetFanSpeed] {
+        for command in [Command::SetTempLimit, Command::SetFanCurve] {
             let error = validate(command).unwrap_err().to_string();
             assert!(error.contains("unavailable on macOS RM"), "{error}");
         }
@@ -640,19 +715,10 @@ mod tests {
 
     #[test]
     fn the_fan_read_is_allowed_and_its_unfillable_fields_say_so() {
-        // Stage 11 item 5, fan family. This backend does publish a tachometer
-        // reading per cooler (the same snapshot `get-status` reports), so
-        // refusing fan-info wholesale would read as "this backend has no fan
-        // data", which is not true. The arm answers from the core projection,
-        // so the entry and the backend cannot state different things; the three
-        // percentage fields of the contract come back null with the reason
-        // attached rather than as a zero.
+        // The device query supplies identity, range, feedback and target separately.
         assert!(validate(Command::GetFanInfo).is_ok());
-        // The write half of the family keeps the terse capability refusal: no
-        // fan SET exists on this path at all, so no layer needs naming.
-        let write = validate(Command::SetFanSpeed).unwrap_err().to_string();
-        assert!(write.contains("unavailable on macOS RM"), "{write}");
-        assert!(!write.contains("rpm"), "{write}");
+        assert!(validate(Command::SetFanSpeed).is_ok());
+        assert!(validate(Command::ResetFanSpeed).is_ok());
     }
 
     #[test]
@@ -765,11 +831,15 @@ mod tests {
     #[test]
     fn every_refused_read_of_the_three_families_names_its_layer() {
         let expected: [(&str, Command, &str); 8] = [
-            ("get-fan-curve", Command::GetFanCurve, "33-line"),
+            (
+                "get-fan-curve",
+                Command::GetFanCurve,
+                "hardware fan-policy/curve",
+            ),
             (
                 "get-legacy-fan-policy",
                 Command::GetFanPolicyInfo,
-                "33-line",
+                "hardware fan-policy/curve",
             ),
             (
                 "get-power-ceiling",

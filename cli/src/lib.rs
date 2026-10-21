@@ -1766,6 +1766,7 @@ fn validate_invocation(invocation: &Invocation) -> CliResult<()> {
     if command == Command::ResetFanSpeed
         && option_one(invocation, "fan").is_some_and(|fan| !fan.eq_ignore_ascii_case("all"))
         && invocation.backend != BackendChoice::Nvml
+        && !macos_rm::selected(invocation.backend)
     {
         return Err(CliError::new(
             "reset-fan-speed with a specific --fan requires --nvml; NVAPI resets all coolers",
@@ -9001,7 +9002,7 @@ mod tests {
             .to_string();
         assert!(err.contains("--policy"));
 
-        let err = parse_args(["--fan", "1", "reset-fan-speed"])
+        let err = parse_args(["--nvapi", "--fan", "1", "reset-fan-speed"])
             .unwrap_err()
             .to_string();
         assert!(err.contains("requires --nvml"));

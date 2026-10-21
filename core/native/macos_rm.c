@@ -678,6 +678,35 @@ uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *s, uint32_t kind,
     return status ? failure(error, cap, "board power control", status) : 0;
 }
 
+/* Fixed same-version NVML cooler0 contract. Caller serializes the whole transaction. */
+uint32_t nvoc_macos_rm_session_fan(nvoc_rm_session *s, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap)
+{
+    static const uint32_t commands[] = {0x2080852eu, 0x2080852fu, 0x20808530u,
+                                        0x20808530u, 0x2080c531u};
+    size_t expected = kind == 0u ? 1432u : kind == 1u ? 844u : 980u;
+    if (!s || !block || kind > 4u || size != expected)
+        return failure(error, cap, "fan ABI arguments", UINT32_MAX);
+    unsigned char *b = block;
+    if (kind == 4u) {
+        uint32_t mask, selector, type, mode, target;
+        memcpy(&mask, b + 12, 4); memcpy(&selector, b + 16, 4);
+        memcpy(&type, b + 20, 4); memcpy(&mode, b + 36, 4);
+        memcpy(&target, b + 40, 4);
+        if (geteuid() != 0) return failure(error, cap, "fan SET requires root", 0x1bu);
+        if (mask != 1u || selector != 0u || type != 3u || mode > 1u || target > 65536u)
+            return failure(error, cap, "fan SET outside validated cooler0/mode/percentage", 0x1fu);
+    } else {
+        memset(block, 0, size);
+        if (kind == 1u) b[4] = 1;
+        if (kind == 2u || kind == 3u) b[12] = 1;
+        if (kind == 3u) b[16] = 1;
+    }
+    uint32_t status = nvx_rm_control(s->ctl, s->client, s->subdevice,
+                                    commands[kind], block, (uint32_t)size);
+    return status ? failure(error, cap, "cooler0 fan control", status) : 0;
+}
+
 /* The API handshake every batch of this control must carry: the driver checks
  * these four fields before it looks at the instruction list at all. */
 static void thermal_batch_init(NV2080_CTRL_THERMAL_SYSTEM_EXECUTE_V2_PARAMS *p)

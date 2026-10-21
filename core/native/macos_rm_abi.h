@@ -202,8 +202,11 @@ uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, v
 uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *session, uint32_t index, uint32_t write,
     void *block, size_t size, char *error, size_t cap);
 
+/* kind: info/status/current/default GET, or exact cooler0 SET (0..4). */
+uint32_t nvoc_macos_rm_session_fan(nvoc_rm_session *session, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap);
 /* Fixed board power GET-info(0,20000B), GET-client(1,12B), SET-client(2,12B).
- * SET admits only board policy1/client0xfe and the validated70..100W window. */
+ * SET admits only board policy1/client0xfe and the validated 70..100W window. */
 uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *session, uint32_t kind,
     void *block, size_t size, char *error, size_t cap);
 

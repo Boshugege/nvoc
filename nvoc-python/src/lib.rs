@@ -1485,6 +1485,12 @@ fn settings_macos_rm_to_map(
             serde_json::to_value(policy).unwrap_or(Value::Null),
         );
     }
+    if let Some(fan) = &settings.fan_control {
+        map.insert(
+            "fan_control".into(),
+            serde_json::to_value(fan).unwrap_or(Value::Null),
+        );
+    }
     if let Some(link_gen) = settings.pcie_link_gen {
         map.insert("pcie_link_gen".into(), u64_value(link_gen as u64));
     }
@@ -1624,6 +1630,7 @@ fn settings_macos_rm_to_map(
             ),
             ("memory_offset_write", bool_value(caps.memory_offset_write)),
             ("power_limit_write", bool_value(caps.power_limit_write)),
+            ("fan_percent_write", bool_value(caps.fan_percent_write)),
         ]),
     );
     if !settings.unavailable.is_empty() {
@@ -1919,7 +1926,7 @@ fn normalize_fan_info(target: &GpuTarget<'_>) -> PyResultValue {
     // so this entry cannot state anything the backend does not.
     if target.has_macos_rm() {
         let device = target.macos_rm().map_err(to_py_err)?;
-        let report = device.status().map_err(to_py_err)?.fan_report();
+        let report = device.fan_report().map_err(to_py_err)?;
         let value = serde_json::to_value(&report).map_err(to_py_err)?;
         return Ok(value);
     }
@@ -4696,6 +4703,25 @@ fn with_nvml_fan_recovery<T>(op: impl Fn(&SyncInventory) -> PyResult<T>) -> PyRe
 
 #[pyfunction]
 fn reset_fan_speed(py: Python<'_>, gpu: &str, fan_index: u32) -> PyResult<()> {
+    if cfg!(target_os = "macos") {
+        nvoc_core::validate_macos_fan_request(fan_index, nvoc_core::FanControlTarget::Auto)
+            .map_err(to_py_err)?;
+        return py.detach(|| {
+            with_target(gpu, "macos-rm", |target| {
+                run(
+                    target,
+                    nvoc_core::SetMacosRmFanControl {
+                        slot: fan_index,
+                        target: nvoc_core::FanControlTarget::Auto,
+                        cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                    },
+                )
+                .map_err(to_py_err)?;
+                Ok(Value::Null)
+            })?;
+            Ok(())
+        });
+    }
     let gpu_own = gpu.to_string();
     py.detach(|| {
         with_nvml_fan_recovery(|inventory| {
@@ -5466,7 +5492,27 @@ fn set_fan(
         let fan_id: Option<&str> = fan_id_own.as_deref();
         let policy: Option<&str> = policy_own.as_deref();
 
-        let backend = parse_backend(backend)?;
+        let backend=match backend.trim().to_ascii_lowercase().as_str() {
+            "macos-rm"|"macos_rm"|"macosrm"=>"macos-rm",
+            "auto"|"default"=>fan_power_backends(cfg!(target_os="macos")),
+            _=>parse_backend(backend)?,
+        };
+        if backend=="macos-rm" {
+            let fan=fan_id.unwrap_or("all");
+            let slot=if fan.eq_ignore_ascii_case("all") {0} else {fan.parse::<u32>().map_err(invalid_value)?};
+            let target_value=match policy.unwrap_or("manual").to_ascii_lowercase().as_str() {
+                "manual"=>nvoc_core::FanControlTarget::Percent(level.unwrap_or(60)),
+                "auto"=>nvoc_core::FanControlTarget::Auto,
+                _=>return Err(invalid_value("macOS fan policy must be manual or auto; software continuous policy is not supported")),
+            };
+            nvoc_core::validate_macos_fan_request(slot,target_value).map_err(to_py_err)?;
+            with_target(gpu,backend,|target| {
+                run(target,nvoc_core::SetMacosRmFanControl {slot,target:target_value,
+                    cancelled:&||Python::attach(|py|py.check_signals().is_err())}).map_err(to_py_err)?;
+                Ok(Value::Null)
+            })?;
+            return Ok(());
+        }
         let fan_id = fan_id.unwrap_or("all");
         let level = level.unwrap_or(60);
         // "auto" is the reset semantic (the GUI/TUI "reset to auto" button).
@@ -6615,6 +6661,7 @@ mod tests {
             power_limit_mw: Some(100_000),
             power_limit_requested_mw: Some(100_000),
             power_limit_policy: None,
+            fan_control: None,
             pcie_link_gen: Some(3),
             memory_total_bytes: Some(4_294_967_296),
             memory_used_bytes: Some(209_649_664),
@@ -6664,6 +6711,7 @@ mod tests {
                 graphics_offset_write: false,
                 memory_offset_write: false,
                 power_limit_write: false,
+                fan_percent_write: false,
             },
             notes: vec!["read: ...".to_string()],
         };
