@@ -101,7 +101,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core only), reset-pstate-global-freq-offset --domain core, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -223,6 +223,8 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                     object.insert("capabilities".into(), json!({
                         "device_info": true, "pstate_query": true,
                         "telemetry": true, "performance_writes": false,
+                        "graphics_offset_write": device.clock_offset_write_supported(ClockDomain::Graphics),
+                        "memory_offset_write": device.clock_offset_write_supported(ClockDomain::Memory),
                     }));
                 }
             }
@@ -269,7 +271,7 @@ fn clock_write_request(
     if command == Command::ResetPstateGlobalFreqOffset && option_one(invocation, "domain").is_none()
     {
         return Err(CliError::new(
-            "macOS reset requires --domain core; an all-domain reset is not yet validated",
+            "macOS reset requires --domain core or memory; an all-domain reset is not yet validated",
         ));
     }
     let domain = option_domain(invocation, ClockDomain::Graphics)?;
@@ -562,7 +564,7 @@ mod tests {
                 "set-pstate-global-freq-offset",
                 "15",
                 "--domain",
-                "memory",
+                "video",
                 "--macos-rm",
             ],
             vec!["reset-pstate-global-freq-offset", "--macos-rm"],

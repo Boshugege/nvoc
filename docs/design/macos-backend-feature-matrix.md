@@ -23,11 +23,8 @@
 - **交付索引**：测试机 `~/Desktop/macOS-nvoc-develop/outputs/INDEX.md`（按阶段列出权威 bundle、
   review 文档与早期产物；`stage12-regression-*` 的 `citation-check.txt` 核验本表引用的 bundle
   是否真实存在）。
-- 权威源码（开发端）：`/home/lyy/work/nvoc-next`，分支 `macos-driver-validation`；
-  测试机 `/Users/mac/Desktop/macOS-nvoc-develop/nvoc-next` 内容与之逐文件一致。
-- 环境（2026-10-17 复核）：`mac@10.253.254.125` = `macs-imac.dev.skyw.top`、
-  macOS 15.8.1 / 24H32、x86_64、i5-8600K、GTX 1650 SUPER（`10de:2187`，4 GiB，
-  PCI `0000:01:00.0`）、NullMoth 2.0.4、RM/OGKM 610.57.04、无 sudo。
+- 权威源码：开发端 `nvoc-next`，分支 `macos-driver-validation`；测试机 `nvoc-head` 为经过逐文件核对的 detached checkout。另一旧 checkout 保留原 dirty 工作。
+- 环境：macOS 15.8.1 / 24H32、x86_64、GTX 1650 SUPER（`10de:2187`，4 GiB，PCI `0000:01:00.0`）、NullMoth 2.0.4、RM/OGKM 610.57.04。经过授权的 root 命令可用，具体机器与访问资料只保留于仓库外交接。
 - 代码依据：`core/native/macos_rm.c`、`core/native/macos_rm_abi.h`、
   `core/native/rusd_read.h`、`core/src/macos_rm.rs`、`probe-macos-rm/src/*`、
   `docs/design/macos-rm-backend.md`、`docs/reverse-engineering/macos-gtx1650s-access-2026-10-16.md`。
@@ -182,13 +179,13 @@
 | --- | --- | --- |
 | `get-private-legacy-pstates20-freq-domain-info` | Read-only dump of the private pstates-2.0 delta table (GetPstates20Private 0xC5DDF56E) — the storage whose deltas move the frequency-request ceilin… | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-pstate-freq-range` | Read NVML P-State clock ranges | 未实现：macOS RM 在访问驱动前拒绝 |
-| `get-pstate-global-freq-offset` | Read clock offset in MHz | **已实现且实测（读面）**：入口在 `--macos-rm` 的允许清单里（`validate` 放行，非读前拒绝）；当前值取 `0x20809061` 时钟文档的逐域偏移（域名由**同快照频率比对** corroborate，比对不成立即拒绝而非给数字），窗口取 `0x20809025` 范围块（设备自报 ±18.75 MHz、三条记录同值）；本轮起该入口在**同一次快照**上同时发布 `window_min_khz`／`window_max_khz`／`window_records`／`window_reason`（未读到窗口时给**该块的自身结果**，不是 0）与 `restore_khz`（写回目标＝本次读到的值），`--plan-delta` 输出的 `plan` 现为**三入口共用的 plan 文档**（`applied`／`settings_write`／`requests`／`note`／`steps`，与 optimizer 的 `--plan`、`pynvoc.plan_clock_offset_step` 同一份，见第九十五节）。写面**未实现**：孪生 `0x2080D01C` 在 root 之下的 `0x1b` 前置门被拒，故本命令只读（另见 `set-pstate-global-freq-offset`）|
+| `get-pstate-global-freq-offset` | Read clock offset in MHz | **已实现且实测**：配置值取 `0x2080901b` selector0/record+12 signed kHz，经 directory index连接域；RM776只供实时频率。核心/显存 GET、窗口、单位与原值见§136–138。窗口采用已测±18.75MHz保守子集，未证明更宽范围；`--plan-delta`仍是计划，不自动写入 |
 | `get-pstate-lock` | Read the native NVAPI P-State level table | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-supported-legacy-application-freq` | Read NVML supported application clocks | 未实现：macOS RM 在访问驱动前拒绝 |
 | `reset-freq-lock` | Reset core or memory locked clocks | 未实现：macOS RM 在访问驱动前拒绝 |
 | `reset-legacy-application-freq-lock` | Reset NVML application clocks | 未实现：macOS RM 在访问驱动前拒绝 |
 | `reset-private-forced-pstate-lock-user` | Release a force-locked pstate via SetForcePstate(pstate=16, set_type=0) — pstate=16 is the bitmask=0 sentinel (GetForcePstate returns 16 when no fo… | 未实现：macOS RM 在访问驱动前拒绝 |
-| `reset-pstate-global-freq-offset` | Reset NVAPI P-State clock offsets (all touched pstate/domain pairs by default; --domain filters to one clock domain) | 未实现：macOS RM 在访问驱动前拒绝 |
+| `reset-pstate-global-freq-offset` | Reset clock offsets, optionally filtered by domain | **部分已实现且实测**：显式 `--domain core` 或 `--domain memory` 将该域偏移归零，保留另一域。无域/显式P-state拒绝；不冒充全域reset或解锁，见§137–138 |
 | `reset-pstate-lock` | Clear all native NVAPI P-State locks | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-freq-lock` | Lock core or memory clocks to a MHz range | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-legacy-application-freq-lock` | Set NVML application clocks in MHz | 未实现：macOS RM 在访问驱动前拒绝 |
@@ -197,7 +194,7 @@
 | `set-private-forced-pstate-lock-user` | Force a P-State via private SetForcePstate (0x025BFB10); set_type 0/1/2 all force-lock, none release (to unlock use reset-private-forced-pstate-loc… | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-private-legacy-pstates20-freq-domain-global-offset` | DANGEROUS RMW of one delta in the private pstates table (SetPstates20Private 0x4C0B519A); --domain takes a domain name (gpc/xbar/m/gpc2/…) or the r… | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-private-permanent-pstate-lock-user` | Admin-free pstate lock (SetPerfLevel 0x75DD3E6A, escape 0x7000040): level is an INDEX into the GPU's real available P-State list (see get-pstate-lo… | 未实现：macOS RM 在访问驱动前拒绝 |
-| `set-pstate-global-freq-offset` | Set clock offset in MHz for any clock domain | 未实现：macOS RM 在访问驱动前拒绝 |
+| `set-pstate-global-freq-offset` | Set clock offset in MHz for any clock domain | **部分已实现且实测**：核心/显存绝对目标MHz，TU116/610.57.04、root、selector0、±18.75MHz，单步≤18.75MHz。共享事务精确回读和失败/取消恢复；实际同负载效果见§137–138。其它域/模式未交付 |
 | `set-pstate-lock` | Lock the native NVAPI P-State | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-pstate-lock-via-mem-range` | Lock one NVML P-State or a contiguous range via memory freq range | 未实现：macOS RM 在访问驱动前拒绝 |
 
@@ -2365,3 +2362,28 @@ Python 构建缺口也已定位并修复：原 `cargo build -p pynvoc` 在 macOS
 分档：**核心加法偏移公共core/CLI/Python SET、回读、核心归零、保存原值恢复已实现并实测**。模拟故障/取消与恢复失败属单测覆盖，未宣称实机强制造错。仅10秒低强度图形负载，不是稳定性验收。显存写、相对模式、锁频/解锁、全设置恢复、UI交互和自动优化仍未因此完成；完整阶段0→12目标继续。
 
 最终源补记：`cargo xtask ci` 使用规定三环境变量 **CI_EXIT=0**，`cargo build -p nvoc-cli -p pynvoc --locked` **BUILD_EXIT=0**；在最终原生二进制上再次运行产品设值/覆盖/reset与同负载A/B/A，产物 `stage-product-core-set-head-20261021T162544Z/`、`stage-product-core-aba-head-20261021T162544Z/`。再次1950→1965→1950 MHz，完整8432 B恢复；两批verdict通过，顶层SHA256SUMS已生成。源码manifest标识测试时的文件内容；此补记仅文档增量。测试机另一checkout的59个dirty文件保持不变。
+
+
+## 一百三十八、显存偏移独立过门槛并接入公共事务，正负同负载生效
+
+选择依据：目录已证实 memory 为 index2/domain bit0x10（不是mask0x10），type0808，selector0。先单独运行FRESH探针 `2:12:250`，SET/回读250、其它值不变、全部2108B恢复均NV_OK；产物 `stage-clkoffset-write-20261021T162805Z/`。随后才分别执行正负15MHz同负载10秒低强度NVK实验，不改核心配置。
+
+| 独立probe试验 | 写前 / 写入 / 恢复的显存实时时钟 kHz | 证据 |
+| --- | --- | --- |
+| +15000kHz | 6000984 / 6015984 / 6000984 | `stage-memory-offset-aba-20261021T162833Z/` |
+| -15000kHz | 6000984 / 5985980 / 6000984 | `stage-memory-offset-aba-20261021T162913Z/` |
+
+RM776 domain0x10与RUSD显存读数一致；写入/恢复稳定段核心均1965000kHz。负向实际差15004kHz，记录PLL量化差，不把配置kHz与物理时钟强行等同，也不乘成DDR有效速率。两批前后healthy；分别比较四种mask共8432B完全恢复。verdict和SHA256SUMS已生成。
+
+实现：扩展§137同一个事务而非复制实现，集中选择graphics(index0/bit1)或memory(index2/bit0x10)，预检目录唯一性/type0808，C桥只准这两个index。每次仍只有一个mask、一个+12字段、同样范围/步长/selector/root/身份限制和精确回读/恢复。新增memory_offset_write；设备支持判定集中，CLI info/status与settings以及Python settings发布各域能力，bulk settings/restore仍false。现有CLI/Python setter自然复用同一operation，CLI memory reset须显式选域。mock新增memory mask/字段选择、signed值、SET已应用后失败/GET失败/其它字节变化恢复；graphics mask不能通过memory事务，跨边界单步不发SET。
+
+实际产品验证（桶 A）：
+
+- `stage-product-memory-set-20261021T163407Z/`：先核心设1MHz并保持；CLI显存设1MHz→Python显存0.25MHz→Python显存-0.25MHz→CLI显存reset0，核心每次仍为1MHz。随后Python核心-1MHz，显存仍0，最终两域归零。验证绝对目标、正负/kHz小数、独立域及reset保留。完整8432B恢复、前后healthy，两个窄能力true、bulkfalse。
+- `stage-product-memory-aba-20261021T163450Z/`：正式CLI显存+15MHz，同一个10秒负载内6000984→6015984→6000984kHz；正式CLI恢复原值0。
+- `stage-product-memory-aba-20261021T163509Z/`：正式CLI显存-15MHz，同负载6000984→5985980→6000984kHz；恢复原值0。两批RM776/RUSD一致、显式NVK loader/ICD、负载/监控exit0、四mask8432B完全恢复、前后healthy。
+- 非root显存SET实测0x1b，配置保持；越界、显式P-state、未知域在无效GPU选择前拒绝。Python既有parser只接受core/memory别名，video先报invalid domain；不为迁就测试假定而放宽原契约。
+
+验证：原生build0，core129/CLI92，Python Rust18（no-default-features），真实扩展import/validation52/52零skip；指定三个环境变量 `cargo xtask ci` **CI_EXIT=0**。日志 `memory-offset-unit/build/ci/python-import/python-rust-20261022.txt`，源码manifest与实验脚本在仓库外outputs；每批包含raw/events/verdict/SHA256SUMS。主命令表的三个频率入口同步更正为当前状态，历史节仍保留并由本节覆盖；证据索引更新为当前detached测试checkout，机器访问资料留在仓库外交接。
+
+分档：**核心/显存加法偏移公共SET、读取、单域归零与原值恢复已实现且实测**；正负显存物理效果也已有独立probe与产品证据。±18.75MHz仍是当前保守验证窗口，不宣称更大硬件范围。相对模式、绝对/范围锁频及解锁、全域reset和全设置恢复未交付；GUI/TUI/服务闭环尚未因此实测。10秒图形负载不等于超频稳定或完整显存正确性覆盖。完整适配目标继续。

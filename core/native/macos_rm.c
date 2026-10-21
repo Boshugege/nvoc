@@ -1,5 +1,5 @@
 /* Thin ABI over NVOC's RM transport. NVIDIA layouts come from OGKM,
- * not handwritten Rust copies. No external probe CLI; only the validated core-clock transaction may SET.
+ * not handwritten Rust copies. No external probe CLI; only the validated clock-offset transaction may SET.
  *
  * Two entry points exist:
  *   - nvoc_macos_rm_snapshot(): one-shot open/read/close, used by get-info and
@@ -639,19 +639,20 @@ uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *s, uint32_t kind, void *o
     return status;
 }
 
-uint32_t nvoc_macos_rm_session_core_clock(nvoc_rm_session *s, uint32_t write,
+uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *s, uint32_t index, uint32_t write,
     void *block, size_t size, char *error, size_t cap)
 {
-    uint32_t mask = 1u;
-    if (!s || !block || size != 2108u || write > 1u)
-        return failure(error, cap, "core clock ABI arguments", UINT32_MAX);
+    uint32_t mask;
+    if (!s || !block || size != 2108u || write > 1u || (index != 0u && index != 2u))
+        return failure(error, cap, "clock offset ABI arguments", UINT32_MAX);
     if (write && geteuid() != 0)
-        return failure(error, cap, "core clock SET requires root", 0x1bu);
+        return failure(error, cap, "clock offset SET requires root", 0x1bu);
+    mask = 1u << index;
     if (!write) memset(block, 0, size);
     memcpy((unsigned char *)block + 4, &mask, sizeof mask);
     uint32_t status = nvx_rm_control(s->ctl, s->client, s->subdevice,
         write ? 0x2080d01cu : 0x2080901bu, block, (uint32_t)size);
-    return status ? failure(error, cap, write ? "core clock SET" : "core clock GET", status) : 0;
+    return status ? failure(error, cap, write ? "clock offset SET" : "clock offset GET", status) : 0;
 }
 
 /* The API handshake every batch of this control must carry: the driver checks

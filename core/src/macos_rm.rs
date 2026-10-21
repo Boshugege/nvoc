@@ -95,13 +95,8 @@ pub struct DeviceStatus {
 pub struct SettingsCapabilities {
     /// The backend can report the driver's current configuration.
     pub settings_read: bool,
-    /// The backend can change configuration. Still false on macOS, for two
-    /// independent reasons: the GSP method table does contain the GET/SET twins
-    /// (0x2080901B pairs with 0x2080D01C) but every private write id carries the
-    /// legacy privileged bits, so an unprivileged client is refused with
-    /// `0x1b` before the GSP is reached; and even behind that gate a write
-    /// stays gated until the current value, a bounded step and the restore path
-    /// are verified on the device. See [`DeviceSettings::notes`].
+    /// Bulk apply is unavailable until every participating family has validated
+    /// write/recovery support. Individual offset flags are separate.
     pub settings_write: bool,
     /// The backend can put a saved configuration back. Only meaningful once
     /// `settings_write` is true.
@@ -109,6 +104,7 @@ pub struct SettingsCapabilities {
     /// Narrow operation capability; does not enable bulk settings or optimization.
     /// Root, matching identity and live preflight are still checked on each SET.
     pub graphics_offset_write: bool,
+    pub memory_offset_write: bool,
 }
 
 /// Whether this backend supports the bulk settings write contract.
@@ -128,7 +124,7 @@ pub const SETTINGS_RESTORE_SUPPORTED: bool = false;
 ///
 /// Graphics additive offset has a separate transactional route. Other families
 /// still need their own protocol, bounds, readback and recovery validation.
-pub const MACOS_RM_WRITE_GATE_REASON: &str = "bulk settings/restore and this control family remain unavailable (SETTINGS_WRITE_SUPPORTED is false); graphics additive offset has its own validated transactional SET route and graphics_offset_write capability, which does not enable other controls or unattended optimization";
+pub const MACOS_RM_WRITE_GATE_REASON: &str = "bulk settings/restore and this control family remain unavailable (SETTINGS_WRITE_SUPPORTED is false); graphics and memory additive offsets have validated transactional SET routes and per-domain write capabilities, which does not enable other controls or unattended optimization";
 
 /// Why a family that needs a *write* is listed as unavailable: the write half of
 /// these ids carries the legacy privileged bits, so an unprivileged client is
@@ -190,7 +186,7 @@ pub const VOLTAGE_BOOST_UNREADABLE_REASON: &str = "the boost *write* is a SET an
 
 /// Configuration reads use the directory plus selector-zero control records.
 /// Writes still require the separately validated transactional backend.
-pub const CLOCK_OFFSET_UNREADABLE_REASON: &str = "additive offsets use control +12 with selector +8 equal to 0 and directory index mapping; missing reads or relative modes are unavailable as additive kHz. Graphics SET/rollback is supported only on the validated TU116/610.57.04 identity with root and live preflight; other domains await independent write validation (see notes)";
+pub const CLOCK_OFFSET_UNREADABLE_REASON: &str = "additive offsets use control +12 with selector +8 equal to 0 and directory index mapping; missing reads or relative modes are unavailable as additive kHz. Graphics/memory SET/rollback is supported only on the validated TU116/610.57.04 identity with root and live preflight; other modes await independent validation (see notes)";
 
 /// Configured additive delta from a control record, joined to the directory's
 /// domain bit and the clock document's live frequency. These are separate GETs.
@@ -369,6 +365,13 @@ pub struct ClockOffsetView {
     pub restore_khz: i32,
 }
 
+fn offset_writes_supported(info: &DeviceInfo) -> bool {
+    cfg!(all(target_os = "macos", target_arch = "x86_64"))
+        && info.vendor_id == 0x10de
+        && info.device_id == 0x2187
+        && info.driver_version == "610.57.04"
+}
+
 fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
     // Every family that would need a read we do not have. The keys are the
     // public vocabulary (`get-settings` / pynvoc), not RM command names.
@@ -425,15 +428,14 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             settings_read: true,
             settings_write: SETTINGS_WRITE_SUPPORTED,
             settings_restore: SETTINGS_RESTORE_SUPPORTED,
-            graphics_offset_write: cfg!(all(target_os = "macos", target_arch = "x86_64"))
-                && info.vendor_id == 0x10de && info.device_id == 0x2187
-                && info.driver_version == "610.57.04",
+            graphics_offset_write: offset_writes_supported(info),
+            memory_offset_write: offset_writes_supported(info),
         },
         notes: vec![
             "responder: these ids are answered by the GSP firmware, not by a host RM table row (NVRM forwards legacy ids with bit 0x8000 set), so every parameter block is sized against the GSP's own export table rather than the NVAPI caller struct.".into(),
             "read: P-state, enforced/requested power limit, PCIe generation, board/SKU and memory sizes come from the same RM snapshot as get-status; sensor readings are separate (see get-status).".into(),
-            "write: only graphics additive domain offset is implemented; other control families remain unavailable. NVRM still enforces root for SET. On this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids is one category byte over (0x2080901B -> 0x2080D01C: the 0x80-0xBF legacy-non-privileged byte gains 0x40 and the message id advances by one), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). Graphics SET validates identity, a readable current value, a bounded step and exact recovery; other control families still require independent validation. The GSP must not be in the RESET_REQUIRED state.".into(),
-            "clock-domain configuration is read from 0x20809019 directory and 0x2080901b control: selector +8 = 0 means signed i32 kHz at record +12; relative/unknown modes remain unavailable as additive kHz. RM776 supplies live frequency only. The control mask selects directory indices, not public domain bits; the current 0xff read mask covers the first eight records. Probe validation demonstrated core +15 MHz and exact restoration; public graphics SET now uses a snapshot/SET/full-readback/rollback transaction; other writes remain separately gated. The measured 0x20809025 range records report +/-18750 kHz, without a proven per-domain range mapping".into(),
+            "write: only graphics/memory additive domain offsets is implemented; other control families remain unavailable. NVRM still enforces root for SET. On this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids is one category byte over (0x2080901B -> 0x2080D01C: the 0x80-0xBF legacy-non-privileged byte gains 0x40 and the message id advances by one), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). Graphics/memory SET validates identity, a readable current value, a bounded step and exact recovery; other control families still require independent validation. The GSP must not be in the RESET_REQUIRED state.".into(),
+            "clock-domain configuration is read from 0x20809019 directory and 0x2080901b control: selector +8 = 0 means signed i32 kHz at record +12; relative/unknown modes remain unavailable as additive kHz. RM776 supplies live frequency only. The control mask selects directory indices, not public domain bits; the current 0xff read mask covers the first eight records. Probe validation demonstrated core +15 MHz and exact restoration; public graphics/memory SET now uses a snapshot/SET/full-readback/rollback transaction; other writes remain separately gated. The measured 0x20809025 range records report +/-18750 kHz, without a proven per-domain range mapping".into(),
             "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
     }
@@ -1507,6 +1509,12 @@ pub struct Device {
 }
 
 impl Device {
+    /// Device support, independent of process privilege; each write still preflights.
+    pub fn clock_offset_write_supported(&self, domain: ClockDomain) -> bool {
+        matches!(domain, ClockDomain::Graphics | ClockDomain::Memory)
+            && offset_writes_supported(&self.info)
+    }
+
     pub fn id(&self) -> GpuId {
         self.id
     }
@@ -1567,7 +1575,7 @@ impl Device {
 
     /// Apply an absolute per-domain additive target. Successful SET persists;
     /// errors/cancellation after a write restore the exact original control block.
-    /// The measured product route currently admits graphics only, with no P-state
+    /// The measured product route currently admits graphics and memory only, with no P-state
     /// emulation, and requires the tested TU116/610.57.04 identity and range.
     pub fn set_clock_offset_khz(
         &self,
@@ -1588,17 +1596,17 @@ impl Device {
                         self.info.device_id,
                         self.info.rm_gpu_id,
                     )
-                    || info.vendor_id != 0x10de
-                    || info.device_id != 0x2187
-                    || info.driver_version != "610.57.04"
+                    || !offset_writes_supported(info)
                 {
-                    return Err(Error::Custom("core clock write requires the validated TU116/610.57.04 identity; rediscover GPUs".into()));
+                    return Err(Error::Custom("clock offset write requires the validated TU116/610.57.04 identity; rediscover GPUs".into()));
                 }
                 let channel = session.read_offset_channel()?;
-                validate_core_clock_preflight(&channel, khz)?;
+                validate_clock_preflight(&channel, domain, khz)?;
+                let selected = crate::macos_clock_control::selection(domain)?;
                 let _guard = lock_transport()?;
                 crate::macos_clock_control::apply(
-                    &mut NativeCoreClock(session.handle),
+                    &mut NativeClockOffset(session.handle, selected.index as u32),
+                    domain,
                     khz,
                     cancelled,
                 )
@@ -1702,8 +1710,10 @@ pub fn validate_clock_offset_request(
             "macOS clock offset is per-domain; a P-state selector is not supported".into(),
         ));
     }
-    if domain != ClockDomain::Graphics {
-        return Err(Error::Custom("macOS clock SET currently has validated graphics-domain recovery only; other domains await independent validation".into()));
+    if !matches!(domain, ClockDomain::Graphics | ClockDomain::Memory) {
+        return Err(Error::Custom(
+            "macOS clock SET supports validated graphics and memory domains only".into(),
+        ));
     }
     if !(-18_750..=18_750).contains(&khz) {
         return Err(Error::Custom(
@@ -1714,32 +1724,37 @@ pub fn validate_clock_offset_request(
 }
 
 #[cfg(any(test, all(target_os = "macos", target_arch = "x86_64")))]
-fn validate_core_clock_preflight(
+fn validate_clock_preflight(
     channel: &macos_offset::OffsetChannelSnapshot,
+    domain: ClockDomain,
     target: i32,
 ) -> Result<(), Error> {
     use macos_offset::OffsetBlockRead::Parsed;
+    let selected = crate::macos_clock_control::selection(domain)?;
     let Parsed(directory) = &channel.directory else {
         return Err(Error::Custom(
             "clock directory GET unavailable; no SET issued".into(),
         ));
     };
-    let mut entries = directory.entries.iter().filter(|entry| entry.index == 0);
+    let mut entries = directory
+        .entries
+        .iter()
+        .filter(|entry| entry.index == selected.index);
     let entry = entries
         .next()
-        .ok_or_else(|| Error::Custom("graphics directory index missing".into()))?;
+        .ok_or_else(|| Error::Custom("selected clock directory index missing".into()))?;
     if entries.next().is_some()
-        || entry.domain_bit != 1
+        || entry.domain_bit != selected.domain_bit
         || entry.type_stamp != 0x0808
         || directory
             .entries
             .iter()
-            .filter(|e| e.domain_bit == 1)
+            .filter(|e| e.domain_bit == selected.domain_bit)
             .count()
             != 1
     {
         return Err(Error::Custom(
-            "graphics directory mapping does not match validated identity".into(),
+            "clock directory mapping does not match validated identity".into(),
         ));
     }
     let Parsed(range) = &channel.range else {
@@ -2089,8 +2104,9 @@ unsafe extern "C" {
         error: *mut u8,
         cap: usize,
     ) -> u32;
-    fn nvoc_macos_rm_session_core_clock(
+    fn nvoc_macos_rm_session_clock_offset(
         handle: *mut SessionOpaque,
+        index: u32,
         write: u32,
         block: *mut u8,
         size: usize,
@@ -3134,10 +3150,10 @@ impl OffsetBlock {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-struct NativeCoreClock(*mut SessionOpaque);
+struct NativeClockOffset(*mut SessionOpaque, u32);
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-impl NativeCoreClock {
+impl NativeClockOffset {
     // The caller holds the transport lock for the complete snapshot/SET/verify/
     // rollback transaction, including every native call below.
     fn transfer(
@@ -3149,8 +3165,9 @@ impl NativeCoreClock {
         // SAFETY: session is live, block has exactly 2108 writable bytes, neither
         // pointer escapes the call, and process-global transport is serialized.
         let status = unsafe {
-            nvoc_macos_rm_session_core_clock(
+            nvoc_macos_rm_session_clock_offset(
                 self.0,
+                self.1,
                 u32::from(write),
                 block.as_mut_ptr(),
                 block.len(),
@@ -3162,7 +3179,7 @@ impl NativeCoreClock {
             Ok(())
         } else {
             Err(Error::Custom(format!(
-                "macOS core clock {} failed: RM 0x{status:08x} {}",
+                "macOS clock offset {} failed: RM 0x{status:08x} {}",
                 if write { "SET" } else { "GET" },
                 text(&error)
             )))
@@ -3171,7 +3188,7 @@ impl NativeCoreClock {
 }
 
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-impl crate::macos_clock_control::ClockControl for NativeCoreClock {
+impl crate::macos_clock_control::ClockControl for NativeClockOffset {
     fn get(&mut self) -> Result<[u8; crate::macos_clock_control::BYTES], Error> {
         let mut block = [0; crate::macos_clock_control::BYTES];
         self.transfer(false, &mut block)?;
@@ -3813,20 +3830,22 @@ mod tests {
         use macos_offset::OffsetBlockRead::Parsed;
         let mut channel = configured_channel();
         channel.range = Parsed(macos_offset::parse_range(OFFSET_RANGE_FIXTURE).unwrap());
-        validate_core_clock_preflight(&channel, 15_000).unwrap();
+        validate_clock_preflight(&channel, ClockDomain::Graphics, 15_000).unwrap();
+        validate_clock_preflight(&channel, ClockDomain::Memory, -15_000).unwrap();
         if let Parsed(directory) = &mut channel.directory {
             directory.entries[0].domain_bit = 0x10;
         }
-        assert!(validate_core_clock_preflight(&channel, 15_000).is_err());
+        assert!(validate_clock_preflight(&channel, ClockDomain::Graphics, 15_000).is_err());
         if let Parsed(directory) = &mut channel.directory {
             directory.entries[0].domain_bit = 1;
         }
         if let Parsed(range) = &mut channel.range {
             range.records[0].max_khz = 18_000;
         }
-        assert!(validate_core_clock_preflight(&channel, 15_000).is_err());
+        assert!(validate_clock_preflight(&channel, ClockDomain::Graphics, 15_000).is_err());
         assert!(validate_clock_offset_request(ClockDomain::Graphics, 15_000, true).is_err());
-        assert!(validate_clock_offset_request(ClockDomain::Memory, 15_000, false).is_err());
+        assert!(validate_clock_offset_request(ClockDomain::Memory, 15_000, false).is_ok());
+        assert!(validate_clock_offset_request(ClockDomain::Video, 15_000, false).is_err());
     }
 
     #[test]
@@ -4231,6 +4250,7 @@ mod tests {
                 settings_write: false,
                 settings_restore: false,
                 graphics_offset_write: false,
+                memory_offset_write: false,
             },
             notes: Vec::new(),
         }

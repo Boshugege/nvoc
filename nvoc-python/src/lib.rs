@@ -1612,6 +1612,7 @@ fn settings_macos_rm_to_map(
                 "graphics_offset_write",
                 bool_value(caps.graphics_offset_write),
             ),
+            ("memory_offset_write", bool_value(caps.memory_offset_write)),
         ]),
     );
     if !settings.unavailable.is_empty() {
@@ -6633,6 +6634,7 @@ mod tests {
                 settings_write: false,
                 settings_restore: false,
                 graphics_offset_write: false,
+                memory_offset_write: false,
             },
             notes: vec!["read: ...".to_string()],
         };

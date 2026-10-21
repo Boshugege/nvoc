@@ -196,10 +196,10 @@ uint32_t nvoc_macos_rm_session_sample(nvoc_rm_session *session, nvoc_rm_sample *
 uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, void *out,
                                       size_t size, char *error, size_t cap);
 
-/* Private core-only transaction transport. The Rust backend serializes the
+/* Private clock-offset transaction transport. The Rust backend serializes the
  * entire transaction and validates identity/mode/range. SET requires root and
- * forwards only record index zero; it never accepts an arbitrary RM id. */
-uint32_t nvoc_macos_rm_session_core_clock(nvoc_rm_session *session, uint32_t write,
+ * forwards only record index zero (graphics) or two (memory); it never accepts an arbitrary RM id. */
+uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *session, uint32_t index, uint32_t write,
     void *block, size_t size, char *error, size_t cap);
 
 /* The public thermal read face: NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2
