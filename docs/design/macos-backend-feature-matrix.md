@@ -2243,3 +2243,16 @@ call  0x18c1494 ; sd a0, 150h(s9)      ; 指针表 B
 **③ 一个直接可见的旁证**：`0xd4ed20` 的尾部就是这种装槽构造件的收尾——`sb a5, 171h(s2)` 之后连装三个方法指针（`0x4d53bc8`→`+0xF0`、`0x4d41554`→`+0x6C0`、`0x4d3ce60`→`+0x6A8`），地址都紧邻 SET（`0x4d41094`）与 GET（`0x4d3c774`）动词。**不同类型（`08/09/03`）的描述符装的动词集不同**，与类型字节的存在互为印证。
 
 **④ 结论定性**：静态能做的到此为止；再往下必须靠设备。"哪片是 kHz"仍记**尚未定位**，`+12` 为首选。
+
+
+## 一百三十三、重建后的首条 `0:12:250` 完整往返通过，字段语义仍待判定
+
+选择依据：按交接的单域、单字段、单步顺序，先试记录 `+12`；该槽在固件拷贝路径包含两个独立字节目标，不能预先认定为 kHz。
+
+实际验证：本轮 HEAD `31aff9b`，先在测试机 `probe-macos-rm/` 运行 `LINT=1 sh build.sh`（`lint build OK`），再分别原生构建 idle/full（`built probe-macos-rm-idle` / `built probe-macos-rm`）。构建脚本位于该子目录；lint 成功不代替原生二进制重建。idle anchor 明确 `forward ALIVE and healthy`，随后运行 `sh tools/clock-offset-write-run.sh 0:12:250`。
+
+- 桶 A：快照记录 0 位于块偏移 60，类型对 `0x0808`，`+12` 原值 0；SET `NV_OK`，同槽回读 `0x000000fa`，其余 11 个值 dword 与发送内容相同；恢复 SET `NV_OK`，恢复 GET 后全部 2108 B 与快照逐字节一致；runbook exit 0，二进制 freshness 为 FRESH。
+- 桶 C：这证明可存储/回读/恢复 250，**不证明该字段的单位或频率偏移效果**；尚无独立字段语义或负载 A/B 证据，公共频率控制能力不因此启用。压力与校验尚未在本轮执行。
+- 更正交接与 §一百二十六：`main.c` 的 parser 接受 off 0..2108，但 `nvx_stage3_clk_offset_set` 还有第二道十二个值 dword 白名单；不能把 parser 边界当实际写入边界。记录 `+0` 是类型字节对；`:bump` 实际修改记录 `+60`，该槽的 stamp 语义尚无独立证明。
+
+原始证据：仓库外 `outputs/stage-clkoffset-write-20261021T151653Z/`，含 provenance、anchor、write 和 SHA256SUMS。下一步在原状态已证实恢复的前提下判定 `+12` 与对冲候选 `+44`，保留单步快照/回读/恢复门禁。
