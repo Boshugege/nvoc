@@ -6,6 +6,8 @@ use serde::Serialize;
 pub enum FanControlTarget {
     Percent(u32),
     Auto,
+    /// Ask the firmware for its own zero-RPM stop mode instead of manual 0 percent.
+    Stop,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -63,8 +65,9 @@ mod control {
         match word(b, 36) {
             0 => Ok("auto"),
             1 => Ok("manual"),
+            2 => Ok("fanstop"),
             _ => Err(Error::Custom(
-                "fan control mode is outside the validated auto/manual modes".into(),
+                "fan control mode is outside the validated auto/manual/fanstop modes".into(),
             )),
         }
     }
@@ -128,6 +131,12 @@ mod control {
                 // NVML rounds the Q16 fraction to nearest, not an integer PWM percent readback.
                 let q16 = (value * 65536 + 50) / 100;
                 wanted[40..44].copy_from_slice(&q16.to_le_bytes());
+            }
+            FanControlTarget::Stop => {
+                // Mode 2 is what the driver accepts for "let the fan stop"; the target
+                // is written as 0 because a stopped curve has no duty to ask for.
+                wanted[36..40].copy_from_slice(&2u32.to_le_bytes());
+                wanted[40..44].copy_from_slice(&0u32.to_le_bytes());
             }
             FanControlTarget::Auto => {
                 let defaults = io.defaults()?;
@@ -244,6 +253,35 @@ mod control {
             assert_eq!(io.b, before);
         }
         #[test]
+        fn fan_stop_writes_mode_two_with_a_zero_target_and_restores_exactly() {
+            let (info, status, mut io) = fixture();
+            let before = io.b;
+            let r = apply(&mut io, &info, &status, FanControlTarget::Stop, &|| false).unwrap();
+            assert_eq!(r.applied_mode, "fanstop");
+            assert_eq!(r.applied_target_percent, 0.0);
+            let mut wanted = before;
+            wanted[36..40].copy_from_slice(&2u32.to_le_bytes());
+            wanted[40..44].copy_from_slice(&0u32.to_le_bytes());
+            assert_eq!(io.b, wanted);
+            // The reader has to name the mode it just wrote, or a stopped fan reads as
+            // "outside the validated modes" on the next snapshot.
+            let reading = settings(&info, &status, &io.b).unwrap();
+            assert_eq!(reading.mode, "fanstop");
+            apply(&mut io, &info, &status, FanControlTarget::Auto, &|| false).unwrap();
+            assert_eq!(io.b, before);
+        }
+        #[test]
+        fn stop_from_a_stopped_block_sends_no_set_and_an_unknown_mode_is_named() {
+            let (info, status, mut io) = fixture();
+            io.b[36..40].copy_from_slice(&2u32.to_le_bytes());
+            io.b[40..44].copy_from_slice(&0u32.to_le_bytes());
+            apply(&mut io, &info, &status, FanControlTarget::Stop, &|| false).unwrap();
+            assert_eq!(io.writes, 0, "an identical block must not be re-sent");
+            io.b[36..40].copy_from_slice(&7u32.to_le_bytes());
+            let err = settings(&info, &status, &io.b).unwrap_err().to_string();
+            assert!(err.contains("auto/manual/fanstop"), "{err}");
+        }
+        #[test]
         fn zero_rpm_is_a_present_cooler_and_feedback_is_not_the_target() {
             let (info, mut status, mut io) = fixture();
             status[32..36].copy_from_slice(&42224u32.to_le_bytes());
@@ -292,7 +330,7 @@ mod control {
         #[test]
         fn changed_modes_masks_limits_or_default_calibration_do_not_write() {
             let (info, status, mut io) = fixture();
-            io.b[36] = 2;
+            io.b[36] = 7;
             assert!(apply(&mut io, &info, &status, FanControlTarget::Auto, &|| false).is_err());
             assert_eq!(io.writes, 0);
             io.b[36] = 0;

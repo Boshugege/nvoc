@@ -63,6 +63,8 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::GetFanInfo
             | Command::SetFanSpeed
             | Command::ResetFanSpeed
+            // The stop mode is the same 980-byte cooler0 control with mode 2.
+            | Command::SetFanstopStatus
             // The power-limit read is allowed for the same reason. This backend
             // reads the enforced wall and the requested limit out of the same
             // snapshot as get-status, so refusing the entry wholesale would read
@@ -107,7 +109,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, set-fanstop-status on|off, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -234,12 +236,19 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "readback_verified":report.readback_verified,"other_policies_preserved":report.other_policies_preserved,
                         "derived_fields_verified":report.derived_fields_verified})
                 }
-                Command::SetFanSpeed | Command::ResetFanSpeed => {
+                Command::SetFanSpeed | Command::ResetFanSpeed | Command::SetFanstopStatus => {
                     let (slot,target_value)=fan_write.ok_or_else(|| CliError::new("missing fan request"))?;
                     let report=run(&target,nvoc_core::SetMacosRmFanControl {
                         slot,target:target_value,cancelled:&interrupted,
                     })?.output;
-                    serde_json::to_value(report)?
+                    let mut value=serde_json::to_value(report)?;
+                    if let Some(map)=value.as_object_mut() {
+                        // The NVAPI command answers with a boolean, so keep that key
+                        // here too; "off" means the block went back to firmware auto.
+                        map.insert("fan_stop".into(), serde_json::json!(
+                            target_value==nvoc_core::FanControlTarget::Stop));
+                    }
+                    value
                 }
                 // Named domains only. Core compares each record's own published
                 // frequency with the live clock of the same snapshot and reports
@@ -383,7 +392,10 @@ fn fan_write_request(
     invocation: &Invocation,
     command: Command,
 ) -> CliResult<Option<(u32, nvoc_core::FanControlTarget)>> {
-    if !matches!(command, Command::SetFanSpeed | Command::ResetFanSpeed) {
+    if !matches!(
+        command,
+        Command::SetFanSpeed | Command::ResetFanSpeed | Command::SetFanstopStatus
+    ) {
         return Ok(None);
     }
     if option_bool(invocation, "rpm", false)? || option_one(invocation, "cooler").is_some() {
@@ -398,6 +410,33 @@ fn fan_write_request(
         fan.parse::<u32>()
             .map_err(|_| CliError::new("macOS --fan expects 0 or all"))?
     };
+    if command == Command::SetFanstopStatus {
+        // The NVAPI form takes --curve for a curve slot. This backend has one
+        // control record and no curve table, so only slot 0 can be honoured.
+        if let Some(curve) = option_one(invocation, "curve")
+            && curve != "0"
+        {
+            return Err(CliError::new(format!(
+                "macOS fan stop validates curve slot 0 only (got --curve {curve}); the record has no curve table"
+            )));
+        }
+        let state = invocation
+            .positionals
+            .first()
+            .ok_or_else(|| CliError::new("missing fan-stop state"))?
+            .to_lowercase();
+        let target = match state.as_str() {
+            "on" | "1" | "true" => nvoc_core::FanControlTarget::Stop,
+            "off" | "0" | "false" => nvoc_core::FanControlTarget::Auto,
+            other => {
+                return Err(CliError::new(format!(
+                    "invalid fan-stop state {other:?}: expected on|off"
+                )));
+            }
+        };
+        nvoc_core::validate_macos_fan_request(slot, target)?;
+        return Ok(Some((slot, target)));
+    }
     let target = if command == Command::ResetFanSpeed {
         nvoc_core::FanControlTarget::Auto
     } else {
@@ -786,6 +825,35 @@ mod tests {
             fan_write_request(&reset, Command::ResetFanSpeed).unwrap(),
             Some((0, nvoc_core::FanControlTarget::Auto))
         );
+    }
+
+    #[test]
+    fn fan_stop_maps_on_to_the_stop_mode_and_off_back_to_auto() {
+        let on = parse_args(["set-fanstop-status", "on", "--curve", "0", "--macos-rm"]).unwrap();
+        assert_eq!(
+            fan_write_request(&on, Command::SetFanstopStatus).unwrap(),
+            Some((0, nvoc_core::FanControlTarget::Stop))
+        );
+        let off = parse_args(["set-fanstop-status", "off", "--macos-rm"]).unwrap();
+        assert_eq!(
+            fan_write_request(&off, Command::SetFanstopStatus).unwrap(),
+            Some((0, nvoc_core::FanControlTarget::Auto))
+        );
+        // The clap layer owns the two shapes this command has no slot for: a
+        // missing STATE, and options that belong to set-fan-speed only.
+        assert!(parse_args(["set-fanstop-status", "--macos-rm"]).is_err());
+        assert!(parse_args(["set-fanstop-status", "on", "--rpm", "--macos-rm"]).is_err());
+        for args in [
+            vec!["set-fanstop-status", "on", "--curve", "2", "--macos-rm"],
+            vec!["set-fanstop-status", "maybe", "--macos-rm"],
+        ] {
+            let invocation = parse_args(args).unwrap();
+            assert!(
+                fan_write_request(&invocation, invocation.command.unwrap()).is_err(),
+                "{:?} should be refused",
+                invocation.command
+            );
+        }
     }
 
     #[test]

@@ -251,6 +251,13 @@ class TestMacosFanValidation:
         with pytest.raises(ValueError, match="manual or auto"):
             pynvoc.set_fan("not-a-gpu", "macos-rm", "0", "continuous", 35)
 
+    @pytest.mark.skipif(
+        __import__("sys").platform != "darwin", reason="macOS fan-stop route"
+    )
+    def test_fan_stop_refuses_a_curve_slot_it_has_no_table_for(self, pynvoc):
+        with pytest.raises(ValueError, match="slot 0 only"):
+            pynvoc.set_fanstop_status("not-a-gpu", True, 2)
+
 
 class TestMacosThermalValidation:
     @pytest.mark.skipif(

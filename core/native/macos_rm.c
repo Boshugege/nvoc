@@ -694,8 +694,10 @@ uint32_t nvoc_macos_rm_session_fan(nvoc_rm_session *s, uint32_t kind,
         memcpy(&type, b + 20, 4); memcpy(&mode, b + 36, 4);
         memcpy(&target, b + 40, 4);
         if (geteuid() != 0) return failure(error, cap, "fan SET requires root", 0x1bu);
-        if (mask != 1u || selector != 0u || type != 3u || mode > 1u || target > 65536u)
+        if (mask != 1u || selector != 0u || type != 3u || mode > 2u || target > 65536u)
             return failure(error, cap, "fan SET outside validated cooler0/mode/percentage", 0x1fu);
+        if (mode == 2u && target != 0u)
+            return failure(error, cap, "fan stop SET must carry a zero target", 0x1fu);
     } else {
         memset(block, 0, size);
         if (kind == 1u) b[4] = 1;

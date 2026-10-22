@@ -5896,6 +5896,47 @@ fn set_fanstop_status(
     curve_index: Option<u8>,
 ) -> PyResult<Py<PyAny>> {
     let value = py.detach(|| {
+        #[cfg(target_os = "macos")]
+        {
+            // The macOS backend has one cooler0 control record and no curve table,
+            // so only slot 0 exists there and the mode is written, not a table bit.
+            let curve = curve_index.unwrap_or(0);
+            if curve != 0 {
+                return Err(invalid_value(
+                    "macOS fan stop validates curve slot 0 only; the control record has no curve table",
+                ));
+            }
+            let target_value = if enable {
+                nvoc_core::FanControlTarget::Stop
+            } else {
+                nvoc_core::FanControlTarget::Auto
+            };
+            nvoc_core::validate_macos_fan_request(0, target_value).map_err(to_py_err)?;
+            return with_target(gpu, "macos-rm", |target| {
+                let report = run(
+                    target,
+                    nvoc_core::SetMacosRmFanControl {
+                        slot: 0,
+                        target: target_value,
+                        cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                    },
+                )
+                .map_err(to_py_err)?
+                .output;
+                Ok(value_object([
+                    ("applied", Value::from(true)),
+                    ("fan_stop", Value::from(enable)),
+                    ("original_mode", Value::from(report.original_mode)),
+                    ("applied_mode", Value::from(report.applied_mode)),
+                    ("readback_verified", Value::from(report.readback_verified)),
+                    (
+                        "other_bytes_preserved",
+                        Value::from(report.other_bytes_preserved),
+                    ),
+                ]))
+            });
+        }
+        #[cfg(not(target_os = "macos"))]
         with_target(gpu, "nvapi", |target| {
             run(
                 target,

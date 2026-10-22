@@ -2545,3 +2545,16 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **⑤ 效果：本机没有可观测的时钟影响** ✗：60 s 常量 Vulkan 负载里 A/B/A 三段（写方是产品命令）图形时钟 **1950 kHz ×8 / ×10 / ×10**，三段没有区别；功耗与节流原因也无差。所以本行在功能表里记的是**电源来源请求**而不是频率通道，`get-power-source` 的 note 原样写明「不是时钟、不宣称时钟效果」。前一批 30 s 负载版本（`…product…` 的 21 段）第三段已跑出负载窗口，只作对照。
 
 **⑥ 边界** ✗：`0x2080205a/5b` 由 IDA 静态追到的语义只到"值比较后 `NV_OK`/`0x1f`"，**谁消费这个状态未查明**；只在本机（台式、恒 AC）实测，笔记本按电池运行时未测；未测与 EC/`RUSD` 电源事件并发；`reset-power-source` 只保证回到 AC，不还原"开机时的原值"；`0x20802092`/`0x2080200a` 已确认接受但未接成命令。未重启、未改驱动/EFI/boot-args/固件、未动 PR。
+## 一百四十六、风扇停止（mode 2）接成公共闭包，并把读面从 auto/manual 放宽
+
+**① 选择依据** ✔：功能表里 FanStop 一直标着"未解码"。风扇控制记录的 `+36` 模式字是已量字段，值域只量过 0/1；本轮先证明第 3 个值 2 是驱动接受的（单字段、单步、不遍历），再决定要不要接。同时暴露一个真 bug：读面 `mode()` 只认 0/1，任何落在 2 的块都会让 `get-fan-info` 整条报错。
+
+**② 实测（探针 `/tmp/mini/mini9`，单 cooler0、单步）** ✔：`SET mode=2 pct=50` → `NV_OK`，回读 `mode=2 target=32768`，3 s 后 rpm 0→1975；`SET mode=2 pct=0` → `NV_OK`，连续 24 s（8 次采样）`mode=2 target=0` 稳定保持、rpm 恒 0。对照 `SET mode=1 pct=0` 同样 `NV_OK` 且 rpm 恒 0（15 s 5 次采样）。⇒ **2 被驱动接受并持久，但本板上与 manual 0% 无可观测差异**，差异只在模式字本身。同批确认 `get sel=1` 的默认块 `mode=0 target=0`、SET 后 `get sel=0` 回显写入值。
+
+**③ NVML 侧对照** ✍：`libnvidia-ml.so.610.57.04` 的 `sub_BB910`（`cDeviceSetFanSpeed_v2`）在 `0xbbb19` 硬编码 `mov [..+mode],1`，只用 `sub_B6480` 发放 SET —— 即 **NVML 本身到不了 stop 模式**，这也是"协议有、产品没有"的原因。
+
+**④ 实现** ✔：core `FanControlTarget::Stop`（写 `mode=2`+`target=0`，其余字节不动，仍走共享 `write_block` 事务）、`mode()` 增 `2 => "fanstop"`；C 桥把 `mode > 1u` 放宽成 `mode > 2u`，并新增 `mode == 2u && target != 0u` → `0x1f`；`OperationKind` 映射到既有 `SetFanStop`；CLI 复用既有命令 `set-fanstop-status on|off`（`on`→Stop、`off`→Auto，`--curve` 只收 0，因为本后端没有曲线表），输出补 `fan_stop` 布尔；Python `set_fanstop_status` 在 macOS 分支走同一事务并回 `original_mode`/`applied_mode`/`readback_verified`/`other_bytes_preserved`。
+
+**⑤ 门禁** ✔：`cargo xtask ci` → `CI_EXIT=0`（本机 aarch64-linux 侧）；测试机侧同轮跑同一条命令取证。
+
+**⑥ 边界** ✗：`0x2080205a` 式的"谁消费"在这里同样没查明——只知 2 被接受、被回显、被持久；stop 期间上位机若再写 manual 百分比，模式会回到 1；只测 cooler0、只在 std 温度下测，未测高温下 stop 是否被固件强制取消；`--fan` 选项本命令不收（NVAPI 原形就是逐 curve 的），cooler 恒 0。

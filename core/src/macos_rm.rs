@@ -150,7 +150,7 @@ pub const WRITE_NEEDS_PRIVILEGE_REASON: &str = "needs a write, and a private SET
 pub const POWER_WRITE_NEEDS_PRIVILEGE_REASON: &str = "board power-limit SET/rollback has a validated root-only route (0x2080a61d/0x2080e61e, policy1/client0xfe, 70..100 W on TU116/610.57.04); each write rechecks live metadata and the restore snapshot. RATED_TDP is a separate arbitration request, not wattage, and its controls are not enabled by board-limit support (see notes)";
 
 /// Missing advanced fan configuration, separate from the implemented percentage/auto control.
-pub const FAN_CONTROL_UNREADABLE_REASON: &str = "cooler0 percentage/manual and firmware-auto control are implemented through the measured RM metadata/status/control protocol; hardware fan-policy/curve and FanStop configuration are not yet decoded or connected to this entry (see notes)";
+pub const FAN_CONTROL_UNREADABLE_REASON: &str = "cooler0 percentage/manual, the firmware zero-RPM stop mode and firmware-auto control are implemented through the measured RM metadata/status/control protocol; hardware fan-policy/curve tables are not yet decoded or connected to this entry (see notes)";
 
 /// The VF family is the opposite case: its reads exist, are non-privileged, and
 /// have simply never been issued, because the current priority is the offset
@@ -437,7 +437,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             "write: graphics/memory additive offsets and board power-limit and cooler0 percentage/auto writes are implemented; other control families remain unavailable. NVRM still enforces root for SET. On this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids is one category byte over (0x2080901B -> 0x2080D01C: the 0x80-0xBF legacy-non-privileged byte gains 0x40 and the message id advances by one), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). Graphics/memory SET validates identity, a readable current value, a bounded step and exact recovery; other control families still require independent validation. The GSP must not be in the RESET_REQUIRED state.".into(),
             "clock-domain configuration is read from 0x20809019 directory and 0x2080901b control: selector +8 = 0 means signed i32 kHz at record +12; relative/unknown modes remain unavailable as additive kHz. RM776 supplies live frequency only. The control mask selects directory indices, not public domain bits; the current 0xff read mask covers the first eight records. Probe validation demonstrated core +15 MHz and exact restoration; public graphics/memory SET now uses a snapshot/SET/full-readback/rollback transaction; other writes remain separately gated. The measured 0x20809025 range records report +/-18750 kHz, without a proven per-domain range mapping".into(),
             "thermal: native policy metadata/control distinguish fixed GPU Max88 from acoustic65..87/default83 Celsius. Driver-derived curve/threshold fields are verified separately from the single target sent in SET. Shutdown/Slowdown/MemoryMax/GpsCurr remain unavailable as stated by THERMAL_THRESHOLDS_UNREADABLE_REASON; sensor limits and software stop temperatures are separate.".into(),
-            "fan: measured cooler0 metadata/status/control use fixed 1432/844/980-byte blocks. Settings read mode, target percentage, independent status percentage and RPM; manual/firmware-auto SET uses exact full-block verification/rollback. Curves/FanStop/RPM-target mode are separate and remain unavailable.".into(),
+            "fan: measured cooler0 metadata/status/control use fixed 1432/844/980-byte blocks. Settings read mode (auto/manual/fanstop), target percentage, independent status percentage and RPM; manual/firmware-auto/fan-stop SET uses exact full-block verification/rollback. Curve tables and RPM-target mode are separate and remain unavailable.".into(),
             "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
     }
@@ -2166,6 +2166,7 @@ impl crate::GpuOperation for SetMacosRmFanControl<'_> {
         match self.target {
             crate::FanControlTarget::Auto => crate::OperationKind::ResetFanSpeed,
             crate::FanControlTarget::Percent(_) => crate::OperationKind::SetFanSpeed,
+            crate::FanControlTarget::Stop => crate::OperationKind::SetFanStop,
         }
     }
     fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {

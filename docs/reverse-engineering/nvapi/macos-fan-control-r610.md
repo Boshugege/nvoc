@@ -3,7 +3,8 @@
 The shared macOS backend supports the single fitted cooler on the measured
 TU116 / 610.57.04 device. It uses fixed RM controls without loading NVML.
 This is percentage/manual control and firmware auto reset; RPM targets,
-hardware curves and FanStop configuration remain separate, unimplemented controls.
+hardware curves remain a separate, unimplemented control. The control record's
+mode word also accepts 2, which is what `set-fanstop-status` writes for stop.
 
 ## Protocol source
 
@@ -39,7 +40,7 @@ Offsets below are from the start of the entire block, for cooler 0 only.
 | Control +12 | selection mask 1 |
 | Control +16 | ordinary GET selector 0; default GET echoes selector 1 |
 | Control +20 | measured control type 3 |
-| Control +36 | u32 mode: 0 firmware auto, 1 manual |
+| Control +36 | u32 mode: 0 firmware auto, 1 manual, 2 stop (accepted, echoed) |
 | Control +40 | requested percentage fraction, Q16 |
 
 The NVML writer uses `round(percent * 65536 / 100)`, implemented for integer
@@ -64,6 +65,13 @@ requires root and validates mask, ordinary selector, type, mode and Q16 range.
 The Rust device session rechecks PCI/device/RM identity and driver version.
 A process-wide transport mutex spans metadata/status, snapshot, SET, complete
 readback, and any rollback. It does not serialize unrelated external processes.
+
+Fan stop is the same manual-shaped write with mode 2 and a zero target; nothing
+else in the record changes. It exists because the driver accepts the value:
+NVML's own writer hard-codes mode 1, so stop is not reachable through NVML even
+though the firmware takes it. On this board the stop mode and manual 0 percent
+behave the same (both hold 0 rpm), so the difference recorded here is the mode
+word, not an observation.
 
 Manual modifies only bytes +36..+44 of the saved 980-byte control. Auto obtains
 the default block, validates mode 0, selector 1 and equality of all remaining
