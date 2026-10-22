@@ -65,10 +65,23 @@ pub(super) fn format_human(execution: &Execution) -> String {
                 false,
             ));
             if let Some(output) = &result.output {
-                if result.backend == "macos-rm" {
-                    lines.extend(format_macos_rm_output(output));
-                } else {
-                    lines.extend(render_command_output(execution.command, output));
+                // A command with its own renderer keeps it on every backend;
+                // the macOS value block is the fallback for the ones without
+                // (and for a renderer that has nothing to say about this
+                // payload). Rendering a macOS payload through the block by
+                // default would silently drop every dedicated renderer.
+                let dedicated = execution
+                    .command
+                    .spec()
+                    .formatter
+                    .map(|formatter| formatter(output))
+                    .filter(|lines| !lines.is_empty());
+                match dedicated {
+                    Some(dedicated) => lines.extend(dedicated),
+                    None if result.backend == "macos-rm" => {
+                        lines.extend(format_macos_rm_output(output))
+                    }
+                    None => lines.extend(render_command_output(execution.command, output)),
                 }
                 // The wrapper layers soft-fail unsupported surfaces to
                 // {"supported": false} — surface the ORIGINAL NVAPI status
