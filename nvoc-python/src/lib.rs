@@ -2,6 +2,8 @@ use nvapi::hi::{
     Celsius, ClockDomain, CoolerPolicy, KilohertzDelta, MicrovoltsDelta, PState, Percentage,
 };
 use nvml_wrapper::enum_wrappers::device::{Api, PerformanceState};
+#[cfg(not(target_os = "macos"))]
+use nvoc_core::SetFanStop;
 use nvoc_core::{
     BackendSet, CheckVoltageFrequency, ClearEdid, ClkVfDomainClass, ConvertEnum, DeviceInfo,
     DeviceStatus, DisableNvapiThermalSim, FabricTree, FanCurvePointReadout, GetFanCurves,
@@ -22,7 +24,7 @@ use nvoc_core::{
     ResetPstateGlobalFreqOffset, ResetPublicVftableGpcLock, ResetPublicVftableOffset,
     ResetVfpFrequencyLock, SetApplicationsClocks, SetAutoboostStatus, SetAutoboostSupport,
     SetClockOffset, SetCoolerLevels, SetDomainVfpDeltas, SetEdid, SetFanCurve, SetFanPercent,
-    SetFanRpm, SetFanSpeed, SetFanStop, SetGpcVoltLock, SetLegacyClocks, SetLockedClocks,
+    SetFanRpm, SetFanSpeed, SetGpcVoltLock, SetLegacyClocks, SetLockedClocks,
     SetNvapiBackgroundOcScanner, SetNvapiClkDomainOffset, SetNvapiCoreVoltageControl,
     SetNvapiDNotifier, SetNvapiDynamicBoost, SetNvapiPStateNative, SetNvapiPerfFreqCap,
     SetNvapiPerfLevelLock, SetNvapiPmgrVoltageArbiter, SetNvapiPowerLimits, SetNvapiPstateLock,
@@ -5912,7 +5914,7 @@ fn set_fanstop_status(
                 nvoc_core::FanControlTarget::Auto
             };
             nvoc_core::validate_macos_fan_request(0, target_value).map_err(to_py_err)?;
-            return with_target(gpu, "macos-rm", |target| {
+            with_target(gpu, "macos-rm", |target| {
                 let report = run(
                     target,
                     nvoc_core::SetMacosRmFanControl {
@@ -5934,7 +5936,7 @@ fn set_fanstop_status(
                         Value::from(report.other_bytes_preserved),
                     ),
                 ]))
-            });
+            })
         }
         #[cfg(not(target_os = "macos"))]
         with_target(gpu, "nvapi", |target| {
