@@ -71,7 +71,9 @@ else in the record changes. It exists because the driver accepts the value:
 NVML's own writer hard-codes mode 1, so stop is not reachable through NVML even
 though the firmware takes it. On this board the stop mode and manual 0 percent
 behave the same (both hold 0 rpm), so the difference recorded here is the mode
-word, not an observation.
+word, not an observation - with one measured distinction: the stop write parks the
+fan only after a few seconds, the same lagged response the percentage writes show
+rpm 1922 immediately after `on` and 0 four seconds later.
 
 Manual modifies only bytes +36..+44 of the saved 980-byte control. Auto obtains
 the default block, validates mode 0, selector 1 and equality of all remaining
@@ -110,4 +112,6 @@ SIGKILL and power loss cannot execute process cleanup.
   bytes and four clock-control masks (8432 bytes) unchanged. Healthy anchors.
 
 These are short, low-temperature control checks, not a thermal stability test,
-proof of every percentage, or validation of RPM/curve/FanStop control.
+proof of every percentage, or validation of RPM or curve control. Fan stop has its
+own round trip in `outputs/stage-fanstop-product-20261022T033318Z`: on/off with
+mode-2 readback, unchanged neighbouring domains and a byte-identical restore.
