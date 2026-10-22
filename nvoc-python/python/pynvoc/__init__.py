@@ -227,6 +227,7 @@ __all__ = [
     "set_nvml_pstate_lock",
     "set_perf_freq_cap",
     "set_power_limit",
+    "set_power_source",
     "set_pstate_base_voltage",
     "set_pstate_clock_offset",
     "set_target_temp",
