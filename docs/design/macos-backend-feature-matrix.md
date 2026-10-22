@@ -180,6 +180,7 @@
 | `get-private-legacy-pstates20-freq-domain-info` | Read-only dump of the private pstates-2.0 delta table (GetPstates20Private 0xC5DDF56E) — the storage whose deltas move the frequency-request ceilin… | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-pstate-freq-range` | Read NVML P-State clock ranges | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-pstate-global-freq-offset` | Read clock offset in MHz | **已实现且实测**：配置值取 `0x2080901b` selector0/record+12 signed kHz，经 directory index连接域；RM776只供实时频率。核心/显存 GET、窗口、单位与原值见§136–138。窗口采用已测±18.75MHz保守子集，未证明更宽范围；`--plan-delta`仍是计划，不自动写入 |
+| `get-gpu-locked-clocks` | NVML locked min/max window (`nvmlDeviceGetGpuLockedClocks`, `0x20809014`): 648 字节块读回一域一 vPstate 的 floor/ceiling | **已实现且实测**：域 1 与域 `bit16` 都读到真实窗口；驱动会把 floor 归一到实时时钟（vP8）或 ceiling 上一级阶梯（vP4/12/15），回显 ceiling，故请求不做等值比较。块布局、归一化语义与 `0x62` 楔死见§一百五十 |
 | `get-pstate-lock` | Read the native NVAPI P-State level table | 未实现：macOS RM 在访问驱动前拒绝 |
 | `get-supported-legacy-application-freq` | Read NVML supported application clocks | 未实现：macOS RM 在访问驱动前拒绝 |
 | `reset-freq-lock` | Reset core or memory locked clocks | 未实现：macOS RM 在访问驱动前拒绝 |
@@ -188,6 +189,7 @@
 | `reset-pstate-global-freq-offset` | Reset clock offsets, optionally filtered by domain | **部分已实现且实测**：显式 `--domain core` 或 `--domain memory` 将该域偏移归零，保留另一域。无域/显式P-state拒绝；不冒充全域reset或解锁，见§137–138 |
 | `reset-pstate-lock` | Clear all native NVAPI P-State locks | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-freq-lock` | Lock core or memory clocks to a MHz range | 未实现：macOS RM 在访问驱动前拒绝 |
+| `set-gpu-locked-clocks` | NVML 锁定窗口写入（`nvmlDeviceSetGpuLockedClocks`, `0x2080d041`）：预检读作快照 → SET → 回读 → 不一致按快照原样写回并验回；root 门用驱动 `0x1b` | **已实现且实测**：`--min 1080 --max 1620` 回 `NV_OK` 并钉住 1619.5 MHz，ceiling 换到 2200 成功；floor 高于 ceiling 时预检拒绝。**解锁无通路**（count=0 全 `0x1f`，NVML 自身复位同样失败），连续 SET 会 `0x62` 楔死需重启，见§一百五十 |
 | `set-legacy-application-freq-lock` | Set NVML application clocks in MHz | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-legacy-freq` | Set an absolute clock for legacy (Kepler) GPUs in MHz: --domain core (default) or mem picks which clock the value targets | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-overclocked-pstates` | Toggle the overclocked-pstate unlock (EnableOverclockedPstates 0xB23B70EE): 1 opens the extended/OC pstate range before a set-pstate-global-freq-of… | 未实现：macOS RM 在访问驱动前拒绝 |
