@@ -5999,6 +5999,11 @@ fn set_fanstop_status(
 /// RE'd from ref tool 2's setFanSim: RMW the control block, patch enable+level.
 /// cooler_index=None targets every present cooler. Pass rpm=-1 to disable
 /// simulation (return to auto).
+///
+/// On the macOS backend there is no rpm channel in the driver's control record:
+/// the request is translated through the cooler max rpm the record publishes and
+/// sent as the duty fraction, so the returned `applied_target_percent` is the
+/// value that actually landed (the fan follows it on its own curve, not exactly).
 #[pyfunction]
 fn set_fan_rpm(
     py: Python<'_>,
@@ -6006,6 +6011,35 @@ fn set_fan_rpm(
     rpm: i32,
     cooler_index: Option<u32>,
 ) -> PyResult<Py<PyAny>> {
+    if cfg!(target_os = "macos") {
+        let value = py.detach(|| {
+            with_target(gpu, "macos-rm", |target| {
+                let value = u32::try_from(rpm)
+                    .map_err(|_| invalid_value("macOS fan rpm target cannot be negative"))?;
+                let report = run(
+                    target,
+                    nvoc_core::SetMacosRmFanControl {
+                        slot: cooler_index.unwrap_or(0),
+                        target: nvoc_core::FanControlTarget::Rpm(value),
+                        cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                    },
+                )
+                .map_err(to_py_err)?
+                .output;
+                Ok(value_object([
+                    ("applied", Value::from(true)),
+                    ("slot", Value::from(report.slot)),
+                    ("applied_mode", Value::from(report.applied_mode)),
+                    (
+                        "applied_target_percent",
+                        Value::from(report.applied_target_percent),
+                    ),
+                    ("readback_verified", Value::from(report.readback_verified)),
+                ]))
+            })
+        })?;
+        return py_value(py, &value);
+    }
     let value = py.detach(|| {
         with_target(gpu, "nvapi", |target| {
             let rs = run(
