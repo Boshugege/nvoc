@@ -123,6 +123,21 @@ mod tests {
         assert!(parsed.domains.is_empty());
     }
 
+    /// The ids live on the C side; a rename there must not leave these
+    /// constants describing a command nobody sends.
+    #[test]
+    fn the_constants_match_the_c_bridge() {
+        let bridge = include_str!("../native/macos_rm.c");
+        for needle in [
+            format!("0x{DOMAIN_MASK_CMD:08x}u"),
+            format!("0x{DOMAIN_CLOCK_CMD:08x}u"),
+            format!("payload[0] = {DOMAIN_CLOCK_VERSION}u"),
+            format!("payload[0] = {DOMAIN_MODE_ALL}u;"),
+        ] {
+            assert!(bridge.contains(&needle), "C bridge lost `{needle}`");
+        }
+    }
+
     #[test]
     fn a_short_block_is_refused() {
         assert!(parse_domains(&[0u8; 8]).is_err());
