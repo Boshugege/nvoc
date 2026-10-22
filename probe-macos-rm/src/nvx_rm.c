@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include "nvx_rm.h"
 #include "nvx_defs.h"
 #include "nvx_xnu.h"
@@ -20,7 +21,11 @@ NvU32 nvx_rm_control(int ctl_fd, NvHandle hClient, NvHandle hObject,
     p.hClient = hClient;
     p.hObject = hObject;
     p.cmd = cmd;
-    p.flags = NVOS54_FLAGS_NONE;
+    /* NVX_FLAGS lets a probe vary the NVOS54 flags without a rebuild. */
+    {
+        const char *flags = getenv("NVX_FLAGS");
+        p.flags = flags ? (NvU32)strtoul(flags, NULL, 0) : NVOS54_FLAGS_NONE;
+    }
     /* NvP64 direct cast, same as the NVK shim's nvRmApiControl. */
     p.params = (NvP64)(uintptr_t)params;
     p.paramsSize = paramsSize;
