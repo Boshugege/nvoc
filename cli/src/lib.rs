@@ -200,6 +200,8 @@ pub enum Command {
     GetPmgrArbiter,
     SetPmgrArbiter,
     GetRatedTdp,
+    SetRatedTdp,
+    ResetRatedTdp,
     GetPrivateFreqDomainInfo,
     GetPrivateFreqDomainStatus,
     SetPrivateFreqDomainGlobalOffset,
@@ -835,6 +837,18 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     ..CommandSpec::new("reset-public-vftable-offset", Group::Vfp, "Reset NVAPI VFP deltas")
                 },
             ),
+            (
+                Command::ResetRatedTdp,
+                CommandSpec {
+                    arity: (1, 1),
+                    positionals: Box::leak(Box::new([PositionalArg::free(
+                        "arg_rated_tdp_reset_client",
+                        "CLIENT",
+                        "Arbitration client to return to default: war|global|os|profile",
+                    )])),
+                    ..CommandSpec::new("reset-rated-tdp", Group::Power, "macOS RM: return one RATED_TDP client to DEFAULT (arbitration request, not wattage)")
+                },
+            ),
             (Command::ResetTempLimit, CommandSpec {
                 options: Box::leak(Box::new(["domain"])),
                 ..CommandSpec::new("reset-temp-limit",Group::Thermal,"Reset NVAPI sensor limits; macOS --domain acoustic restores the policy default")
@@ -1346,6 +1360,18 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                         "Frequency delta in MHz, for example -30 or 15MHz",
                     )])),
                     ..CommandSpec::new("set-public-vftable-range-offset", Group::Vfp, "Set a VFP point range delta in MHz")
+                },
+            ),
+            (
+                Command::SetRatedTdp,
+                CommandSpec {
+                    arity: (1, 1),
+                    positionals: Box::leak(Box::new([PositionalArg::free(
+                        "arg_rated_tdp_client_action",
+                        "CLIENT:ACTION",
+                        "RATED_TDP arbitration: war|global|os|profile : default|exceed|limit|lock|floor",
+                    )])),
+                    ..CommandSpec::new("set-rated-tdp", Group::Power, "macOS RM: ask one RATED_TDP client for an action (arbitration, not wattage; persists until reset-rated-tdp or a reboot)")
                 },
             ),
             (
@@ -3824,6 +3850,9 @@ fn execute_target(
                 None => json!({"supported": false}),
             })
         }
+        Command::SetRatedTdp | Command::ResetRatedTdp => Err(CliError::new(
+            "set-rated-tdp/reset-rated-tdp are macOS RM only; the NVAPI RATED_TDP SET is not wired",
+        )),
         Command::SetPrivatePermanentPstateLockUser => {
             let level = parse_usize(&invocation.positionals[0], "level")? as u32;
             let out = run(target, SetNvapiPerfLevelLock { level })?.output;
@@ -8704,6 +8733,8 @@ mod tests {
             | Command::GetPmgrArbiter
             | Command::SetPmgrArbiter
             | Command::GetRatedTdp
+            | Command::SetRatedTdp
+            | Command::ResetRatedTdp
             | Command::GetPrivateFreqDomainInfo
             | Command::GetPrivateFreqDomainStatus
             | Command::SetPrivateFreqDomainGlobalOffset

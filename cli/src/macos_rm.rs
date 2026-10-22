@@ -75,6 +75,12 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             // this path". The sensor it has answers; the parts it cannot fill
             // (per-sensor range, controller) come back null with the reason.
             | Command::GetLegacyTempSensor
+            // Same reason again: this path can read the trio and can now write
+            // the arbitration request, so refusing the three entries would read
+            // as "no rated-TDP here".
+            | Command::GetRatedTdp
+            | Command::SetRatedTdp
+            | Command::ResetRatedTdp
     ) {
         Ok(())
     } else if command == Command::GetPstateFreqRange {
@@ -96,7 +102,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -111,10 +117,12 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     let power_write = power_write_request(invocation, command)?;
     let fan_write = fan_write_request(invocation, command)?;
     let thermal_write = thermal_write_request(invocation, command)?;
+    let rated_tdp_write = rated_tdp_write_request(invocation, command)?;
     let _interrupt = (write.is_some()
         || power_write.is_some()
         || fan_write.is_some()
-        || thermal_write.is_some())
+        || thermal_write.is_some()
+        || rated_tdp_write.is_some())
     .then(InterruptGuard::install);
     let inventory = discover_targets(BackendSet::MacosRm)?;
     let targets = inventory.targets();
@@ -156,6 +164,33 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "power_watt": f64::from(report.applied_mw)/1000.0, "power_mw": report.applied_mw,
                         "original_power_mw": report.original_mw, "readback_verified": report.readback_verified,
                         "other_bytes_preserved": report.other_bytes_preserved})
+                }
+                Command::GetRatedTdp => {
+                    let settings = run(
+                        &target,
+                        nvoc_core::QueryMacosRmRatedTdp {
+                            client: nvoc_core::RatedTdpClient::Global,
+                        },
+                    )?
+                    .output;
+                    json!({"backend": "macos-rm", "mode": "rated-tdp-arbitration",
+                        "client": settings.client.name(), "client_code": settings.client.code(),
+                        "action": settings.action.name(), "action_code": settings.action.code(),
+                        "v_pstate": settings.v_pstate,
+                        "note": "RM read of the public PERF_RATED_TDP pair (GET 0x2080206e; the a0 twin 0x2080a06e answers a stub block); the NVAPI trio answered by the NVAPI backend is a different surface, and RUSD enforcedmW is not this request's readback"})
+                }
+                Command::SetRatedTdp | Command::ResetRatedTdp => {
+                    let (client, action) = rated_tdp_write
+                        .ok_or_else(|| CliError::new("missing rated-tdp write request"))?;
+                    let report = run(&target, nvoc_core::SetMacosRmRatedTdp {
+                        client, action, cancelled: &interrupted,
+                    })?.output;
+                    json!({"applied": true, "backend": "macos-rm", "mode": "rated-tdp-arbitration",
+                        "client": client.name(), "client_code": client.code(),
+                        "action": report.applied_action.name(), "action_code": report.applied_action.code(),
+                        "original_action": report.original_action.name(),
+                        "readback_verified": true,
+                        "note": "the request persists (clear it with reset-rated-tdp); the stored request was read back and compared byte for byte before the session closed"})
                 }
                 Command::GetTemperatureThresholds => {
                     let items=run(&target,nvoc_core::QueryTemperatureThresholds)?.output;
@@ -357,6 +392,42 @@ fn fan_write_request(
     };
     nvoc_core::validate_macos_fan_request(slot, target)?;
     Ok(Some((slot, target)))
+}
+
+/// `CLIENT:ACTION`, or just `CLIENT` for the reset form.
+fn rated_tdp_write_request(
+    invocation: &Invocation,
+    command: Command,
+) -> CliResult<Option<(nvoc_core::RatedTdpClient, nvoc_core::RatedTdpAction)>> {
+    if !matches!(command, Command::SetRatedTdp | Command::ResetRatedTdp) {
+        return Ok(None);
+    }
+    let value = invocation
+        .positionals
+        .first()
+        .ok_or_else(|| CliError::new("missing CLIENT (war|global|os|profile)"))?;
+    let (client, action) = match value.split_once(':') {
+        Some((client, action)) => {
+            if command == Command::ResetRatedTdp {
+                return Err(CliError::new(
+                    "reset-rated-tdp takes a bare CLIENT; it always requests default",
+                ));
+            }
+            (client, Some(action))
+        }
+        None => (value.as_str(), None),
+    };
+    let client = nvoc_core::RatedTdpClient::parse(client)?;
+    let action = match (command, action) {
+        (Command::ResetRatedTdp, _) => nvoc_core::RatedTdpAction::Default,
+        (_, Some(action)) => nvoc_core::RatedTdpAction::parse(action)?,
+        (_, None) => {
+            return Err(CliError::new(
+                "set-rated-tdp needs CLIENT:ACTION (war|global|os|profile : default|exceed|limit|lock|floor)",
+            ));
+        }
+    };
+    Ok(Some((client, action)))
 }
 
 fn power_write_request(
@@ -757,6 +828,49 @@ mod tests {
     }
 
     #[test]
+    fn rated_tdp_parses_one_client_and_action_and_refuses_the_rest() {
+        for args in [
+            // client outside the published 1..4 set (RM=0 is internal)
+            vec!["set-rated-tdp", "rm:LIMIT", "--macos-rm"],
+            vec!["set-rated-tdp", "global:TURBO", "--macos-rm"],
+            // no action on a set, an action on a reset
+            vec!["set-rated-tdp", "global", "--macos-rm"],
+            vec!["reset-rated-tdp", "global:LIMIT", "--macos-rm"],
+        ] {
+            let invocation = parse_args(args).unwrap();
+            assert!(rated_tdp_write_request(&invocation, invocation.command.unwrap()).is_err());
+        }
+        // the client is a required positional, so a bare command is refused by
+        // the parser before any device work.
+        assert!(parse_args(["set-rated-tdp", "--macos-rm"]).is_err());
+        assert!(parse_args(["reset-rated-tdp", "--macos-rm"]).is_err());
+        let invocation = parse_args(["set-rated-tdp", "GLOBAL:FORCE_LIMIT", "--macos-rm"]).unwrap();
+        assert_eq!(
+            rated_tdp_write_request(&invocation, Command::SetRatedTdp).unwrap(),
+            Some((
+                nvoc_core::RatedTdpClient::Global,
+                nvoc_core::RatedTdpAction::Limit
+            ))
+        );
+        let invocation = parse_args(["reset-rated-tdp", "profile", "--macos-rm"]).unwrap();
+        assert_eq!(
+            rated_tdp_write_request(&invocation, Command::ResetRatedTdp).unwrap(),
+            Some((
+                nvoc_core::RatedTdpClient::Profile,
+                nvoc_core::RatedTdpAction::Default
+            ))
+        );
+        // the arbitration entries are answered here now
+        for command in [
+            Command::GetRatedTdp,
+            Command::SetRatedTdp,
+            Command::ResetRatedTdp,
+        ] {
+            assert!(validate(command).is_ok(), "{command:?}");
+        }
+    }
+
+    #[test]
     fn the_fan_read_is_allowed_and_its_unfillable_fields_say_so() {
         // The device query supplies identity, range, feedback and target separately.
         assert!(validate(Command::GetFanInfo).is_ok());
@@ -771,25 +885,21 @@ mod tests {
         assert!(validate(Command::GetPublicPowerLimit).is_ok());
         assert!(validate(Command::SetPowerLimit).is_ok());
         assert!(validate(Command::ResetPowerLimit).is_ok());
-        for command in [Command::SetPublicTgpPercent, Command::GetRatedTdp] {
-            let error = validate(command).unwrap_err().to_string();
-            assert!(error.contains("unavailable on macOS RM"), "{error}");
+        let percent = validate(Command::SetPublicTgpPercent)
+            .unwrap_err()
+            .to_string();
+        assert!(percent.contains("unavailable on macOS RM"), "{percent}");
+        // RATED_TDP is the arbitration family, not wattage, and it is now
+        // answered here: the RM read of the class-20 pair plus the validated
+        // setter. The NVAPI private trio stays a different surface,
+        // so the two must not be confused (matrix sections 142/143).
+        for command in [
+            Command::GetRatedTdp,
+            Command::SetRatedTdp,
+            Command::ResetRatedTdp,
+        ] {
+            assert!(validate(command).is_ok(), "{command:?}");
         }
-        // The rated-TDP read stays refused for a different reason than a
-        // missing field: its route is the NVAPI private trio
-        // (0xED2BEA09/0x87BD35EF/0xFCBDF642), which this path never issues, so
-        // the number is not read -- it is not that the driver lacks it. The
-        // reason is the shared constant, and it carries the measurement that
-        // backs that claim (our own capture answered NV_OK), which is what
-        // keeps "not wired in" from being read as "the driver has no value".
-        let rated = validate(Command::GetRatedTdp).unwrap_err().to_string();
-        assert!(rated.contains("unavailable on macOS RM"), "{rated}");
-        assert!(
-            rated.contains(nvoc_core::RATED_TDP_UNWIRED_REASON),
-            "{rated}"
-        );
-        assert!(rated.contains("0x2080206e"), "{rated}");
-        assert!(!rated.contains("get-public-power-limit"), "{rated}");
     }
 
     #[test]
@@ -858,7 +968,7 @@ mod tests {
     /// entry in the family lists is walked.
     #[test]
     fn every_refused_read_of_the_three_families_names_its_layer() {
-        let expected: [(&str, Command, &str); 8] = [
+        let expected: [(&str, Command, &str); 7] = [
             (
                 "get-fan-curve",
                 Command::GetFanCurve,
@@ -884,7 +994,6 @@ mod tests {
                 Command::GetDNotifier,
                 "get-public-power-limit",
             ),
-            ("get-rated-tdp", Command::GetRatedTdp, "NV_OK"),
             (
                 "get-public-temp-limit",
                 Command::GetPublicTempLimit,

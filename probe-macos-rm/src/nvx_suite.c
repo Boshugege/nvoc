@@ -770,10 +770,11 @@ static void item_rated_tdp_reads(nvx_ctx *c)
         NvU32 st = SUBCTL(c, NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL, &p);
         nvx_emit(c, "V2.rtdp", "rated-tdp-get-control", st,
                  st == 0 ? NVX_V_OK : NVX_V_REJECTED,
-                 "client %s(%u): action %s(%u) vPstate %u",
+                 "client %s(%u): action %s(%u) vPstate %u raw[0..2]=0x%08x 0x%08x 0x%08x",
                  rated_tdp_client_name(cl), cl,
                  rated_tdp_action_name((NvU32)p.input), (NvU32)p.input,
-                 (NvU32)p.vPstateType);
+                 (NvU32)p.vPstateType,
+                 ((NvU32 *)&p)[0], ((NvU32 *)&p)[1], ((NvU32 *)&p)[2]);
     }
 
     /* Same call, discriminating seed. The header documents the parameter

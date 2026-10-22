@@ -861,6 +861,37 @@ uint32_t nvoc_macos_rm_session_close(nvoc_rm_session *s, char *error, size_t cap
  * numbers with size_of/offset_of! on the Rust side, so a layout change cannot
  * pass unnoticed on either side. See NVOC_RM_LAYOUT_SLOTS in
  * core/native/macos_rm_abi.h for the slot meanings. */
+uint32_t nvoc_macos_rm_session_rated_tdp(nvoc_rm_session *s, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap)
+{
+    if (!s || !block || kind > 1u || size != 12u)
+        return failure(error, cap, "rated-tdp ABI arguments", UINT32_MAX);
+    unsigned char *b = block;
+    uint32_t client, action, vpstate;
+    memcpy(&client, b, 4);
+    if (client < 1u || client > 4u)
+        return failure(error, cap, "rated-tdp client outside 1..4 (RM=0 is internal)", 0x1fu);
+    if (kind == 1u) {
+        if (geteuid() != 0) return failure(error, cap, "rated-tdp SET requires root", 0x1bu);
+        memcpy(&action, b + 4, 4);
+        memcpy(&vpstate, b + 8, 4);
+        /* The reply echoes all three dwords, so the request must be complete. */
+        if (action > 4u || vpstate > 0xffffu)
+            return failure(error, cap, "rated-tdp action/vPstate outside published range", 0x1fu);
+    } else {
+        /* A read seeds the action with DEFAULT and lets the driver replace it. */
+        memset(b + 4, 0, size - 4u);
+    }
+    /* The class-20 ids, not the legacy a0 twins. Measured: 0x2080a06e answers
+     * NV_OK with a stub block (client 0, action 0xffffffff) for every client,
+     * so a read through it looks like "nothing is set"; 0x2080206e returns the
+     * client, its action and its vPstate. Both GET and SET take the 12-byte
+     * trio (16 and 32 bytes are refused with 0x1f). */
+    uint32_t cmd = kind == 0u ? 0x2080206eu : 0x2080206fu;
+    uint32_t status = nvx_rm_control(s->ctl, s->client, s->subdevice, cmd, block, (uint32_t)size);
+    return status ? failure(error, cap, "rated-tdp control", status) : 0;
+}
+
 size_t nvoc_macos_rm_abi_layout(uint64_t *out, size_t count)
 {
     const uint64_t layout[NVOC_RM_LAYOUT_SLOTS] = {

@@ -2516,3 +2516,19 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **⑤ 诚实边界** ✗：单 client GLOBAL、单 action、每段 5 样本、同一负载形状，不称稳定度认证 ✔；未测 EXCEED/LOCK/FLOOR、未测与 board power limit 的仲裁冲突、未在关闭 Boost 下复跑 ✗；公共 core/CLI/Python 仍未接入（公共 `get-rated-tdp` 是 NVAPI 读数面，不是这条 RM 写）✗；`--rated-tdp-hold` 只服务观察，不支持进程内取消 ✗。
 
 **⑥ 静态佐证** ✔：`0x2080e06f` 行 `+0x10` pFunc → IDA `0x1547890`，函数按 `lw a5,0(a1)` 收 client、`lw a3,4(a1)` 收 vPstate，逐值比较后返 `0x1f`(非法)/`0x56`(不支持)/`0x0`，并 `jalr` 到更深一层 helper —— 与实测的"校验严格、合法参数才 `NV_OK`"一致。脚本 `outputs/clock-protocol-20261021/ida-rated-tdp.py`、`.txt`、`ida-rated-tdp-2.txt`（本轮新增，未入仓库）。
+
+## 一百四十四、RATED_TDP 接成公共闭包（core/CLI/Python），并查掉「读永远是空」的真因是分级字节
+
+**① 选择依据** ✔：§一百四十三把协议证完了，但公共面只有旧的 NVAPI 读；要成为产品能力就得走完 core 类型/解析/事务、CLI 三个命令、Python 三个入口，并在产品路径上证明读、写、恢复、拒绝。故本轮不再动探针的写入形状，只把它降级成采样器。
+
+**② 一个必须先查掉的坑：`0x2080a06e` 是桩** ✔：core 侧接好后 `get-rated-tdp` 一直报「reply echoes unknown client 0」，而探针同一请求回 `[2,0,1]`。逐步排除会话差异（`/tmp/mini`：链打开 + 一发 GET 就复现；补 `fb-get-info-v2`、`perf-current-pstate`、`perf-get-powerstate` 都不变；`--stages 0` 也照样成功 ⇒ 与前置条目无关）。真正的差别是**id**：探针用的是 SDK 常量 `NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL`(=`0x2080206e`)，core 用的是 a0 形状的 legacy 孪生 `0x2080a06e`。同进程内对照（`/tmp/mini3`）一次定案：struct 形状的 class-20 调用 `st=0x0 raw=0x2 0x0 0x1`，紧接的数组形状 a0 调用 `st=0x0 raw=0x0 0xffffffff 0x0` ⇒ **a0 GET 对任何 client 都回同一块桩 `{client 0, action 0xffffffff, vPstate 0}`，`NV_OK` 是假的成功**。`0x2080a06f` 没有这个问题（§一百四十二的 SET 一直有效），但读必须走 class-20。GET/SET 的尺寸都收敛为 12（16/32 被 `0x1f` 拒）。
+
+**③ 实现** ✔：`core/src/macos_rated_tdp.rs`（`BYTES=12`、client/action 枚举、`parse`（容忍 dword0 为 0 的层）、`read`/`set` 走共享 `write_block` 事务与 2 次重试的 `Drop` 恢复）；`macos_rm.rs` 的 `NativeRatedTdp` 传输与 `ControlBlock<12>`（`set()` 把 client 盖进快照 dword0，保证恢复打到同一 client）；CLI `get-rated-tdp`/`set-rated-tdp CLIENT:ACTION`/`reset-rated-tdp CLIENT`；Python `get_rated_tdp`/`set_rated_tdp`/`reset_rated_tdp`。语义定为**成功即持久**（与功耗/风扇一致，用 `reset` 清），错误/取消才恢复原块。
+
+**④ 证据（测试机，全序列）** ✔：`stage-ratedtdp-core-20261022T015028Z/`（1..14 步）。`default→force-limit→(OS force-lock→reset)→default` 全部 `Applied: yes` + `Readback Verified: yes`，跨 client 互不覆盖，Python 三读自洽；参数 `rm:LIMIT`、`global:TURBO`、多余 action、缺 action 全部拒绝；`--nvapi` 如实 `LibraryNotFound`。
+
+**⑤ 效果与权限（同负载 A/B/A，写方是产品命令）** ✔：`stage-ratedtdp-effect-20261022T015325Z/`。Vulkan 重负载 45 s，t≈13 s 发 `set GLOBAL:FORCE_LIMIT`、t≈27 s `reset`，探针只采样：A（11 样本）12576..13174 mW、gpc 恒定 1950000；B（14 样本）**11901..11983 mW、gpc 恒定 1755000**；A2（15 样本）12678..13349 mW、gpc 回 1950000。B 与 A/A2 完全无重叠（约 −1.02 W / −7.9%），仍不改变 `enforcedmW=100000`。换负载前的 `metal_check` 版本无差异（忙率读数 0%、停在 1530 MHz），另录为 `stage-ratedtdp-effect-20261022T015149Z/`。权限：置 `EXCEED` 后非 root `set`/`reset` 都 `0x1b NV_ERR_INSUFFICIENT_PERMISSIONS` 且回读仍 `EXCEED`，非 root **读成功**，随后 root `reset` 回 `default`；CI 修完再跑 `GLOBAL:FLOOR(4)` 往返并停回 `default`。
+
+**⑥ 门禁** ✔：`cargo xtask ci` **CI_EXIT=0**（core146、CLI95、Python Rust19，完整 Python 59passed/10skipped）。修掉门禁抓到的问题：`from_code` 死代码（改为用它命名回显 client）、单元素 `for`、`lib.rs` 的 `macos_rated_tdp`/`macos_control_transaction` 一直带着 macOS+test 的 `cfg` 导致 aarch64-linux 检查找不到符号（去掉 cfg 改为全平台模块）、`set_thermal_limit` 的 `#[pyo3(signature=…)]` 被上一轮插入顶掉（补回）、`test_import.py` 导出表与 `__all__` 顺序。
+
+**⑦ 诚实边界** ✗：CLI/Python 的**读**只覆盖 GLOBAL 一个 client（没有 `--client`，其余 client 的读仍需探针）；未测 WAR/OS/PROFILE 的实际效果与跨 client 仲裁优先级；`reset` 与 `set …:DEFAULT` 等价，只测了前者；单负载形状、40 s 窗口、每段 11–15 样本，不是稳定度认证；`enforcedmW` 不反映这条仲裁的判据在 §一百四十三已记，此处只作一致性复核；a0 桩的成因未从固件侧查明（只知它稳定返回同一块），不排除是 legacy 分级的刻意空实现；`macos_rated_tdp.rs` 的 `set()` 覆盖 client 是给"层回 0"的保险，class-20 下回显本来就正确。

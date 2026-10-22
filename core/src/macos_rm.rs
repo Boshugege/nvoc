@@ -1151,7 +1151,7 @@ pub const POWER_POLICY_UNREADABLE_REASON: &str = "the board limit and its min/de
 /// tiers, and was measured answering on this host. What is missing is the
 /// client-side wiring, and saying "the driver does not publish it" would be
 /// wrong in a way a later round would have to retract.
-pub const RATED_TDP_UNWIRED_REASON: &str = "the rated-TDP control is not missing on this driver: its RM pair is located and was measured answering here (NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL 0x2080206e, paramSize 12 in the method table, NV_OK with all three dwords DEFAULT on the healthy captures, and 0x62 under the wedge like every state-checking handler; the SDK publishes the same command in the modern and the legacy tier, 0x2080206e / 0x2080a06e), and the SET twin is never sent; what is missing is the client read -- this entry reports the NVAPI private trio (0xED2BEA09/0x87BD35EF/0xFCBDF642), which this path never issues, so the value is unread here rather than unpublished by the driver; the read is prepared as probe --rated-tdp-read (see notes)";
+pub const RATED_TDP_UNWIRED_REASON: &str = "the rated-TDP control is not missing on this driver: its RM pair is located and was measured answering here (NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL 0x2080206e, paramSize 12 in the method table, NV_OK with all three dwords DEFAULT on the healthy captures, and 0x62 under the wedge like every state-checking handler; the SDK publishes the same command in the modern and the legacy tier, 0x2080206e / 0x2080a06e), and that client read is answered by the same pair here, so it is a read rather than a gap; this description is kept because the entry it was written for still prints it. The NVAPI private trio (0xED2BEA09/0x87BD35EF/0xFCBDF642) is a different surface and is not what this path issues; the a0 twin of the pair is a stub (matrix section 143)";
 
 /// One reading of the public power-limit contract.
 ///
@@ -1751,6 +1751,53 @@ impl Device {
         }
     }
 
+    /// Read what `client` currently asks for. Read-only.
+    pub fn rated_tdp_settings(
+        &self,
+        client: crate::RatedTdpClient,
+    ) -> Result<crate::RatedTdpSettings, Error> {
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(&|| false, |session| {
+                let _guard = lock_transport()?;
+                let mut io = NativeRatedTdp(session.handle, client);
+                crate::macos_rated_tdp::read(&mut io, client)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let _ = client;
+            Err(Error::Custom(
+                "macOS RATED_TDP control requires x86_64 macOS".into(),
+            ))
+        }
+    }
+
+    /// Successful requests persist; errors and cancellation restore all 12
+    /// original bytes and verify them.
+    pub fn set_rated_tdp(
+        &self,
+        client: crate::RatedTdpClient,
+        action: crate::RatedTdpAction,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<crate::RatedTdpWriteReport, Error> {
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(cancelled, |session| {
+                let _guard = lock_transport()?;
+                let mut io = NativeRatedTdp(session.handle, client);
+                crate::macos_rated_tdp::set(&mut io, client, action, cancelled)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let _ = (client, action);
+            Err(Error::Custom(
+                "macOS RATED_TDP control requires x86_64 macOS".into(),
+            ))
+        }
+    }
+
     pub fn power_limit_write_supported(&self) -> bool {
         offset_writes_supported(&self.info)
     }
@@ -2100,6 +2147,42 @@ impl crate::GpuOperation for SetMacosRmPowerLimit<'_> {
         target
             .macos_rm()?
             .set_power_limit(self.target, self.cancelled)
+    }
+}
+
+/// Read one client's standing RATED_TDP request.
+pub struct QueryMacosRmRatedTdp {
+    pub client: crate::RatedTdpClient,
+}
+impl crate::GpuOperation for QueryMacosRmRatedTdp {
+    type Output = crate::RatedTdpSettings;
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::GetRatedTdp
+    }
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.macos_rm()?.rated_tdp_settings(self.client)
+    }
+}
+
+/// Arbitration SET: one client, one action, exact rollback on error/cancel.
+pub struct SetMacosRmRatedTdp<'a> {
+    pub client: crate::RatedTdpClient,
+    pub action: crate::RatedTdpAction,
+    pub cancelled: &'a dyn Fn() -> bool,
+}
+impl crate::GpuOperation for SetMacosRmRatedTdp<'_> {
+    type Output = crate::RatedTdpWriteReport;
+    fn kind(&self) -> crate::OperationKind {
+        if self.action == crate::RatedTdpAction::Default {
+            crate::OperationKind::ResetRatedTdp
+        } else {
+            crate::OperationKind::SetRatedTdp
+        }
+    }
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target
+            .macos_rm()?
+            .set_rated_tdp(self.client, self.action, self.cancelled)
     }
 }
 
@@ -2459,6 +2542,14 @@ unsafe extern "C" {
         cap: usize,
     ) -> u32;
     fn nvoc_macos_rm_session_power(
+        handle: *mut SessionOpaque,
+        kind: u32,
+        block: *mut u8,
+        size: usize,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
+    fn nvoc_macos_rm_session_rated_tdp(
         handle: *mut SessionOpaque,
         kind: u32,
         block: *mut u8,
@@ -3652,6 +3743,59 @@ impl crate::macos_control_transaction::ControlBlock<{ crate::macos_power::BYTES 
     fn set(&mut self, block: &[u8; crate::macos_power::BYTES]) -> Result<(), Error> {
         let mut block = *block;
         self.transfer(2, &mut block)
+    }
+}
+
+/// Per-client view of the RATED_TDP block: the GET reply does not say which
+/// client it belongs to, so the client travels in the object and is also sent
+/// in every request.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+struct NativeRatedTdp(*mut SessionOpaque, crate::RatedTdpClient);
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl NativeRatedTdp {
+    // Caller owns the live session and holds the transport lock for every call.
+    // The GET tier is 8 bytes wide (client + reserved, no vPstate slot) while
+    // the SET tier carries the full 12-byte trio, so the block length is the
+    // caller's, not a constant.
+    fn transfer(&mut self, kind: u32, block: &mut [u8]) -> Result<(), Error> {
+        let mut error = [0u8; 256];
+        // SAFETY: live session, exactly-sized writable block, no retained
+        // pointers, transport mutex held across the whole transaction.
+        let status = unsafe {
+            nvoc_macos_rm_session_rated_tdp(
+                self.0,
+                kind,
+                block.as_mut_ptr(),
+                block.len(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(Error::Custom(format!(
+                "macOS RATED_TDP control failed: RM 0x{status:08x} {}",
+                text(&error)
+            )))
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl crate::macos_control_transaction::ControlBlock<{ crate::macos_rated_tdp::BYTES }>
+    for NativeRatedTdp
+{
+    fn get(&mut self) -> Result<[u8; crate::macos_rated_tdp::BYTES], Error> {
+        let mut request = [0u8; crate::macos_rated_tdp::BYTES];
+        request[0..4].copy_from_slice(&self.1.code().to_le_bytes());
+        self.transfer(0, &mut request)?;
+        Ok(request)
+    }
+    fn set(&mut self, block: &[u8; crate::macos_rated_tdp::BYTES]) -> Result<(), Error> {
+        let mut block = *block;
+        self.transfer(1, &mut block)
     }
 }
 

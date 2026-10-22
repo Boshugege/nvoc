@@ -3113,6 +3113,57 @@ fn set_power_limit(py: Python<'_>, gpu: &str, backend: &str, value: u32) -> PyRe
     })
 }
 
+/// Ask one RATED_TDP client for an action (macOS RM arbitration request).
+///
+/// The request is written, read back, and restored to the original action
+/// before returning, so this is an observation of acceptance rather than a
+/// standing change -- same contract as the CLI.
+#[pyfunction]
+fn set_rated_tdp(py: Python<'_>, gpu: &str, client: &str, action: &str) -> PyResult<()> {
+    let gpu_own = gpu.to_string();
+    let (client, action) = (client.to_string(), action.to_string());
+    py.detach(|| -> PyResult<()> {
+        let client = nvoc_core::RatedTdpClient::parse(&client).map_err(to_py_err)?;
+        let action = nvoc_core::RatedTdpAction::parse(&action).map_err(to_py_err)?;
+        with_target(&gpu_own, "macos-rm", |target| {
+            run(
+                target,
+                nvoc_core::SetMacosRmRatedTdp {
+                    client,
+                    action,
+                    cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                },
+            )
+            .map_err(to_py_err)?;
+            Ok(Value::Null)
+        })?;
+        Ok(())
+    })
+}
+
+/// Return one RATED_TDP client to DEFAULT.
+#[pyfunction]
+fn reset_rated_tdp(py: Python<'_>, gpu: &str, client: &str) -> PyResult<()> {
+    let gpu_own = gpu.to_string();
+    let client = client.to_string();
+    py.detach(|| -> PyResult<()> {
+        let client = nvoc_core::RatedTdpClient::parse(&client).map_err(to_py_err)?;
+        with_target(&gpu_own, "macos-rm", |target| {
+            run(
+                target,
+                nvoc_core::SetMacosRmRatedTdp {
+                    client,
+                    action: nvoc_core::RatedTdpAction::Default,
+                    cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                },
+            )
+            .map_err(to_py_err)?;
+            Ok(Value::Null)
+        })?;
+        Ok(())
+    })
+}
+
 #[pyfunction]
 #[pyo3(signature=(gpu,celsius,domain=None))]
 fn set_thermal_limit(
@@ -4424,10 +4475,34 @@ fn set_pmgr_arbiter(py: Python<'_>, gpu: &str, values: Vec<u32>) -> PyResult<Py<
     py_value(py, &v)
 }
 
-/// Rated-TDP readback trio (0xED2BEA09/0x87BD35EF/0xFCBDF642).
+/// Rated-TDP: on macOS the RM read of one client's standing arbitration
+/// request (legacy privileged GET 0x2080a06e); elsewhere the NVAPI trio
+/// (0xED2BEA09/0x87BD35EF/0xFCBDF642). These are different surfaces and the
+/// object says which one answered.
 #[pyfunction]
 fn get_rated_tdp(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
-    macos_read_layer("get_rated_tdp", nvoc_core::RATED_TDP_UNWIRED_REASON)?;
+    if cfg!(target_os = "macos") {
+        let value = with_target(gpu, "macos-rm", |target| {
+            let settings = run(
+                target,
+                nvoc_core::QueryMacosRmRatedTdp {
+                    client: nvoc_core::RatedTdpClient::Global,
+                },
+            )
+            .map_err(to_py_err)?
+            .output;
+            Ok(value_object([
+                ("backend", Value::from("macos-rm")),
+                ("client", Value::from(settings.client.name())),
+                ("client_code", Value::from(settings.client.code())),
+                ("action", Value::from(settings.action.name())),
+                ("action_code", Value::from(settings.action.code())),
+                ("v_pstate", Value::from(settings.v_pstate)),
+                ("readback_field", Value::from("v_pstate")),
+            ]))
+        })?;
+        return py_value(py, &value);
+    }
     let value = with_target(gpu, "nvapi", |target| {
         let out = run(target, QueryNvapiRatedTdp).map_err(to_py_err)?.output;
         Ok(match out {
@@ -6214,6 +6289,8 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(check_voltage_frequency, m)?)?;
     m.add_function(wrap_pyfunction!(set_clock_offset, m)?)?;
     m.add_function(wrap_pyfunction!(set_power_limit, m)?)?;
+    m.add_function(wrap_pyfunction!(set_rated_tdp, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_rated_tdp, m)?)?;
     m.add_function(wrap_pyfunction!(set_thermal_limit, m)?)?;
     m.add_function(wrap_pyfunction!(reset_thermal_limit, m)?)?;
     m.add_function(wrap_pyfunction!(set_ppab_status, m)?)?;
@@ -6304,6 +6381,29 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rated_tdp_entry_points_are_registered_and_parse_their_arguments() {
+        // Registration is the only thing a CPU-only build can check about the
+        // pyfunctions; the argument parsing they do is the core enum's.
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "m").unwrap();
+            _native(py, &module).unwrap();
+            for name in ["get_rated_tdp", "set_rated_tdp", "reset_rated_tdp"] {
+                assert!(module.getattr(name).is_ok(), "{name} is not registered");
+            }
+        });
+        assert_eq!(
+            nvoc_core::RatedTdpClient::parse("global").unwrap(),
+            nvoc_core::RatedTdpClient::Global
+        );
+        assert_eq!(
+            nvoc_core::RatedTdpAction::parse("FORCE_LIMIT").unwrap(),
+            nvoc_core::RatedTdpAction::Limit
+        );
+        assert!(nvoc_core::RatedTdpClient::parse("rm").is_err());
+    }
 
     #[test]
     fn backend_parsing() {
@@ -6693,14 +6793,13 @@ mod tests {
         // The pairs the entries carry. A table rather than spot checks, because
         // an entry left out of it would keep the platform sentence and no other
         // assertion here would notice.
-        let pairs: [(&str, &str); 6] = [
+        let pairs: [(&str, &str); 5] = [
             ("query_fan_curve", nvoc_core::FAN_CONTROL_UNREADABLE_REASON),
             (
                 "query_power_ceiling",
                 nvoc_core::POWER_POLICY_UNREADABLE_REASON,
             ),
             ("query_dnotifier", nvoc_core::POWER_POLICY_UNREADABLE_REASON),
-            ("get_rated_tdp", nvoc_core::RATED_TDP_UNWIRED_REASON),
             ("get_temp_sim", nvoc_core::THERMAL_SIM_UNREADABLE_REASON),
             (
                 "query_tdp_temp_limits",

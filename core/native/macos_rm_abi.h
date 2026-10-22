@@ -210,7 +210,12 @@ uint32_t nvoc_macos_rm_session_fan(nvoc_rm_session *session, uint32_t kind,
 uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *session, uint32_t kind,
     void *block, size_t size, char *error, size_t cap);
 
-/* Fixed thermal policy GET-info(0,1784B), GET-control(1,1440B), SET(2,1440B).
+/* Fixed RATED_TDP GET(0)/SET(1), 12B {client, action, vPstate}. Client 1..4
+ * (RM=0 is internal) and action 0..4 are checked here as well as in Rust. */
+uint32_t nvoc_macos_rm_session_rated_tdp(nvoc_rm_session *session, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap);
+
+/* Fixed thermal policy GET-info, GET-control(1,1440B), SET(2,1440B).
  * Rust validates the acoustic target and the complete driver-normalized reply. */
 uint32_t nvoc_macos_rm_session_thermal_policy(nvoc_rm_session *session, uint32_t kind,
     void *block, size_t size, char *error, size_t cap);

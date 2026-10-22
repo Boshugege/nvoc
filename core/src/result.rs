@@ -133,6 +133,12 @@ pub enum OperationKind {
     QueryNvapiPmgrVoltageArbiter,
     SetNvapiPmgrVoltageArbiter,
     QueryNvapiRatedTdp,
+    /// macOS RM RATED_TDP arbitration read (one client).
+    GetRatedTdp,
+    /// macOS RM RATED_TDP arbitration request.
+    SetRatedTdp,
+    /// macOS RM RATED_TDP back to DEFAULT.
+    ResetRatedTdp,
     SetNvapiBackgroundOcScanner,
     QueryNvapiOcScannerIncomplete,
     // PerfVfeEqu/Var ×4 query kinds withdrawn with the ops (2026-08-26) —
