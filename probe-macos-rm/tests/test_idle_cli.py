@@ -55,8 +55,9 @@ int nvx_stage2_rated_tdp_read(nvx_ctx *c) {
     puts("FAKE ratedtdp");
     return 0;
 }
-int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action) {
-    (void)c; (void)client; (void)action; abort();
+int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action,
+                             int hold_sec) {
+    (void)c; (void)client; (void)action; (void)hold_sec; abort();
 }
 int nvx_stage2_thermal_read(nvx_ctx *c) {
     if (!chain || !c->hSubdevice) abort();

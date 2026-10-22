@@ -4082,7 +4082,12 @@ int nvx_stage3(nvx_ctx *c)
  * only via `--write --rated-tdp-set C:A`. Sequence is mandatory and ordered:
  * pre-record -> arm restore -> SET -> readback. If the pre-record GET fails we
  * refuse to write, because we could not guarantee a restore. */
-int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
+/* RUSD samplers live further down; the hold below needs them here. */
+static int nvx_rusd_gpc_khz(nvx_ctx *c, NvU32 *khz);
+static int nvx_rusd_power_mw(nvx_ctx *c, long *draw, long *enforced);
+
+int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action,
+                             int hold_sec)
 {
     if (NVX_IDLE_ONLY) {
         nvx_emit(c, "V3.4", "rated-tdp-set", 0, NVX_V_GATED,
@@ -4153,6 +4158,28 @@ int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action)
              rated_tdp_action_name((NvU32)r.input), (NvU32)r.input, st2,
              (NvU32)r.vPstateType,
              rated_tdp_action_name(g_rtdp_orig_action), g_rtdp_orig_action);
+
+    /* 4b. hold: the control-block echo only proves storage. While the request
+     * stands, sample what it is supposed to influence -- draw and the enforced
+     * limit -- so "the driver accepted the action" and "the limiter actually
+     * bit" stay different sentences. */
+    if (hold_sec > 0 && st == 0 && st2 == 0 && ok) {
+        for (int t = 1; t <= hold_sec; ++t) {
+            sleep(1);
+            long draw, enforced;
+            NvU32 gpc = 0;
+            int have = nvx_rusd_power_mw(c, &draw, &enforced) == 0;
+            int haveclk = nvx_rusd_gpc_khz(c, &gpc) == 0;
+            nvx_emit(c, "V3.4d", "rated-tdp-hold", 0, have ? NVX_V_OK : NVX_V_SKIP,
+                     "t=+%ds while %s(%u) stands: draw=%s enforced=%s",
+                     t, rated_tdp_action_name(action), action,
+                     have ? "" : "unavailable", have ? "" : "unavailable");
+            if (have)
+                nvx_emit(c, "V3.4e", "rated-tdp-hold-value", 0, NVX_V_OK,
+                         "t=+%ds draw_mw=%ld enforced_mw=%ld gpc_khz=%d",
+                         t, draw, enforced, haveclk ? (int)gpc : -1);
+        }
+    }
 
     /* 5. restore now (proving the round-trip) and disarm; atexit/SIGINT would
      * have done the same had we died in between. */
@@ -4254,6 +4281,27 @@ static int nvx_rusd_gpc_khz(nvx_ctx *c, NvU32 *khz)
                   &sd->clkPublicDomainInfos, &clocks, sizeof clocks) != 0)
         return -1;
     *khz = clocks.info[RUSD_CLK_PUBLIC_DOMAIN_GRAPHICS].actualClkKHz;
+    return 0;
+}
+
+/* Draw and enforced power limit in mW from the mapped RUSD page. Returns -1
+ * when the page is absent; each value is -1 when its own section did not copy.
+ * These are the two numbers a RATED_TDP request is supposed to move, so a hold
+ * samples them rather than the control-block echo. */
+static int nvx_rusd_power_mw(nvx_ctx *c, long *draw, long *enforced)
+{
+    if (!c->rusd) return -1;
+    NV00DE_SHARED_DATA *sd = (NV00DE_SHARED_DATA *)c->rusd;
+    RUSD_POWER_POLICY_STATUS pol;
+    RUSD_POWER_LIMITS pl;
+    *draw = -1;
+    *enforced = -1;
+    if (rusd_copy(&sd->powerPolicyStatus.lastModifiedTimestamp,
+                  &sd->powerPolicyStatus, &pol, sizeof pol) == 0)
+        *draw = (long)pol.info.tgpmW;
+    if (rusd_copy(&sd->powerLimitGpu.lastModifiedTimestamp,
+                  &sd->powerLimitGpu, &pl, sizeof pl) == 0)
+        *enforced = (long)pl.info.enforcedmW;
     return 0;
 }
 

@@ -70,7 +70,8 @@ int nvx_stage2_rated_tdp_read(nvx_ctx *c);
 /* Gated write: RATED_TDP arbitration SET with mandatory pre-record, readback
  * and restore-on-exit. Only reachable as `--write --rated-tdp-set C:A`; it is
  * never sent by the default battery, by `--rated-tdp-read`, or by stage 3. */
-int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action);
+int nvx_stage3_rated_tdp_set(nvx_ctx *c, NvU32 client, NvU32 action,
+                             int hold_sec);
 /* Gated clock-domain offset SET (0x2080d01c): single domain, explicit field
  * offset from the twelve measured value dwords, one minimal step, snapshot ->
  * SET -> same-field readback -> restore -> byte-exact verify.  Never part of

@@ -2494,3 +2494,25 @@ CI最初加载旧扩展导致新契约测试失败，改为显式加载本轮编
 **③ 顺带否证一个候选** ✔：同次 Tier-B 用例发 `0x2080a00b@780`（level-info 的 PERF 非特权分级，§七十四/七十七留下的候选）⇒ **`0x56 NV_ERR_NOT_SUPPORTED`** ⇒ 「换分级字节取 range 列」这条路对 level-info 不成立（`0x2080200b` 基态本身也回 `0x1f`）。
 
 **④ 诚实边界** ✗：①只有一次、单 client GLOBAL、单 action `FORCE_LIMIT`，其它 client（WAR/OS/PROFILE）、其它 action（EXCEED/LOCK/FLOOR）与跨 client 仲裁**未测** ✔；②**功耗效果未观测**——探针 SET 后立刻恢复，观察窗口太短，须补 hold 才能在负载里看 tgp 变化，故本轮不声称"限住了" ✗；③公共 core/CLI/Python **尚未接入**（现有公共面只有 `get-rated-tdp` 读取，没有 set），不把探针能力当产品能力 ✗；④单 client GET 的 input/vPstate 全 0，与 10-17 全 client 扫描（全 `DEFAULT`）一致，不据此推语义 ✔。
+
+## 一百四十三、RATED_TDP `FORCE_LIMIT` 在同负载 A/B/A 里真的钳制了功耗与频率
+
+**① 选择依据** ✔：§一百四十二只证明了"接受并恢复"，没证明"限住了"。要在负载里看效果就得让请求在采样期间持续存在，而探针原本 SET 后立刻恢复；因此补的是一个纯观察用的 `--rated-tdp-hold N`（1..60 s），不改写入路径本身，恢复仍由已武装的 pre-record 快照负责。
+
+**② 方法** ✔：三段完全相同的 NVK 负载（`--vulkan-only --duration 22`，重默认 1280x720/128/16/262144），每段 t≈3 s 发单 client 单 action 受控写并 hold 5 s：A=`DEFAULT`（stock 对照）、B=`FORCE_LIMIT`、A2=`DEFAULT`（可逆）。hold 逐秒采样 RUSD 的 `tgpmW`／`enforcedmW`／`gpc`。
+
+**③ 证据（测试机，三段各 rc=0）** ✔：`stage-ratedtdp-hold-20261022T010926Z/`。
+
+| 段 | 实测功耗 mW（5 样本） | gpc kHz |
+| --- | --- | --- |
+| A | 13221 13360 13462 13120 12978 | 1950000 ×5 |
+| B | 11966 11977 11976 11956 11950 | 1755000 ×5 |
+| A2 | 13408 13204 13348 13208 12868 | 1950000 1950000 1935000 1935000 1935000 |
+
+B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且频率同时被钳到 1755000 kHz ⇒ 是限电器生效而非噪声 ✔。三段都保持 pre-record→SET`NV_OK`→回读一致→`SET 0x0, GET 0x0 (verified)` 恢复。
+
+**④ 一条反直觉记录** ✔：三段 `enforced_mw` 始终 `100000`。即 RATED_TDP 的 action 改的是**仲裁结果**，并不改写 RUSD `enforcedmW` 字段本身 —— 拿 `enforcedmW` 当"RATED_TDP 是否生效"的读数会误判，得看实测功耗与频率。
+
+**⑤ 诚实边界** ✗：单 client GLOBAL、单 action、每段 5 样本、同一负载形状，不称稳定度认证 ✔；未测 EXCEED/LOCK/FLOOR、未测与 board power limit 的仲裁冲突、未在关闭 Boost 下复跑 ✗；公共 core/CLI/Python 仍未接入（公共 `get-rated-tdp` 是 NVAPI 读数面，不是这条 RM 写）✗；`--rated-tdp-hold` 只服务观察，不支持进程内取消 ✗。
+
+**⑥ 静态佐证** ✔：`0x2080e06f` 行 `+0x10` pFunc → IDA `0x1547890`，函数按 `lw a5,0(a1)` 收 client、`lw a3,4(a1)` 收 vPstate，逐值比较后返 `0x1f`(非法)/`0x56`(不支持)/`0x0`，并 `jalr` 到更深一层 helper —— 与实测的"校验严格、合法参数才 `NV_OK`"一致。脚本 `outputs/clock-protocol-20261021/ida-rated-tdp.py`、`.txt`、`ida-rated-tdp-2.txt`（本轮新增，未入仓库）。

@@ -212,6 +212,8 @@ static void usage(void)
         "                   (paramSize, stamp, seed) triple, no size sweep\n"
         "                   census (paramSize oracle scan; SET twins never sent)\n"
         "  --rated-tdp-set C:A   gated WRITE: set RATED_TDP client C to action A\n"
+        "  --rated-tdp-hold N   with --rated-tdp-set: sample draw/enforced limit\n"
+        "                      N s (1..60) while the request stands, then restore\n"
         "  --clk-offset-set BIT:OFF:DELTA[:bump]\n"
         "  --clk-offset-hold N  with a SET: sample the live clock N s while the\n"
         "                       offset is applied, before restoring\n"
@@ -240,7 +242,7 @@ int main(int argc, char **argv)
     const char *stages = "012";
     const char *jsonl_path = NULL;
     int want_write = 0, sample_sec = 0, quiet = 0, explicit_gpu = 0;
-    int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0;
+    int tierb_read = 0, rated_tdp_read = 0, rated_tdp_set = 0, rtdp_hold = 0;
     int clk_offset_set = 0;
     unsigned clkoff_bit = 0, clkoff_off = 0;
     int clkoff_delta = 0, clkoff_bump = 0, clkoff_hold = 0;
@@ -302,6 +304,14 @@ int main(int argc, char **argv)
                 return 2;
             }
             rated_tdp_set = 1;
+        }
+        else if (!strcmp(argv[i], "--rated-tdp-hold") && i + 1 < argc) {
+            unsigned long long v;
+            if (parse_number(argv[++i], 60, &v) != 0 || v < 1) {
+                fprintf(stderr, "invalid --rated-tdp-hold (want 1..60 s)\n");
+                return 2;
+            }
+            rtdp_hold = (int)v;
         }
         else if (!strcmp(argv[i], "--clk-offset-arm")) {
             fprintf(stderr, "--clk-offset-arm is unsafe: record +8 selects units, "
@@ -505,7 +515,8 @@ int main(int argc, char **argv)
 
     if (rated_tdp_set) {
         if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
-        if (nvx_stage3_rated_tdp_set(&g_ctx, rtdp_client, rtdp_action) != 0) rc = 1;
+        if (nvx_stage3_rated_tdp_set(&g_ctx, rtdp_client, rtdp_action, rtdp_hold) != 0)
+            rc = 1;
     }
 
     if (clk_offset_set) {
