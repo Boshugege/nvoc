@@ -111,9 +111,15 @@ mod control {
             || word(status, 32) > 65536
             || word(control, 40) > 65536
         {
-            return Err(Error::Custom(
-                "fan percentage range or value differs from validated 0..100 percent".into(),
-            ));
+            // Name the field that left the contract: a bare range complaint on a
+            // live board does not say which side of the pair drifted.
+            return Err(Error::Custom(format!(
+                "fan percentage range or value differs from validated 0..100 percent (status min {} / max {} / current {}, control target {})",
+                word(status, 24),
+                word(status, 28),
+                word(status, 32),
+                word(control, 40)
+            )));
         }
         Ok(FanControlSettings {
             slot: 0,
