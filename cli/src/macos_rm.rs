@@ -88,6 +88,10 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             // The domain enumeration and its per-domain readings are two
             // private read-only CLK controls; both answer here.
             | Command::GetClockDomain
+            // The locked-clock pair is one private control in both directions;
+            // the window itself is validated before discovery.
+            | Command::GetGpuLockedClocks
+            | Command::SetGpuLockedClocks
             | Command::GetPowerSource
             | Command::SetPowerSource
             | Command::ResetPowerSource
@@ -112,7 +116,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, set-fanstop-status on|off, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source, get-clock-domain. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, set-fanstop-status on|off, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source, get-clock-domain, get-gpu-locked-clocks --min-mhz N --max-mhz N, set-gpu-locked-clocks --min-mhz N --max-mhz N. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -129,13 +133,15 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     let thermal_write = thermal_write_request(invocation, command)?;
     let rated_tdp_write = rated_tdp_write_request(invocation, command)?;
     let power_state_write = power_state_write_request(invocation, command)?;
+    let lock_write = locked_window_request(invocation, command)?;
     let _interrupt = (write.is_some()
         || power_write.is_some()
         || fan_write.is_some()
         || thermal_write.is_some()
         || rated_tdp_write.is_some()
-        || power_state_write.is_some())
-    .then(InterruptGuard::install);
+        || power_state_write.is_some()
+        || (lock_write.is_some() && command == Command::SetGpuLockedClocks))
+        .then(InterruptGuard::install);
     let inventory = discover_targets(BackendSet::MacosRm)?;
     let targets = inventory.targets();
     let selected = select_targets(&targets, &gpu_selector(invocation))?;
@@ -169,6 +175,25 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "domain": domain_label(domain), "offset_mhz": f64::from(report.applied_khz)/1000.0,
                         "offset_khz": report.applied_khz, "original_offset_khz": report.original_khz,
                         "readback_verified": report.readback_verified, "other_bytes_preserved": report.other_bytes_preserved})
+                }
+                Command::GetGpuLockedClocks => {
+                    let request = lock_write
+                        .clone()
+                        .ok_or_else(|| CliError::new("missing locked-clock window"))?;
+                    let windows = run(&target, nvoc_core::QueryMacosRmLockedClocks { request })?.output;
+                    json!({"applied": false, "backend": "macos-rm", "mode": "locked-clocks",
+                        "windows": locked_windows_json(&windows)})
+                }
+                Command::SetGpuLockedClocks => {
+                    let request = lock_write
+                        .clone()
+                        .ok_or_else(|| CliError::new("missing locked-clock window"))?;
+                    let report = run(&target, nvoc_core::SetMacosRmLockedClocks { request })?.output;
+                    json!({"applied": true, "backend": "macos-rm", "mode": "locked-clocks",
+                        "windows": locked_windows_json(&report.applied),
+                        "requested": locked_windows_json(&report.requested),
+                        "snapshot": locked_windows_json(&report.snapshot),
+                        "readback_verified": true, "restored_on_mismatch": true})
                 }
                 Command::SetPowerLimit | Command::ResetPowerLimit => {
                     let report = run(&target, nvoc_core::SetMacosRmPowerLimit {
@@ -599,6 +624,99 @@ fn clock_write_request(
     Ok(Some((domain, khz)))
 }
 
+/// One `--domain` value for the locked-clock entries: a name, `bitN`, or the
+/// bit itself. The device answers single bits only, so a mask is refused here
+/// rather than sent and rejected with `0x1f`.
+fn locked_domain(value: &str) -> CliResult<u32> {
+    let bit = match value {
+        "graphics" => nvoc_core::macos_lock::DOMAIN_GRAPHICS,
+        other => match other.strip_prefix("bit") {
+            Some(rest) => rest.trim().parse::<u32>().map_err(|_| {
+                CliError::new(format!(
+                    "--domain {other} is not a domain name or bit number"
+                ))
+            })?,
+            None => other.trim().parse::<u32>().map_err(|_| {
+                CliError::new(format!(
+                    "--domain {other} is not a domain name or bit number"
+                ))
+            })?,
+        },
+    };
+    if !nvoc_core::is_single_bit(bit) {
+        return Err(CliError::new(format!(
+            "--domain 0x{bit:x} is not a single domain bit"
+        )));
+    }
+    Ok(bit)
+}
+
+/// The locked-clock window both entries take. Both bounds are required: the
+/// driver validates the pair, and a zero bound is refused with `0xd`, so there is
+/// nothing sensible to default to.
+fn locked_window_request(
+    invocation: &Invocation,
+    command: Command,
+) -> CliResult<Option<Vec<nvoc_core::LockWindow>>> {
+    if !matches!(
+        command,
+        Command::GetGpuLockedClocks | Command::SetGpuLockedClocks
+    ) {
+        return Ok(None);
+    }
+    let domain = match option_one(invocation, "domain") {
+        Some(value) => locked_domain(value)?,
+        None => nvoc_core::macos_lock::DOMAIN_GRAPHICS,
+    };
+    let pstate = match option_one(invocation, "pstate") {
+        Some(value) => {
+            // `--pstate` is shared with the NVAPI entries, so P0/P8 is accepted
+            // as well as the bare number the field carries.
+            let digits = value.trim().trim_start_matches(['P', 'p']);
+            digits
+                .parse::<u8>()
+                .ok()
+                .filter(|pstate| *pstate <= 15)
+                .ok_or_else(|| CliError::new(format!("--pstate {value} is not P0..P15")))?
+        }
+        None => 8,
+    };
+    let bound = |name: &str| -> CliResult<u32> {
+        let raw = option_one(invocation, name).ok_or_else(|| {
+            CliError::new(format!(
+                "missing --{name} (kHz is the block unit; the option is MHz)"
+            ))
+        })?;
+        let mhz = parse_u32_unit(raw, "mhz", "mhz")?;
+        if mhz == 0 {
+            return Err(CliError::new(format!("--{name} must be above zero")));
+        }
+        Ok(mhz.saturating_mul(1000))
+    };
+    let window = nvoc_core::LockWindow::new(pstate, domain, bound("min-mhz")?, bound("max-mhz")?);
+    Ok(Some(vec![window]))
+}
+
+/// JSON for one window list. `state` stays off the acknowledged shape and is
+/// only added by a caller that has something to say about the entry.
+fn locked_windows_json(windows: &[nvoc_core::LockWindow]) -> serde_json::Value {
+    serde_json::Value::Array(
+        windows
+            .iter()
+            .map(|window| {
+                json!({
+                    "domain": nvoc_core::domain_name(window.domain),
+                    "domain_bit": format!("0x{:x}", window.domain),
+                    "pstate": window.pstate,
+                    "min_khz": window.min_khz,
+                    "max_khz": window.max_khz,
+                    "text": window.to_string(),
+                })
+            })
+            .collect(),
+    )
+}
+
 /// The `--plan-delta` half of the offset entry: one request, published as the
 /// shared plan document the optimizer and the Python bindings publish.
 fn offset_plan_json(
@@ -1027,6 +1145,93 @@ mod tests {
             Command::GetClockDomain.spec().adapters,
             [BackendAdapter::Nvml]
         ));
+    }
+
+    #[test]
+    fn the_locked_clock_entries_are_allowed_and_parse_their_window() {
+        assert!(validate(Command::GetGpuLockedClocks).is_ok());
+        assert!(validate(Command::SetGpuLockedClocks).is_ok());
+        for command in [Command::GetGpuLockedClocks, Command::SetGpuLockedClocks] {
+            assert!(matches!(command.spec().adapters, [BackendAdapter::Nvml]));
+        }
+    }
+
+    /// Build an invocation for the locked-clock entries: `args` come in
+    /// `--name value` pairs, which is exactly how `option_one` reads them.
+    fn lock_invocation(command: Command, args: &[&str]) -> Invocation {
+        let mut invocation = Invocation {
+            backend: crate::BackendChoice::Auto,
+            output: crate::OutputFormat::Human,
+            no_color: true,
+            nvml_path: None,
+            nvapi_path: None,
+            gpu_specs: vec![],
+            command: Some(command),
+            positionals: vec![],
+            options: Default::default(),
+        };
+        for pair in args.chunks(2) {
+            let name = pair[0].trim_start_matches("--").to_string();
+            invocation.options.insert(name, vec![pair[1].to_string()]);
+        }
+        invocation
+    }
+
+    #[test]
+    fn a_window_needs_both_bounds_and_defaults_to_graphics_vp8() {
+        let empty = lock_invocation(Command::SetGpuLockedClocks, &[]);
+        assert!(locked_window_request(&empty, Command::SetGpuLockedClocks).is_err());
+        let half = lock_invocation(Command::SetGpuLockedClocks, &["--min-mhz", "500"]);
+        assert!(locked_window_request(&half, Command::SetGpuLockedClocks).is_err());
+        let window = locked_window_request(
+            &lock_invocation(
+                Command::SetGpuLockedClocks,
+                &["--min-mhz", "500", "--max-mhz", "1600"],
+            ),
+            Command::SetGpuLockedClocks,
+        )
+        .expect("parses")
+        .expect("a window");
+        assert_eq!(
+            window,
+            vec![nvoc_core::LockWindow::new(8, 1, 500_000, 1_600_000)]
+        );
+    }
+
+    #[test]
+    fn a_domain_name_bit_and_pstate_prefix_are_understood() {
+        let window = locked_window_request(
+            &lock_invocation(
+                Command::GetGpuLockedClocks,
+                &[
+                    "--domain",
+                    "bit16",
+                    "--pstate",
+                    "P4",
+                    "--min-mhz",
+                    "1",
+                    "--max-mhz",
+                    "2",
+                ],
+            ),
+            Command::GetGpuLockedClocks,
+        )
+        .expect("parses")
+        .expect("a window");
+        assert_eq!(window, vec![nvoc_core::LockWindow::new(4, 16, 1000, 2000)]);
+        assert_eq!(locked_domain("graphics").expect("name"), 1);
+        assert!(locked_domain("3").is_err(), "a mask is not a bit");
+        assert!(
+            locked_window_request(
+                &lock_invocation(
+                    Command::GetGpuLockedClocks,
+                    &["--min-mhz", "0", "--max-mhz", "2"],
+                ),
+                Command::GetGpuLockedClocks
+            )
+            .is_err(),
+            "a zero bound is refused before the device sees it"
+        );
     }
 
     #[test]

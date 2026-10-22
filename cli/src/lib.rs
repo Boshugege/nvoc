@@ -153,6 +153,7 @@ pub enum OutputFormat {
 pub enum Command {
     List,
     GetGpuList,
+    GetGpuLockedClocks,
     GetDisplayList,
     GetInfo,
     GetUuid,
@@ -227,6 +228,7 @@ pub enum Command {
     SetFanSpeed,
     SetFreqLock,
     SetGpcVoltLock,
+    SetGpuLockedClocks,
     OemOcScanner,
     SetPrivateForcedPstateLockUser,
     ResetPrivateForcedPstateLockUser,
@@ -558,6 +560,16 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 CommandSpec {
                     adapters: &BOTH_BACKENDS,
                     ..CommandSpec::new("get-gpu-list", Group::Info, "List discovered GPUs and available backends")
+                },
+            ),
+            (
+                Command::GetGpuLockedClocks,
+                CommandSpec {
+                    adapters: &NVML_ONLY,
+                    arity: (0, 0),
+                    options: Box::leak(Box::new(["domain", "pstate", "min-mhz", "max-mhz"])),
+                    formatter: Some(output::format_locked_clocks),
+                    ..CommandSpec::new("get-gpu-locked-clocks", Group::Clock, "Read the locked min/max window the macOS RM driver answers for one domain and vPstate; needs both bounds because the driver validates the pair (macOS RM only)")
                 },
             ),
             (
@@ -1044,6 +1056,16 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     "VFP point index or voltage, for example 42, 900mV, or 900000uV",
                 )])),
                     ..CommandSpec::new("set-gpc-volt-lock", Group::Voltage, "Lock VFP by point or voltage")
+                },
+            ),
+            (
+                Command::SetGpuLockedClocks,
+                CommandSpec {
+                    adapters: &NVML_ONLY,
+                    arity: (0, 0),
+                    options: Box::leak(Box::new(["domain", "pstate", "min-mhz", "max-mhz"])),
+                    formatter: Some(output::format_locked_clocks),
+                    ..CommandSpec::new("set-gpu-locked-clocks", Group::Clock, "Write the locked min/max window for one domain and vPstate as snapshot/SET/readback/rollback; --domain defaults to graphics and --pstate to 8 (macOS RM only, root)")
                 },
             ),
             (
@@ -2031,7 +2053,7 @@ fn command_specific_arg(name: &'static str) -> Arg {
             .value_name("DOMAIN")
             .action(ArgAction::Append)
             .global(true)
-            .help("Domain selector, meaning depends on the command: clock domain (core/memory/processor/video), gpu|acoustic (set-temp-limit NVML path), core|mem (set-legacy-freq), gpc|xbar|msd|disp|mem|gpc_pre_oc|gpc_oc (private-vftable commands; legacy sys/host alias msd), or a 0-3 clock-domain index (get-pstate-lock; 0=GPC/core, 2=memory)"),
+            .help("Domain selector, meaning depends on the command: clock domain (core/memory/processor/video), gpu|acoustic (set-temp-limit NVML path), core|mem (set-legacy-freq), gpc|xbar|msd|disp|mem|gpc_pre_oc|gpc_oc (private-vftable commands; legacy sys/host alias msd), or a 0-3 clock-domain index (get-pstate-lock; 0=GPC/core, 2=memory), or a domain name/bitN for the gpu locked-clock commands (graphics, bit8, ...)"),
         "output-csv" => Arg::new("output-csv")
             .long("output-csv")
             .value_name("PATH")
@@ -2048,6 +2070,16 @@ fn command_specific_arg(name: &'static str) -> Arg {
             .action(ArgAction::Append)
             .global(true)
             .help("P-State such as P0 or P2"),
+        "min-mhz" => Arg::new("min-mhz")
+            .long("min-mhz")
+            .value_name("MHZ")
+            .action(ArgAction::Set)
+            .help("Locked-clock window floor in MHz (the block carries kHz; a zero bound is refused by the driver)"),
+        "max-mhz" => Arg::new("max-mhz")
+            .long("max-mhz")
+            .value_name("MHZ")
+            .action(ArgAction::Set)
+            .help("Locked-clock window ceiling in MHz, same unit and rules as --min-mhz"),
         "plan-delta" => Arg::new("plan-delta")
             .long("plan-delta")
             .value_name("DELTA")
@@ -3040,6 +3072,14 @@ fn execute_target(
         Command::GetClockDomain => Err(CliError::new(
             "get-clock-domain is unavailable on this backend: it enumerates the macOS RM \
              clock-domain bits (0x20809001) and reads each live frequency (0x20809006)",
+        )),
+        Command::GetGpuLockedClocks => Err(CliError::new(
+            "get-gpu-locked-clocks is unavailable on this backend: it reads the macOS RM \
+             locked min/max window (0x20809014)",
+        )),
+        Command::SetGpuLockedClocks => Err(CliError::new(
+            "set-gpu-locked-clocks is unavailable on this backend: it writes the macOS RM \
+             locked min/max window (0x2080d041)",
         )),
         Command::GetPStateLock => {
             // Native NVAPI P-State level table (the ref tool `-pstate` GET listing).
@@ -8738,6 +8778,8 @@ mod tests {
             | Command::GetPstateGlobalFreqOffset
             | Command::GetPstateFreqRange
             | Command::GetClockDomain
+            | Command::GetGpuLockedClocks
+            | Command::SetGpuLockedClocks
             | Command::GetPstates20Private
             | Command::GetSupportedLegacyApplicationFreq
             | Command::GetFanInfo

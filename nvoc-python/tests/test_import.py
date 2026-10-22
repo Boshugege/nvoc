@@ -24,6 +24,8 @@ EXPECTED_EXPORTS = [
     "discover_gpus",
     "force_wake",
     "get_clock_domain",
+    "get_gpu_locked_clocks",
+    "set_gpu_locked_clocks",
     "get_core_voltage_control",
     "get_display_list",
     "get_oc_scanner_incomplete",

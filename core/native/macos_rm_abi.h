@@ -34,7 +34,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define NVOC_RM_ABI_VERSION 4u
+#define NVOC_RM_ABI_VERSION 5u
 
 /* Per-section status codes carried in nvoc_rm_sample.field_status. */
 /* The section was copied under a stable, data-valid sequence. */
@@ -200,6 +200,14 @@ uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, v
  * entire transaction and validates identity/mode/range. SET requires root and
  * forwards only record index zero (graphics) or two (memory); it never accepts an arbitrary RM id. */
 uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *session, uint32_t index, uint32_t write,
+    void *block, size_t size, char *error, size_t cap);
+
+/* Locked clocks: the caller builds the whole 648-byte block for both
+ * directions, so the native side only chooses the id (0x20809014 query,
+ * 0x2080d041 write) and guards root. SET echoes the snapped values back into
+ * the same buffer, which is what the readback compares against. */
+#define NVOC_RM_LOCK_BLOCK_BYTES 648
+uint32_t nvoc_macos_rm_session_locked_clocks(nvoc_rm_session *session, uint32_t write,
     void *block, size_t size, char *error, size_t cap);
 
 /* Clock-domain enumeration: fills 4-byte mask, 32 kHz words, 32 statuses

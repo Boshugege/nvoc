@@ -685,6 +685,26 @@ uint32_t nvoc_macos_rm_session_clock_domains(nvoc_rm_session *s, void *out, size
     return 0;
 }
 
+/* Locked clocks. The 648-byte block is the probe's measurement: dword 0 is the
+ * format word (1 on every accepted request), dword 1 is the entry count (1..31),
+ * then 20-byte entries whose first four dwords are {vPstate, domain bit, min kHz,
+ * max kHz} and whose fifth stays zero. The driver
+ * snaps the bounds onto the domain's own table and refuses a window whose bounds
+ * are zero, so the Rust side seeds the block for both directions and this only
+ * picks the id: 0x20809014 is the query, 0x2080d041 the write. */
+uint32_t nvoc_macos_rm_session_locked_clocks(nvoc_rm_session *s, uint32_t write, void *block,
+                                             size_t size, char *error, size_t cap)
+{
+    uint32_t status;
+    if (!s || !block || write > 1u || size != NVOC_RM_LOCK_BLOCK_BYTES)
+        return failure(error, cap, "locked-clocks ABI arguments", UINT32_MAX);
+    if (write && geteuid() != 0)
+        return failure(error, cap, "locked-clocks SET requires root", 0x1bu);
+    status = nvx_rm_control(s->ctl, s->client, s->subdevice,
+                            write ? 0x2080d041u : 0x20809014u, block, (uint32_t) size);
+    return status ? failure(error, cap, write ? "locked-clocks SET" : "locked-clocks GET", status) : 0;
+}
+
 /* Board-policy power contract: exact Linux610 NVML requests, never an arbitrary id. */
 uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *s, uint32_t kind,
     void *block, size_t size, char *error, size_t cap)

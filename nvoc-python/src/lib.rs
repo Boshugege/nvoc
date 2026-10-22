@@ -3203,6 +3203,91 @@ fn get_clock_domain(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
     py_value(py, &value)
 }
 
+/// Read the locked-clock window the driver answers for one domain/vPstate.
+///
+/// The device validates the min/max pair, so both bounds are required in kHz --
+/// the unit the control block carries. Nothing is written.
+#[pyfunction]
+fn get_gpu_locked_clocks(
+    py: Python<'_>,
+    gpu: &str,
+    domain: u32,
+    pstate: u8,
+    min_khz: u32,
+    max_khz: u32,
+) -> PyResult<Py<PyAny>> {
+    let request = vec![nvoc_core::LockWindow::new(pstate, domain, min_khz, max_khz)];
+    let value = with_target(gpu, "macos-rm", |target| {
+        let windows = run(
+            target,
+            nvoc_core::QueryMacosRmLockedClocks {
+                request: request.clone(),
+            },
+        )
+        .map_err(to_py_err)?
+        .output;
+        Ok(value_object([
+            ("backend", Value::from("macos-rm")),
+            ("applied", Value::from(false)),
+            ("windows", locked_windows_value(&windows)),
+        ]))
+    })?;
+    py_value(py, &value)
+}
+
+/// Write the locked-clock window for one domain/vPstate.
+///
+/// The write re-reads the normalised snapshot first, verifies the full readback
+/// and restores the snapshot when the readback differs; a failed restore is
+/// reported instead of swallowed.
+#[pyfunction]
+fn set_gpu_locked_clocks(
+    py: Python<'_>,
+    gpu: &str,
+    domain: u32,
+    pstate: u8,
+    min_khz: u32,
+    max_khz: u32,
+) -> PyResult<Py<PyAny>> {
+    let request = vec![nvoc_core::LockWindow::new(pstate, domain, min_khz, max_khz)];
+    let value = with_target(gpu, "macos-rm", |target| {
+        let report = run(
+            target,
+            nvoc_core::SetMacosRmLockedClocks {
+                request: request.clone(),
+            },
+        )
+        .map_err(to_py_err)?
+        .output;
+        Ok(value_object([
+            ("backend", Value::from("macos-rm")),
+            ("applied", Value::from(true)),
+            ("windows", locked_windows_value(&report.applied)),
+            ("snapshot", locked_windows_value(&report.snapshot)),
+            ("readback_verified", Value::from(true)),
+        ]))
+    })?;
+    py_value(py, &value)
+}
+
+/// The one shared shape both locked-clock entries publish.
+fn locked_windows_value(windows: &[nvoc_core::LockWindow]) -> Value {
+    Value::Array(
+        windows
+            .iter()
+            .map(|window| {
+                value_object([
+                    ("domain", Value::from(nvoc_core::domain_name(window.domain))),
+                    ("domain_bit", Value::from(window.domain)),
+                    ("pstate", Value::from(window.pstate)),
+                    ("min_khz", Value::from(window.min_khz)),
+                    ("max_khz", Value::from(window.max_khz)),
+                ])
+            })
+            .collect(),
+    )
+}
+
 /// Tell the performance controller which power source it is on.
 ///
 /// Successful writes persist; errors and cancellation restore the original
@@ -6474,6 +6559,8 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_rated_tdp, m)?)?;
     m.add_function(wrap_pyfunction!(reset_rated_tdp, m)?)?;
     m.add_function(wrap_pyfunction!(get_clock_domain, m)?)?;
+    m.add_function(wrap_pyfunction!(get_gpu_locked_clocks, m)?)?;
+    m.add_function(wrap_pyfunction!(set_gpu_locked_clocks, m)?)?;
     m.add_function(wrap_pyfunction!(get_power_source, m)?)?;
     m.add_function(wrap_pyfunction!(set_power_source, m)?)?;
     m.add_function(wrap_pyfunction!(reset_power_source, m)?)?;
@@ -6577,6 +6664,8 @@ mod tests {
             let module = PyModule::new(py, "m").unwrap();
             _native(py, &module).unwrap();
             assert!(module.getattr("get_clock_domain").is_ok());
+            assert!(module.getattr("get_gpu_locked_clocks").is_ok());
+            assert!(module.getattr("set_gpu_locked_clocks").is_ok());
         });
     }
 

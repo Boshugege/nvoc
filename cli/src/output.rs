@@ -313,6 +313,53 @@ pub(super) fn format_clock_domain(output: &Value) -> Vec<String> {
     lines
 }
 
+/// Human renderer for `get-gpu-locked-clocks` / `set-gpu-locked-clocks`: one
+/// line per window, with the requested bound next to the value the driver kept
+/// so a snapped window is visible instead of implied.
+pub(super) fn format_locked_clocks(output: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(applied) = output.get("applied").and_then(Value::as_bool) {
+        lines.push(format!("applied: {applied}"));
+    }
+    if let Some(entries) = output.get("windows").and_then(Value::as_array) {
+        lines.push(format!(
+            "{:<10} {:>4} {:>10} {:>10} {}",
+            "domain", "vP", "min MHz", "max MHz", "state"
+        ));
+        for entry in entries {
+            let mhz = |key: &str| {
+                entry.get(key).and_then(Value::as_u64).map_or_else(
+                    || "-".to_string(),
+                    |khz| format!("{:.3}", khz as f64 / 1000.0),
+                )
+            };
+            lines.push(format!(
+                "{:<10} {:>4} {:>10} {:>10} {}",
+                entry.get("domain").and_then(Value::as_str).unwrap_or("?"),
+                entry.get("pstate").and_then(Value::as_u64).unwrap_or(0),
+                mhz("min_khz"),
+                mhz("max_khz"),
+                entry.get("state").and_then(Value::as_str).unwrap_or("ok"),
+            ));
+        }
+    }
+    if let Some(snapshot) = output.get("snapshot").and_then(Value::as_array) {
+        let rendered: Vec<String> = snapshot
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .collect();
+        if !rendered.is_empty() {
+            lines.push(format!("snapshot: {}", rendered.join(", ")));
+        }
+    }
+    lines
+}
+
 /// Human renderer for `get-private-legacy-pstates20-freq-domain-info` — the private pstates-2.0
 /// delta table (GetPstates20Private 0xC5DDF56E). All numbers are RAW table
 /// words (no unit conversion): `delta_raw` is in the table's native units

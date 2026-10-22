@@ -3,6 +3,8 @@
 //! Uses the same IOKit transport as the validation probe, linked into this
 //! library. No external probe executable, NVAPI, or NVML runtime is required.
 //! The initial implementation discovers the first service exposed by NullMoth.
+use crate::macos_lock;
+use crate::macos_lock::{LockWindow, LockedClockWriteReport};
 use crate::macos_offset;
 use crate::{ClockDomain, Error, GpuId, PciAddress};
 use serde::Serialize;
@@ -359,6 +361,31 @@ pub struct ClockOffsetView {
     pub restore_khz: i32,
 }
 
+/// Reason recorded for every locked-clock family that needs the write half.
+pub const LOCK_WRITE_NEEDS_PRIVILEGE_REASON: &str = "locked min/max windows are a private SET pair (query 0x20809014, write 0x2080d041) with a measured 648-byte block; the write id sits in the 0xC0-0xFF half the host forwarder refuses below root with 0x1b. Each write re-reads the normalised snapshot first and restores it when the readback differs (see notes)";
+
+/// The locked-clock ids are measured on one identity only, so a write must land
+/// on the same card, driver and RM object the notes were taken on.
+fn check_lock_identity(info: &DeviceInfo, identity: (String, u32, u32)) -> Result<(), Error> {
+    if identity != (info.pci_address.clone(), info.device_id, info.rm_gpu_id)
+        || !offset_writes_supported(info)
+    {
+        return Err(Error::Custom(
+            "gpu locked-clocks requires the validated TU116/610.57.04 identity; rediscover GPUs"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Layout-only check; the driver's own value rules (step table, floors) are
+/// what the preflight read compares against, so nothing is guessed here.
+fn validate_lock_request(request: &[LockWindow]) -> Result<(), Error> {
+    crate::macos_lock::build_block(request)
+        .map(|_| ())
+        .map_err(|err| Error::Custom(format!("gpu locked-clocks request: {err}")))
+}
+
 fn offset_writes_supported(info: &DeviceInfo) -> bool {
     cfg!(all(target_os = "macos", target_arch = "x86_64"))
         && info.vendor_id == 0x10de
@@ -394,7 +421,8 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             "thermal_limit" => THERMAL_LIMIT_UNREADABLE_REASON,
             "voltage_boost" => VOLTAGE_BOOST_UNREADABLE_REASON,
             "power_limit_write" => POWER_WRITE_NEEDS_PRIVILEGE_REASON,
-            "pstate_lock" | "settings_restore" => WRITE_NEEDS_PRIVILEGE_REASON,
+            "pstate_lock" => LOCK_WRITE_NEEDS_PRIVILEGE_REASON,
+            "settings_restore" => WRITE_NEEDS_PRIVILEGE_REASON,
             _ => WRITE_NEEDS_PRIVILEGE_REASON,
         };
         (family.to_string(), reason.to_string())
@@ -1929,6 +1957,89 @@ impl Device {
         Ok(ClockDomainReadout::from_report(report))
     }
 
+    /// Reads the locked-clock window the driver would answer for these keys.
+    ///
+    /// Read-only. The device needs both bounds in the request, so the caller
+    /// supplies them; nothing is written and the answer is the driver's own
+    /// normalisation of the window, not the active lock on other keys.
+    pub fn locked_clocks(
+        &self,
+        request: &[macos_lock::LockWindow],
+    ) -> Result<Vec<macos_lock::LockWindow>, Error> {
+        let snapshot = self.refreshed_snapshot()?;
+        let _ = snapshot;
+        MacosRmSession::open().and_then(|mut session| {
+            check_lock_identity(&self.info, session.identity())?;
+            session.read_locked_clocks(request)
+        })
+    }
+
+    /// Applies a locked-clock window with snapshot, full readback and rollback.
+    ///
+    /// The pre-write read is the normalisation the driver applies to these exact
+    /// values, so it doubles as the expectation the readback must equal and as the
+    /// window to put back: a readback that differs rolls the snapshot back and
+    /// re-reads it, and a failed rollback says so instead of reporting success.
+    pub fn set_locked_clocks(
+        &self,
+        request: &[macos_lock::LockWindow],
+    ) -> Result<LockedClockWriteReport, Error> {
+        validate_lock_request(request)?;
+        let snapshot = self.refreshed_snapshot()?;
+        let _ = snapshot;
+        let mut session = MacosRmSession::open()?;
+        let result = (|| {
+            check_lock_identity(&self.info, session.identity())?;
+            let expected = session.read_locked_clocks(request)?;
+            if let Some((want, got)) = macos_lock::first_difference(request, &expected) {
+                return Err(Error::Custom(format!(
+                    "locked-clock preflight: the driver normalises {want} to {} before any write",
+                    got.map_or_else(|| "nothing".to_string(), |window| window.to_string())
+                )));
+            }
+            session.write_locked_clocks(request)?;
+            let applied = session.read_locked_clocks(request)?;
+            if let Some((want, got)) = macos_lock::first_difference(&expected, &applied) {
+                let rollback: Result<(), String> = (|| {
+                    session
+                        .write_locked_clocks(&expected)
+                        .map_err(|err| err.to_string())?;
+                    let check = session
+                        .read_locked_clocks(&expected)
+                        .map_err(|err| err.to_string())?;
+                    match macos_lock::first_difference(&expected, &check) {
+                        None => Ok(()),
+                        Some((back, now)) => Err(format!(
+                            "restore readback wants {back}, device answers {}",
+                            now.map_or_else(|| "nothing".to_string(), |window| window.to_string())
+                        )),
+                    }
+                })();
+                return Err(Error::Custom(match rollback {
+                    Ok(()) => format!(
+                        "locked-clock readback wants {want} but the device answers {}; the snapshot was restored",
+                        got.map_or_else(|| "nothing".to_string(), |window| window.to_string())
+                    ),
+                    Err(err) => format!(
+                        "locked-clock readback wants {want} but the device answers {}; the restore failed: {err}",
+                        got.map_or_else(|| "nothing".to_string(), |window| window.to_string())
+                    ),
+                }));
+            }
+            Ok(LockedClockWriteReport {
+                requested: request.to_vec(),
+                snapshot: expected,
+                applied,
+            })
+        })();
+        let closed = session.close();
+        match (result, closed) {
+            (Ok(report), Ok(())) => Ok(report),
+            (Ok(_), Err(err)) => Err(err),
+            (Err(err), _) => Err(err),
+        }
+    }
+
     /// Reads the driver-visible configuration without changing anything.
     ///
     /// Telemetry and private control blocks use separate reads. Both sessions
@@ -2146,6 +2257,42 @@ impl crate::GpuOperation for QueryMacosRmClockDomains {
 
     fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
         target.macos_rm()?.clock_domains()
+    }
+}
+
+/// Reads the locked-clock window the driver would answer for the given keys.
+#[derive(Debug, Clone)]
+pub struct QueryMacosRmLockedClocks {
+    pub request: Vec<LockWindow>,
+}
+
+impl crate::GpuOperation for QueryMacosRmLockedClocks {
+    type Output = Vec<LockWindow>;
+
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::QueryGpuStatus
+    }
+
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.macos_rm()?.locked_clocks(&self.request)
+    }
+}
+
+/// Applies a locked-clock window as one snapshot/SET/readback/rollback step.
+#[derive(Debug, Clone)]
+pub struct SetMacosRmLockedClocks {
+    pub request: Vec<LockWindow>,
+}
+
+impl crate::GpuOperation for SetMacosRmLockedClocks {
+    type Output = LockedClockWriteReport;
+
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::SetLockedClocks
+    }
+
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.macos_rm()?.set_locked_clocks(&self.request)
     }
 }
 
@@ -2408,7 +2555,7 @@ impl crate::GpuOperation for QueryMacosRmThermalView {
 /// Version of the private C ABI in core/native/macos_rm_abi.h. Bump both
 /// sides together: the C header pins the same number and the hardware test
 /// compares the two fingerprints.
-const ABI_VERSION: u32 = 4;
+const ABI_VERSION: u32 = 5;
 
 /// Slots returned by [`abi_layout`] and by the native
 /// nvoc_macos_rm_abi_layout(): sizes, field offsets, the ABI version and the
@@ -2684,6 +2831,14 @@ unsafe extern "C" {
     fn nvoc_macos_rm_session_clock_offset(
         handle: *mut SessionOpaque,
         index: u32,
+        write: u32,
+        block: *mut u8,
+        size: usize,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
+    fn nvoc_macos_rm_session_locked_clocks(
+        handle: *mut SessionOpaque,
         write: u32,
         block: *mut u8,
         size: usize,
@@ -4409,6 +4564,81 @@ impl MacosRmSession {
         crate::macos_clock_domains::parse_domains(&block)
     }
 
+    /// One locked-clock transfer in the given direction.
+    ///
+    /// The caller builds the block, so a query and a write carry exactly the same
+    /// bytes; only the id differs. Nothing is retained across calls.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    pub fn transfer_locked_clocks(
+        &mut self,
+        write: bool,
+        block: &mut [u8; macos_lock::BYTES],
+    ) -> Result<(), Error> {
+        let mut error = [0u8; 256];
+        // SAFETY: the session is live, the block is exactly the size the ABI
+        // requires and does not escape the call, and the transport is serialized.
+        let status = unsafe {
+            nvoc_macos_rm_session_locked_clocks(
+                self.handle,
+                u32::from(write),
+                block.as_mut_ptr(),
+                block.len(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Custom(format!(
+                "macOS RM locked clocks {}: {} (0x{status:08x})",
+                if write { "SET" } else { "GET" },
+                text(&error)
+            )));
+        }
+        Ok(())
+    }
+
+    /// Asks the driver to normalise a window and returns what it would take.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    pub fn read_locked_clocks(
+        &mut self,
+        request: &[macos_lock::LockWindow],
+    ) -> Result<Vec<macos_lock::LockWindow>, Error> {
+        let _guard = lock_transport()?;
+        let mut block = macos_lock::build_block(request)
+            .map_err(|err| Error::Custom(format!("locked-clock request: {err}")))?;
+        self.transfer_locked_clocks(false, &mut block)?;
+        macos_lock::parse_block(&block)
+            .map_err(|err| Error::Custom(format!("locked-clock readback: {err}")))
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    pub fn write_locked_clocks(&mut self, request: &[macos_lock::LockWindow]) -> Result<(), Error> {
+        let _guard = lock_transport()?;
+        let mut block = macos_lock::build_block(request)
+            .map_err(|err| Error::Custom(format!("locked-clock request: {err}")))?;
+        self.transfer_locked_clocks(true, &mut block)
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    pub fn read_locked_clocks(
+        &mut self,
+        _request: &[macos_lock::LockWindow],
+    ) -> Result<Vec<macos_lock::LockWindow>, Error> {
+        Err(Error::Custom(
+            "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
+        ))
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    pub fn write_locked_clocks(
+        &mut self,
+        _request: &[macos_lock::LockWindow],
+    ) -> Result<(), Error> {
+        Err(Error::Custom(
+            "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
+        ))
+    }
+
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     pub fn read_clock_domains(
         &mut self,
@@ -4651,13 +4881,17 @@ mod tests {
             );
         }
 
-        // The families that only need a *write* share the privilege cause.
-        for family in ["pstate_lock", "settings_restore"] {
-            assert_eq!(
-                settings.unavailable[family], WRITE_NEEDS_PRIVILEGE_REASON,
-                "{family} should give the privilege cause"
-            );
-        }
+        // `settings_restore` only needs a write, so it keeps the shared
+        // privilege cause; the locked-clock family now has a measured block and
+        // carries its own id pair instead of borrowing that string.
+        assert_eq!(
+            settings.unavailable["pstate_lock"], LOCK_WRITE_NEEDS_PRIVILEGE_REASON,
+            "pstate_lock should give the locked-clock cause"
+        );
+        assert_eq!(
+            settings.unavailable["settings_restore"], WRITE_NEEDS_PRIVILEGE_REASON,
+            "settings_restore should give the privilege cause"
+        );
         // The power-limit write has the privilege cause plus a precondition of
         // its own, so it must not simply borrow the shared string.
         assert_eq!(

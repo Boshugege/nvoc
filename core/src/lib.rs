@@ -54,6 +54,8 @@ pub use macos_thermal_policy::{
     validate_macos_acoustic_target,
 };
 pub mod macos_eval;
+pub mod macos_lock;
+pub use macos_lock::{DOMAINS, LockWindow, domain_name, is_single_bit};
 pub mod macos_offset;
 pub mod macos_rm;
 pub use macos_eval::{
@@ -65,12 +67,13 @@ pub use macos_rm::{
     ABI_LAYOUT_SLOTS, ClockDomainReadout, ClockDomainView, ClockOffsetDomain, ClockOffsetLimits,
     ClockOffsetReading, DeviceInfo, DeviceSample, DeviceSettings, DeviceStatus,
     FAN_CONTROL_UNREADABLE_REASON, FAN_PERCENT_UNREADABLE_REASON, FanCoolerReading, FanReport,
-    FieldState, MACOS_RM_WRITE_GATE_REASON, MONITOR_SECTIONS, MONITOR_STALE_AFTER, MacosRmSession,
-    NamedClockOffset, OffsetStep, OffsetStepTarget, OffsetStepVerdict,
-    POWER_POLICY_UNREADABLE_REASON, PSTATE_FREQ_TABLE_UNREADABLE_REASON, PUBLIC_OFFSET_DOMAINS,
-    QueryMacosRmClockDomains, QueryMacosRmInfo, QueryMacosRmPowerState, QueryMacosRmRatedTdp,
-    QueryMacosRmSettings, QueryMacosRmStatus, QueryMacosRmThermalView, RATED_TDP_UNWIRED_REASON,
-    SetMacosRmAcousticTarget, SetMacosRmClockOffset, SetMacosRmFanControl, SetMacosRmPowerLimit,
+    FieldState, LOCK_WRITE_NEEDS_PRIVILEGE_REASON, MACOS_RM_WRITE_GATE_REASON, MONITOR_SECTIONS,
+    MONITOR_STALE_AFTER, MacosRmSession, NamedClockOffset, OffsetStep, OffsetStepTarget,
+    OffsetStepVerdict, POWER_POLICY_UNREADABLE_REASON, PSTATE_FREQ_TABLE_UNREADABLE_REASON,
+    PUBLIC_OFFSET_DOMAINS, QueryMacosRmClockDomains, QueryMacosRmInfo, QueryMacosRmLockedClocks,
+    QueryMacosRmPowerState, QueryMacosRmRatedTdp, QueryMacosRmSettings, QueryMacosRmStatus,
+    QueryMacosRmThermalView, RATED_TDP_UNWIRED_REASON, SetMacosRmAcousticTarget,
+    SetMacosRmClockOffset, SetMacosRmFanControl, SetMacosRmLockedClocks, SetMacosRmPowerLimit,
     SetMacosRmPowerState, SetMacosRmRatedTdp, SettingsCapabilities,
     THERMAL_LIMIT_UNREADABLE_REASON, THERMAL_SIM_UNREADABLE_REASON,
     THERMAL_THRESHOLDS_UNREADABLE_REASON, TempSensorView, ThermalReadOutcome, ThermalReadout,
