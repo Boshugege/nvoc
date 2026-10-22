@@ -114,6 +114,7 @@ EXPECTED_EXPORTS = [
     "set_perf_freq_cap",
     "set_pmgr_arbiter",
     "set_power_limit",
+    "set_power_source",
     "set_ppab_status",
     "set_pstate_base_voltage",
     "set_pstate_clock_offset",
