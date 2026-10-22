@@ -2,9 +2,12 @@
 
 The shared macOS backend supports the single fitted cooler on the measured
 TU116 / 610.57.04 device. It uses fixed RM controls without loading NVML.
-This is percentage/manual control and firmware auto reset; RPM targets,
-hardware curves remain a separate, unimplemented control. The control record's
-mode word also accepts 2, which is what `set-fanstop-status` writes for stop.
+This is percentage/manual control, firmware auto reset and the firmware stop
+mode. The record carries no RPM channel: an RPM request is translated here into
+the duty fraction through the cooler max RPM the same record publishes (below).
+Hardware curve tables remain a separate, unimplemented control. The control
+record's mode word also accepts 2, which is what `set-fanstop-status` writes for
+stop.
 
 ## Protocol source
 
@@ -41,6 +44,7 @@ Offsets below are from the start of the entire block, for cooler 0 only.
 | Control +16 | ordinary GET selector 0; default GET echoes selector 1 |
 | Control +20 | measured control type 3 |
 | Control +36 | u32 mode: 0 firmware auto, 1 manual, 2 stop (accepted, echoed) |
+| Control +32 | cooler max RPM, constant calibration: 2800 on this board |
 | Control +40 | requested percentage fraction, Q16 |
 
 The NVML writer uses `round(percent * 65536 / 100)`, implemented for integer
@@ -55,8 +59,30 @@ percentage to an integer; extended settings retain fractional current and target
 percentages. No PWM or RPM-target meaning is inferred from these values.
 
 The control record stride in the NVML implementation is 60 bytes, beginning at
-byte 20. Calibration and all other records are preserved; fields such as +32,
-+48, +60 and +64 are not reinterpreted as writable RPM or policy parameters.
+byte 20. Calibration and all other records are preserved; fields such as +48,
++60 and +64 are not reinterpreted as writable RPM or policy parameters.
+
+## RPM is a translation, not a channel
+
+Mode 3 is accepted by the control record but is not an RPM channel: with 3000,
+1200 and 3000-into-two-fields in the record, the driver normalised every write
+back to mode 1 with a fixed 50 percent target (`+40 = 0x8000`), and the fan
+settled at 1398-1406 RPM each time. A 100 percent write reads back 2795-2807
+RPM, so +32 (2800) is the cooler's full-scale RPM, constant in auto and manual
+alike.
+
+`--rpm` therefore scales by +32, rounds to nearest, clamps at full scale and
+sends the ordinary mode-1 duty write: 1800 asks for 64.285%, which measures 1807
+RPM. The mapping follows the fan's own rpm/duty curve rather than the linear
+estimate, and runs high at the bottom of the range (700 asks for 25%, which
+measures 946). 25% is above the start duty on this board, so a low RPM request
+does not park the fan; mode 2 is still the stop.
+
+The status duty feedback is a live, non-atomic measurement. At a 65536 request
+it returns a few hundred Q16 units above full scale (measured 65559), and a
+block caught mid-transition during an auto restore held 893490. Structural
+checks stay strict, but the reading is clamped to 100 percent below a 32x
+ceiling so neither can fail a command.
 
 ## Transaction and public consumers
 
