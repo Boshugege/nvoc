@@ -267,6 +267,39 @@ pub(super) fn format_pstate_freq_range(output: &Value) -> Vec<String> {
     )
 }
 
+/// Human renderer for `get-clock-domain` — the enumeration mask plus one row
+/// per reported bit. A refused bit prints its RM status in the kHz column
+/// instead of a blank, so "the driver said no" never looks like zero.
+pub(super) fn format_clock_domain(output: &Value) -> Vec<String> {
+    let mask = output
+        .get("mask")
+        .and_then(Value::as_u64)
+        .map(|mask| format!("domain mask 0x{mask:08X}"))
+        .unwrap_or_else(|| "domain mask unavailable".to_string());
+    let mut lines = vec![mask];
+    if let Some(domains) = output.get("domains").and_then(Value::as_array) {
+        lines.push(format!("{:<10} {:>12} {}", "bit", "MHz", "state"));
+        for domain in domains {
+            let bit = domain
+                .get("domain_bit")
+                .and_then(Value::as_u64)
+                .map(|bit| bit.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let mhz = domain
+                .get("clock_mhz")
+                .and_then(Value::as_f64)
+                .map(|mhz| format!("{mhz:.3}"))
+                .unwrap_or_else(|| "-".to_string());
+            let state = match domain.get("reason").and_then(Value::as_str) {
+                Some(reason) => format!("refused {reason}"),
+                None => "ok".to_string(),
+            };
+            lines.push(format!("{bit:<10} {mhz:>12} {state}"));
+        }
+    }
+    lines
+}
+
 /// Human renderer for `get-private-legacy-pstates20-freq-domain-info` — the private pstates-2.0
 /// delta table (GetPstates20Private 0xC5DDF56E). All numbers are RAW table
 /// words (no unit conversion): `delta_raw` is in the table's native units
@@ -4512,6 +4545,13 @@ mod tests {
             Command::GetPstateGlobalFreqOffset => {
                 json!({"domain": "graphics", "pstate": "P0", "offset_mhz": 120})
             }
+            Command::GetClockDomain => json!({
+                "mask": 0x03FC007F,
+                "domains": [
+                    {"domain_bit": 1, "clock_khz": 1_545_076, "clock_mhz": 1545.076, "reason": null},
+                    {"domain_bit": 4, "clock_khz": null, "clock_mhz": null, "reason": "RM 0x00000056"},
+                ],
+            }),
             Command::GetPstateFreqRange => json!([{
                 "pstate": "P0",
                 "min_core_mhz": 300,

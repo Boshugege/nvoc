@@ -655,6 +655,36 @@ uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *s, uint32_t index, 
     return status ? failure(error, cap, write ? "clock offset SET" : "clock offset GET", status) : 0;
 }
 
+/* Clock-domain enumeration. 0x20809001 mode 0 reports the bits, then each set
+ * bit is read at its live kHz through 0x20809006 (version word required). A bit
+ * the driver refuses is left with its non-zero status, not folded to zero. */
+uint32_t nvoc_macos_rm_session_clock_domains(nvoc_rm_session *s, void *out, size_t size,
+                                             char *error, size_t cap)
+{
+    uint32_t payload[2];
+    uint32_t status, mask, bit;
+
+    if (!s || !out || size != NVOC_RM_DOMAIN_BLOCK_BYTES)
+        return failure(error, cap, "clock-domain ABI size", UINT32_MAX);
+    memset(out, 0, size);
+    payload[0] = 0u;
+    payload[1] = 0u;
+    status = nvx_rm_control(s->ctl, s->client, s->subdevice, 0x20809001u, payload, sizeof payload);
+    if (status) return failure(error, cap, "clock-domain enumeration", status);
+    mask = payload[0];
+    memcpy(out, &mask, sizeof mask);
+    payload[0] = 1u;
+    for (bit = 0u; bit < 32u; bit++) {
+        if (!(mask & (1u << bit))) continue;
+        payload[1] = bit;
+        status = nvx_rm_control(s->ctl, s->client, s->subdevice, 0x20809006u, payload,
+                                sizeof payload);
+        memcpy((char *) out + 4 + 4u * bit, &payload[1], sizeof payload[1]);
+        memcpy((char *) out + NVOC_RM_DOMAIN_STATUS_OFFSET + 4u * bit, &status, sizeof status);
+    }
+    return 0;
+}
+
 /* Board-policy power contract: exact Linux610 NVML requests, never an arbitrary id. */
 uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *s, uint32_t kind,
     void *block, size_t size, char *error, size_t cap)

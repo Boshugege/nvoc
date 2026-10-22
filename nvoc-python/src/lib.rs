@@ -3162,6 +3162,47 @@ fn get_power_source(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
     py_value(py, &value)
 }
 
+/// Enumerate the chip's clock-domain bits and read each one's live frequency.
+///
+/// macOS only: two private read-only CLK controls, `0x20809001` for the mask and
+/// `0x20809006` per bit. A bit the driver refuses carries its RM status in
+/// `reason` instead of a value.
+#[pyfunction]
+fn get_clock_domain(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    let value = with_target(gpu, "macos-rm", |target| {
+        let readout = run(target, nvoc_core::QueryMacosRmClockDomains)
+            .map_err(to_py_err)?
+            .output;
+        let domains = readout
+            .domains
+            .iter()
+            .map(|domain| {
+                value_object([
+                    ("domain_bit", Value::from(domain.domain_bit)),
+                    (
+                        "clock_khz",
+                        domain.clock_khz.map_or(Value::Null, Value::from),
+                    ),
+                    (
+                        "clock_mhz",
+                        domain.clock_mhz.map_or(Value::Null, Value::from),
+                    ),
+                    (
+                        "reason",
+                        domain.reason.clone().map_or(Value::Null, Value::from),
+                    ),
+                ])
+            })
+            .collect::<Vec<_>>();
+        Ok(value_object([
+            ("backend", Value::from("macos-rm")),
+            ("mask", Value::from(readout.mask)),
+            ("domains", Value::Array(domains)),
+        ]))
+    })?;
+    py_value(py, &value)
+}
+
 /// Tell the performance controller which power source it is on.
 ///
 /// Successful writes persist; errors and cancellation restore the original
@@ -6398,6 +6439,7 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_power_limit, m)?)?;
     m.add_function(wrap_pyfunction!(set_rated_tdp, m)?)?;
     m.add_function(wrap_pyfunction!(reset_rated_tdp, m)?)?;
+    m.add_function(wrap_pyfunction!(get_clock_domain, m)?)?;
     m.add_function(wrap_pyfunction!(get_power_source, m)?)?;
     m.add_function(wrap_pyfunction!(set_power_source, m)?)?;
     m.add_function(wrap_pyfunction!(reset_power_source, m)?)?;
@@ -6491,6 +6533,18 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_domain_entry_point_is_registered() {
+        // The two controls behind it only exist on the macOS RM path, so a
+        // CPU-only build can check registration only.
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "m").unwrap();
+            _native(py, &module).unwrap();
+            assert!(module.getattr("get_clock_domain").is_ok());
+        });
+    }
 
     #[test]
     fn power_source_entry_points_are_registered_and_parse_their_arguments() {

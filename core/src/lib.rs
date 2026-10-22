@@ -7,6 +7,11 @@ mod gpu_type;
 pub use gpu::nvapi_init_attempted;
 pub mod legacy_vbios_parser;
 mod macos_clock_control;
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "x86_64")),
+    allow(dead_code)
+)]
+mod macos_clock_domains;
 // Same story as the bridge above: the transaction and both control modules
 // only have users behind the macOS+x86_64 gate, so a Linux check would see
 // them as dead. Keeping them compiled everywhere is what lets the gate run
@@ -57,14 +62,14 @@ pub use macos_eval::{
 };
 pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{
-    ABI_LAYOUT_SLOTS, ClockOffsetDomain, ClockOffsetLimits, ClockOffsetReading, DeviceInfo,
-    DeviceSample, DeviceSettings, DeviceStatus, FAN_CONTROL_UNREADABLE_REASON,
-    FAN_PERCENT_UNREADABLE_REASON, FanCoolerReading, FanReport, FieldState,
-    MACOS_RM_WRITE_GATE_REASON, MONITOR_SECTIONS, MONITOR_STALE_AFTER, MacosRmSession,
+    ABI_LAYOUT_SLOTS, ClockDomainReadout, ClockDomainView, ClockOffsetDomain, ClockOffsetLimits,
+    ClockOffsetReading, DeviceInfo, DeviceSample, DeviceSettings, DeviceStatus,
+    FAN_CONTROL_UNREADABLE_REASON, FAN_PERCENT_UNREADABLE_REASON, FanCoolerReading, FanReport,
+    FieldState, MACOS_RM_WRITE_GATE_REASON, MONITOR_SECTIONS, MONITOR_STALE_AFTER, MacosRmSession,
     NamedClockOffset, OffsetStep, OffsetStepTarget, OffsetStepVerdict,
     POWER_POLICY_UNREADABLE_REASON, PSTATE_FREQ_TABLE_UNREADABLE_REASON, PUBLIC_OFFSET_DOMAINS,
-    QueryMacosRmInfo, QueryMacosRmPowerState, QueryMacosRmRatedTdp, QueryMacosRmSettings,
-    QueryMacosRmStatus, QueryMacosRmThermalView, RATED_TDP_UNWIRED_REASON,
+    QueryMacosRmClockDomains, QueryMacosRmInfo, QueryMacosRmPowerState, QueryMacosRmRatedTdp,
+    QueryMacosRmSettings, QueryMacosRmStatus, QueryMacosRmThermalView, RATED_TDP_UNWIRED_REASON,
     SetMacosRmAcousticTarget, SetMacosRmClockOffset, SetMacosRmFanControl, SetMacosRmPowerLimit,
     SetMacosRmPowerState, SetMacosRmRatedTdp, SettingsCapabilities,
     THERMAL_LIMIT_UNREADABLE_REASON, THERMAL_SIM_UNREADABLE_REASON,

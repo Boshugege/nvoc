@@ -202,6 +202,14 @@ uint32_t nvoc_macos_rm_session_offset(nvoc_rm_session *session, uint32_t kind, v
 uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *session, uint32_t index, uint32_t write,
     void *block, size_t size, char *error, size_t cap);
 
+/* Clock-domain enumeration: fills 4-byte mask, 32 kHz words, 32 statuses
+ * (260 bytes) from 0x20809001 mode 0 plus one 0x20809006 version-1 read per
+ * reported bit. Bits the driver refuses keep a non-zero status. */
+#define NVOC_RM_DOMAIN_BLOCK_BYTES 260
+#define NVOC_RM_DOMAIN_STATUS_OFFSET 132
+uint32_t nvoc_macos_rm_session_clock_domains(nvoc_rm_session *session, void *out, size_t size,
+                                             char *error, size_t cap);
+
 /* kind: info/status/current/default GET, or exact cooler0 SET (0..4). */
 uint32_t nvoc_macos_rm_session_fan(nvoc_rm_session *session, uint32_t kind,
     void *block, size_t size, char *error, size_t cap);

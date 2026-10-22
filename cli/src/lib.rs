@@ -162,6 +162,7 @@ pub enum Command {
     SyncVfpMemoryPstate,
     GetPstateGlobalFreqOffset,
     GetPstateFreqRange,
+    GetClockDomain,
     GetSupportedLegacyApplicationFreq,
     GetFanInfo,
     GetFanCurve,
@@ -509,6 +510,18 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     PositionalValueKind::ApiRestrictionApi,
                 )])),
                     ..CommandSpec::new("get-autoboost-support", Group::Perf, "Read NVML API restriction state")
+                },
+            ),
+            (
+                Command::GetClockDomain,
+                CommandSpec {
+                    adapters: &NVML_ONLY,
+                    formatter: Some(output::format_clock_domain),
+                    ..CommandSpec::new(
+                        "get-clock-domain",
+                        Group::Clock,
+                        "Enumerate the clock-domain bits the macOS RM driver reports and read each one's live frequency in kHz/MHz; a bit the driver refuses keeps its RM status (macOS RM only)",
+                    )
                 },
             ),
             (Command::GetCoreVoltageControl, CommandSpec::new("get-core-voltage-control", Group::Voltage, "Read the core-voltage control object (0xA91F88EB, escape 0x07000045)")),
@@ -3024,6 +3037,10 @@ fn execute_target(
                     .collect(),
             ))
         }
+        Command::GetClockDomain => Err(CliError::new(
+            "get-clock-domain is unavailable on this backend: it enumerates the macOS RM \
+             clock-domain bits (0x20809001) and reads each live frequency (0x20809006)",
+        )),
         Command::GetPStateLock => {
             // Native NVAPI P-State level table (the ref tool `-pstate` GET listing).
             // Mirrors the ref tool's "Level[N] P*.Max / Level[N+1] P*.Min" output:
@@ -8720,6 +8737,7 @@ mod tests {
             | Command::SyncVfpMemoryPstate
             | Command::GetPstateGlobalFreqOffset
             | Command::GetPstateFreqRange
+            | Command::GetClockDomain
             | Command::GetPstates20Private
             | Command::GetSupportedLegacyApplicationFreq
             | Command::GetFanInfo

@@ -1198,6 +1198,61 @@ pub struct TempSensorView {
     pub unavailable: BTreeMap<String, String>,
 }
 
+/// One reported clock domain and its live frequency.
+///
+/// The domain is reported by its enumeration bit, not by a public name: the
+/// bits the chip answers here (0x03FC007F at stock on the test card) are not
+/// the public graphics/memory domains the offset SET uses, so naming them would
+/// be a guess.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClockDomainView {
+    /// Enumeration bit the driver reported.
+    pub domain_bit: u32,
+    /// Live frequency in kHz, when the driver answered this bit.
+    pub clock_khz: Option<u32>,
+    /// The same reading in MHz, so the usual unit is available without the
+    /// caller dividing.
+    pub clock_mhz: Option<f64>,
+    /// The RM status that refused this bit, when one did.
+    pub reason: Option<String>,
+}
+
+/// The clock-domain enumeration and its per-domain readings.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClockDomainReadout {
+    /// Domain bits the enumeration reported, verbatim.
+    pub mask: u32,
+    /// One entry per reported bit, in ascending bit order.
+    pub domains: Vec<ClockDomainView>,
+}
+
+impl ClockDomainReadout {
+    fn from_report(report: crate::macos_clock_domains::DomainClockReport) -> ClockDomainReadout {
+        use crate::macos_clock_domains::DomainClock;
+        ClockDomainReadout {
+            mask: report.mask,
+            domains: report
+                .domains
+                .into_iter()
+                .map(|(bit, answer)| match answer {
+                    DomainClock::Khz(khz) => ClockDomainView {
+                        domain_bit: bit,
+                        clock_khz: Some(khz),
+                        clock_mhz: Some(f64::from(khz) / 1000.0),
+                        reason: None,
+                    },
+                    DomainClock::Refused(status) => ClockDomainView {
+                        domain_bit: bit,
+                        clock_khz: None,
+                        clock_mhz: None,
+                        reason: Some(format!("RM 0x{status:08x}")),
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The legacy thermal entry carries a per-sensor physical range. This backend's
 /// snapshot does not: the RUSD temperature sections publish a reading only.
 ///
@@ -1858,6 +1913,17 @@ impl Device {
         Ok(status_from_snapshot(&snapshot))
     }
 
+    /// Enumerates the chip's clock domains and reads each live frequency.
+    ///
+    /// One control session, identity re-checked first, and the session is
+    /// dropped before returning so a release failure cannot pass silently.
+    pub fn clock_domains(&self) -> Result<ClockDomainReadout, Error> {
+        let snapshot = self.refreshed_snapshot()?;
+        let _ = snapshot;
+        let report = MacosRmSession::open().and_then(|mut session| session.read_clock_domains())?;
+        Ok(ClockDomainReadout::from_report(report))
+    }
+
     /// Reads the driver-visible configuration without changing anything.
     ///
     /// Telemetry and private control blocks use separate reads. Both sessions
@@ -2059,6 +2125,22 @@ impl crate::GpuOperation for QueryMacosRmStatus {
 
     fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
         target.macos_rm()?.status()
+    }
+}
+
+/// Enumerates the chip's clock domains and reads each live frequency.
+#[derive(Debug, Clone, Copy)]
+pub struct QueryMacosRmClockDomains;
+
+impl crate::GpuOperation for QueryMacosRmClockDomains {
+    type Output = ClockDomainReadout;
+
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::QueryGpuStatus
+    }
+
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.macos_rm()?.clock_domains()
     }
 }
 
@@ -2597,6 +2679,13 @@ unsafe extern "C" {
         index: u32,
         write: u32,
         block: *mut u8,
+        size: usize,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
+    fn nvoc_macos_rm_session_clock_domains(
+        handle: *mut SessionOpaque,
+        out: *mut u8,
         size: usize,
         error: *mut u8,
         cap: usize,
@@ -4275,6 +4364,48 @@ impl MacosRmSession {
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
     pub fn read_thermal(&mut self) -> Result<ThermalReadout, Error> {
+        Err(Error::Custom(
+            "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
+        ))
+    }
+
+    /// Enumerate the clock domains this chip reports and read each one's live
+    /// frequency, in kHz.
+    ///
+    /// Read-only, so it is safe while the write gate is closed, and it needs a
+    /// healthy GSP: a wedged driver answers 0x62 on the enumeration and the
+    /// whole call fails rather than reporting an empty chip.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    pub fn read_clock_domains(
+        &mut self,
+    ) -> Result<crate::macos_clock_domains::DomainClockReport, Error> {
+        let _guard = lock_transport()?;
+        let mut block = [0u8; crate::macos_clock_domains::DOMAIN_BLOCK_BYTES];
+        let mut error = [0u8; 256];
+        // SAFETY: the block is exactly the size the ABI requires, C fills it
+        // only on a zero return, and it does not retain the pointer.
+        let status = unsafe {
+            nvoc_macos_rm_session_clock_domains(
+                self.handle,
+                block.as_mut_ptr(),
+                block.len(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Custom(format!(
+                "macOS RM clock-domain read: {} (0x{status:08x})",
+                text(&error)
+            )));
+        }
+        crate::macos_clock_domains::parse_domains(&block)
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    pub fn read_clock_domains(
+        &mut self,
+    ) -> Result<crate::macos_clock_domains::DomainClockReport, Error> {
         Err(Error::Custom(
             "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
         ))

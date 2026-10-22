@@ -85,6 +85,9 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::ResetRatedTdp
             // The perf power-source read answers here and the setter echoes the
             // stored dword exactly, so the three entries are answered too.
+            // The domain enumeration and its per-domain readings are two
+            // private read-only CLK controls; both answer here.
+            | Command::GetClockDomain
             | Command::GetPowerSource
             | Command::SetPowerSource
             | Command::ResetPowerSource
@@ -109,7 +112,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, set-fanstop-status on|off, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, set-fanstop-status on|off, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source, get-clock-domain. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -151,6 +154,9 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 }),
                 Command::GetInfo => serde_json::to_value(run(&target, nvoc_core::QueryMacosRmInfo)?.output)?,
                 Command::GetStatus => serde_json::to_value(run(&target, nvoc_core::QueryMacosRmStatus)?.output)?,
+                Command::GetClockDomain => serde_json::to_value(
+                    run(&target, nvoc_core::QueryMacosRmClockDomains)?.output,
+                )?,
                 Command::GetSettings => {
                     serde_json::to_value(run(&target, nvoc_core::QueryMacosRmSettings)?.output)?
                 }
@@ -987,6 +993,17 @@ mod tests {
         ] {
             assert!(validate(command).is_ok(), "{command:?}");
         }
+    }
+
+    #[test]
+    fn the_clock_domain_read_is_allowed_and_needs_no_selector() {
+        // The command carries no argument: the enumeration picks the bits.
+        assert!(validate(Command::GetClockDomain).is_ok());
+        // It stays macOS-only, so the generic path owns the refusal text.
+        assert!(matches!(
+            Command::GetClockDomain.spec().adapters,
+            [BackendAdapter::Nvml]
+        ));
     }
 
     #[test]

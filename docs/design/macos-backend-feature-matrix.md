@@ -2560,3 +2560,17 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **⑥ 门禁** ✔：`cargo xtask ci` → `CI_EXIT=0`（本机 aarch64-linux 与测试机各一次；测试机 60 passed/10 skipped）。修掉门禁抓到的问题：`SetFanStop` 在 macOS 下成死导入（改成平台门控的独立 `use`）、`needless_return`；测试机 `_native.abi3.so` 是旧的（`cargo xtask ci` 不含 maturin 步骤），重编后才能跑到新代码。
 
 **⑦ 边界** ✗：`0x2080205a` 式的"谁消费"在这里同样没查明——只知 2 被接受、被回显、被持久；stop 期间上位机若再写 manual 百分比，模式会回到 1；只测 cooler0、只在 std 温度下测，未测高温下 stop 是否被固件强制取消；`--fan` 选项本命令不收（NVAPI 原形就是逐 curve 的），cooler 恒 0。
+
+## 一百四十七、时钟域枚举与逐域实时频率（`get-clock-domain`）
+
+**① 选择依据** ✔：锁定时钟（`nvmlDeviceSetGpuLockedClocks`）卡在"四次调用失败"上：api 侧 `sub_10A730`（`dmal/common/common_clock.c:162`，日志字符串就叫 `cDeviceMapTargetToActualFrequency`）发放的 `0x20809014` 不管怎么填都回 `0x1f`，因为它要的域对象句柄来自 `v10(v8, a2, 8320, &v22)`，而那个 getter 又是另一层 api 私货。要往锁定上走，先得有一条**不靠猜**的域通道；同时 class 0x2080 里这两个 8 字节只读控制（`0x20809001`/`0x20809006`）已被实测为 `NV_OK` 且返回真实数据，属于"控制面已通、产品面没有"的空白。
+
+**② 实测（探针 `/tmp/mini/mini13`，子设备句柄，单命令单步）** ✔：`0x20809001 {mode,0}` → `NV_OK`，`mode=0` 回 `mask=0x03FC007F`、`mode=1` 回 `0x0380007F`，即两个模式各自的可选域位图；`0x20809006 {1,bit}` → `NV_OK`，`+4` 是**该域实时 kHz**（bit1 连续读得 `0x179374`=1545076、`0x1791ED`=1545069，即 ~1545 MHz）；`+0` 版本字取 0 或 ≥3 均 `0x1f`，1 才通过。同一批排除了 `0x20809002`（`0x56`，表里无行）、`0x20809004`（`0x3a`）、`0x20809006` 带 12 字节（`0x1f`，行只有 8 字节）。`0x20809014` 在 s/d/c 三种句柄、`+0` 试 1/2/4/5/6/7/`0x10038`/`0x2009C`、`+4/8/12/16/20` 各种组合下恒 `0x1f`，本轮如实记为未通。
+
+**③ 来源** ✍：两个 id 都出自 api 分发器 `sub_8D210` 的 switch 分支（`0x20809001` 由 `sub_31C20` 在 `+4` 写域、`+0x20809006` 由 `sub_31D50` 先校验 `*a2==1` 再写 `a2[1]` 并把回答放 `a2[2]`），不是遍历哈希；`0x20809006` 的版本要求就来自 `sub_31D50` 的前置判断（版本 0 不满足 `*a2==1`，与实测 `0x1f` 吻合）。
+
+**④ 实现** ✔：新增 `core/src/macos_clock_domains.rs`（`DOMAIN_MASK_CMD`/`DOMAIN_CLOCK_CMD`/`DOMAIN_CLOCK_VERSION`，260 字节定长块 = mask + 32×kHz + 32×status，`parse_domains` 只解码 mask 置位的位，短块拒绝而不是截断）；C 桥 `nvoc_macos_rm_session_clock_domains` 先枚举再逐位置位读，**单域被拒只留 status、不折成 0**；core `ClockDomainReadout`/`ClockDomainView`（`clock_khz`+`clock_mhz`+`reason`）、`Device::clock_domains`（先复核身份，session 用完即关）、`QueryMacosRmClockDomains`；CLI 新命令 `get-clock-domain`（`Group::Clock`，allowlist 放行，其他后端给出口径一致的拒绝文本，带人类可读 formatter，回绝的位在 MHz 列显示 `RM 0x…` 而不是空白）；Python `get_clock_domain` 与 `__all__` 导出。域按**位**报告而不翻译成 graphics/memory：这里的位图与 offset SET 用的公共域不是同一套编号，命名会是猜。
+
+**⑤ 证据（测试机，产品命令）** ✔：见 `stage-clock-domain-20261022T…/`（`SHA256SUMS` 校验通过）。
+
+**⑥ 边界** ✗：`+0` 的模式字 0/1 只知位图不同，语义未定（0 = 全量，1 = 更窄的子集，按实测原样记录）；域位与公共 graphics/memory 域的对应未建立，因此不能直接当作锁定通道；`get-status` 已有的 gpc/mem 读数来自 RM776，与本命令的两条路径互不覆盖；`0x20809014` 仍 `0x1f`，锁定时钟继续挂着。
