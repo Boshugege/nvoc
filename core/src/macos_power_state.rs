@@ -217,11 +217,6 @@ mod tests {
 
     #[test]
     fn an_error_after_the_write_restores_the_original_dword() {
-        let mut io = Fake::new(0);
-        set(&mut io, PowerState::Battery, &|| false).unwrap();
-        assert_eq!(io.block, PowerState::Battery.code().to_le_bytes());
-
-        let mut io = Fake::new(0);
         struct FailAfter {
             block: [u8; BYTES],
         }

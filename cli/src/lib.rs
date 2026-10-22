@@ -592,6 +592,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     ..CommandSpec::new("get-power-mode", Group::Power, "Read NVIDIA App power mode (Balanced/Max with support gate)")
                 },
             ),
+            (Command::GetPowerSource, CommandSpec::new("get-power-source", Group::Power, "macOS RM: read the PERF power source (PERF_GET_POWERSTATE 0x2080205a)")),
             (Command::GetPrivateFreqDomainInfo, CommandSpec::new("get-private-freq-domain-info", Group::Vfp, "Read the private ClockClient domain-control block: controllable mask + per-domain offset/range records (XBar physical-clock path)")),
             (
                 Command::GetPrivateFreqDomainStatus,
@@ -804,6 +805,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     ..CommandSpec::new("reset-power-limit", Group::Power, "Reset NVAPI TGP to rated/default (mobile); macOS RM restores the board policy default watts")
                 },
             ),
+            (Command::ResetPowerSource, CommandSpec::new("reset-power-source", Group::Power, "macOS RM: put the perf power source back to AC (the desktop default)")),
             (Command::ResetPrivateForcedPstateLockUser, CommandSpec::new("reset-private-forced-pstate-lock-user", Group::Clock, "Release a force-locked pstate via SetForcePstate(pstate=16, set_type=0) — pstate=16 is the bitmask=0 sentinel (GetForcePstate returns 16 when no force active). IDA-verified as the most likely release path.")),
             (
                 Command::ResetPrivateFreqDomainGlobalOffset,
@@ -859,20 +861,6 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 options: Box::leak(Box::new(["domain"])),
                 ..CommandSpec::new("reset-temp-limit",Group::Thermal,"Reset NVAPI sensor limits; macOS --domain acoustic restores the policy default")
             }),
-            (Command::GetPowerSource, CommandSpec::new("get-power-source", Group::Power, "macOS RM: read the PERF power source (PERF_GET_POWERSTATE 0x2080205a)")),
-            (
-                Command::SetPowerSource,
-                CommandSpec {
-                    arity: (1, 1),
-                    positionals: Box::leak(Box::new([PositionalArg::free(
-                        "arg_power_source_state",
-                        "STATE",
-                        "Perf power source: ac | battery",
-                    )])),
-                    ..CommandSpec::new("set-power-source", Group::Power, "macOS RM: tell the performance controller which power source it is on (PERF_SET_POWERSTATE 0x2080205b; value is echoed back; persists until reset-power-source or a reboot)")
-                },
-            ),
-            (Command::ResetPowerSource, CommandSpec::new("reset-power-source", Group::Power, "macOS RM: put the perf power source back to AC (the desktop default)")),
             (Command::ResetTempSim, CommandSpec::new("reset-temp-sim", Group::Thermal, "Disable temperature simulation and restore the real sensor reading")),
             (Command::RestartDisplayDriver, CommandSpec::new("restart-display-driver", Group::Info, "Restart the display driver (0xB4B26B65); legacy apply-OC trigger")),
             (
@@ -1156,6 +1144,18 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 )])),
                     formatter: Some(output::format_set_power_mode),
                     ..CommandSpec::new("set-power-mode", Group::Power, "Set NVIDIA App power mode: max | balanced (the App's Balanced/Max toggle)")
+                },
+            ),
+            (
+                Command::SetPowerSource,
+                CommandSpec {
+                    arity: (1, 1),
+                    positionals: Box::leak(Box::new([PositionalArg::free(
+                        "arg_power_source_state",
+                        "STATE",
+                        "Perf power source: ac | battery",
+                    )])),
+                    ..CommandSpec::new("set-power-source", Group::Power, "macOS RM: tell the performance controller which power source it is on (PERF_SET_POWERSTATE 0x2080205b; value is echoed back; persists until reset-power-source or a reboot)")
                 },
             ),
             (

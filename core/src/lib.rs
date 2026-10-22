@@ -7,10 +7,32 @@ mod gpu_type;
 pub use gpu::nvapi_init_attempted;
 pub mod legacy_vbios_parser;
 mod macos_clock_control;
+// Same story as the bridge above: the transaction and both control modules
+// only have users behind the macOS+x86_64 gate, so a Linux check would see
+// them as dead. Keeping them compiled everywhere is what lets the gate run
+// here at all.
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 mod macos_control_transaction;
 mod macos_fan;
 mod macos_power;
+// Both behind the macOS+x86_64 gate, so a Linux check would see
+// them as dead. Keeping them compiled everywhere is what lets the gate run
+// here at all.
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 mod macos_power_state;
+// Both behind the macOS+x86_64 gate, so a Linux check would see
+// them as dead. Keeping them compiled everywhere is what lets the gate run
+// here at all.
+#[cfg_attr(
+    not(all(target_os = "macos", target_arch = "x86_64")),
+    allow(dead_code)
+)]
 mod macos_rated_tdp;
 mod macos_thermal_policy;
 pub use macos_clock_control::ClockOffsetWriteReport;

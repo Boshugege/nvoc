@@ -2532,3 +2532,16 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **⑥ 门禁** ✔：`cargo xtask ci` **CI_EXIT=0**（core146、CLI95、Python Rust19，完整 Python 59passed/10skipped）。修掉门禁抓到的问题：`from_code` 死代码（改为用它命名回显 client）、单元素 `for`、`lib.rs` 的 `macos_rated_tdp`/`macos_control_transaction` 一直带着 macOS+test 的 `cfg` 导致 aarch64-linux 检查找不到符号（去掉 cfg 改为全平台模块）、`set_thermal_limit` 的 `#[pyo3(signature=…)]` 被上一轮插入顶掉（补回）、`test_import.py` 导出表与 `__all__` 顺序。
 
 **⑦ 诚实边界** ✗：CLI/Python 的**读**只覆盖 GLOBAL 一个 client（没有 `--client`，其余 client 的读仍需探针）；未测 WAR/OS/PROFILE 的实际效果与跨 client 仲裁优先级；`reset` 与 `set …:DEFAULT` 等价，只测了前者；单负载形状、40 s 窗口、每段 11–15 样本，不是稳定度认证；`enforcedmW` 不反映这条仲裁的判据在 §一百四十三已记，此处只作一致性复核；a0 桩的成因未从固件侧查明（只知它稳定返回同一块），不排除是 legacy 分级的刻意空实现；`macos_rated_tdp.rs` 的 `set()` 覆盖 client 是给"层回 0"的保险，class-20 下回显本来就正确。
+## 一百四十五、PERF 电源来源（AC/BATTERY）接成公共闭包
+
+**① 选择依据** ✔：前面几轮挑的都是"写下去有物理效果"的面，代价是每个都要先证效果。本轮换一类：先证**协议完整可回读**，再看有没有效果 —— `PERF_GET_POWERSTATE 0x2080205a`／`PERF_SET_POWERSTATE 0x2080205b` 在固件表都有行（stag 4 字节），载荷只有一个 dword，取发布枚举 AC(0)/BATTERY(1)，驱动**双向原值回显**（SET 1 回 1、SET 0 回 0）。载荷就是值本身，天然满足"候选字段有明确来源、不遍历字段"。
+
+**② 实测（探针 `/tmp/mini/mini8`，单域单值单步）** ✔：GET→`NV_OK val=0`；SET 1→`NV_OK echo=1`；SET 2→**`0x1f` 且状态保持 1**；SET 0→`NV_OK`，终态回 0。即合法的只有 0/1，2 由驱动自己拒。`PERF_GET_CURRENT_PSTATE 0x20802068` 恒回 1(P0)，与电源来源无关。同批否证：`PERF_SET_AUX_POWER_STATE 0x20802092` 收 0..4 全 `NV_OK` 但无任何变化、`PERF_BOOST 0x2080200a`（8 字节 `{flags,duration}`）同样接受了不生效；NVML range-lock 载体 `0x2080e078@16` 回 `0x56`（表里无行）。
+
+**③ 实现** ✔：`core/src/macos_power_state.rs`（`BYTES=4`、`PowerState{Ac,Battery}`+`parse/DEFAULT`、`read`/`set` 走共享 `write_block` 事务）；C 桥 `nvoc_macos_rm_session_power_state` 在派发前先挡三种坏输入 —— 尺寸非 4、kind>1、SET 非 root（`0x1b`）、SET 值>1（`0x1f`）；CLI `get-power-source`/`set-power-source ac|battery`/`reset-power-source`；Python 三个同名入口。语义沿用「成功即持久、错误/取消恢复」；`reset` 固定回 AC（桌面默认），带位置参数会被拒，避免与 `set` 重复表意。命名刻意避开既有 `get-/set-power-mode`（NVAPI App 的 max/balanced 开关，语义不同）。
+
+**④ 证据（测试机，产品命令）** ✔：`stage-powersource-product-20261022T024027Z/`：`ac→battery` 写入 `Applied`+`Readback Verified`，独立读仍是 battery（持久），`reset` 回 ac 且幂等；非目标域 rated-tdp `default`、风扇 `auto 62%/1734rpm`、功耗墙 70–100 W 全程未变；`dc`、多余位置参数、缺值三者在驱动前被拒；`0x1f` 只在驱动层可达（探针 mini8 记录）。`stage-powersource-extra-20261022T024235Z/` 用 `sudo -u mac` 做真非 root：set/reset 都 `0x1b` 且状态分毫不动，root 写入后才动；Python 侧 `get→set→get→reset→get` 自洽、`dc` 抛 `RuntimeError unknown power state`。
+
+**⑤ 效果：本机没有可观测的时钟影响** ✗：60 s 常量 Vulkan 负载里 A/B/A 三段（写方是产品命令）图形时钟 **1950 kHz ×8 / ×10 / ×10**，三段没有区别；功耗与节流原因也无差。所以本行在功能表里记的是**电源来源请求**而不是频率通道，`get-power-source` 的 note 原样写明「不是时钟、不宣称时钟效果」。前一批 30 s 负载版本（`…product…` 的 21 段）第三段已跑出负载窗口，只作对照。
+
+**⑥ 边界** ✗：`0x2080205a/5b` 由 IDA 静态追到的语义只到"值比较后 `NV_OK`/`0x1f`"，**谁消费这个状态未查明**；只在本机（台式、恒 AC）实测，笔记本按电池运行时未测；未测与 EC/`RUSD` 电源事件并发；`reset-power-source` 只保证回到 AC，不还原"开机时的原值"；`0x20802092`/`0x2080200a` 已确认接受但未接成命令。未重启、未改驱动/EFI/boot-args/固件、未动 PR。

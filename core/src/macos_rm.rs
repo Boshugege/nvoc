@@ -1791,7 +1791,7 @@ impl Device {
         }
         #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
         {
-            let _ = (client, action);
+            let _ = (client, action, cancelled);
             Err(Error::Custom(
                 "macOS RATED_TDP control requires x86_64 macOS".into(),
             ))
@@ -1833,7 +1833,7 @@ impl Device {
         }
         #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
         {
-            let _ = state;
+            let _ = (state, cancelled);
             Err(Error::Custom(
                 "macOS perf power-source control requires x86_64 macOS".into(),
             ))

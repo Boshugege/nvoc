@@ -23,7 +23,7 @@ fn read_layer_refusal(command: Command) -> Option<(&'static str, &'static str)> 
             nvoc_core::FAN_CONTROL_UNREADABLE_REASON
         }
         // The policy view around the wall, not the wall itself.
-        Command::GetPowerCeiling | Command::GetDNotifier => {
+        Command::GetPowerCeiling | Command::GetPowerMode | Command::GetDNotifier => {
             nvoc_core::POWER_POLICY_UNREADABLE_REASON
         }
         // Located, published, measured answering here -- ours to wire.
