@@ -139,6 +139,12 @@ pub enum OperationKind {
     SetRatedTdp,
     /// macOS RM RATED_TDP back to DEFAULT.
     ResetRatedTdp,
+    /// macOS RM perf power-source read (AC/battery).
+    GetPowerSource,
+    /// macOS RM perf power-source SET.
+    SetPowerSource,
+    /// macOS RM perf power-source back to AC.
+    ResetPowerSource,
     SetNvapiBackgroundOcScanner,
     QueryNvapiOcScannerIncomplete,
     // PerfVfeEqu/Var ×4 query kinds withdrawn with the ops (2026-08-26) —

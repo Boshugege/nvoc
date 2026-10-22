@@ -23,7 +23,7 @@ fn read_layer_refusal(command: Command) -> Option<(&'static str, &'static str)> 
             nvoc_core::FAN_CONTROL_UNREADABLE_REASON
         }
         // The policy view around the wall, not the wall itself.
-        Command::GetPowerCeiling | Command::GetPowerMode | Command::GetDNotifier => {
+        Command::GetPowerCeiling | Command::GetDNotifier => {
             nvoc_core::POWER_POLICY_UNREADABLE_REASON
         }
         // Located, published, measured answering here -- ours to wire.
@@ -81,6 +81,11 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::GetRatedTdp
             | Command::SetRatedTdp
             | Command::ResetRatedTdp
+            // The perf power-source read answers here and the setter echoes the
+            // stored dword exactly, so the three entries are answered too.
+            | Command::GetPowerSource
+            | Command::SetPowerSource
+            | Command::ResetPowerSource
     ) {
         Ok(())
     } else if command == Command::GetPstateFreqRange {
@@ -102,7 +107,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -118,11 +123,13 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     let fan_write = fan_write_request(invocation, command)?;
     let thermal_write = thermal_write_request(invocation, command)?;
     let rated_tdp_write = rated_tdp_write_request(invocation, command)?;
+    let power_state_write = power_state_write_request(invocation, command)?;
     let _interrupt = (write.is_some()
         || power_write.is_some()
         || fan_write.is_some()
         || thermal_write.is_some()
-        || rated_tdp_write.is_some())
+        || rated_tdp_write.is_some()
+        || power_state_write.is_some())
     .then(InterruptGuard::install);
     let inventory = discover_targets(BackendSet::MacosRm)?;
     let targets = inventory.targets();
@@ -191,6 +198,24 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "original_action": report.original_action.name(),
                         "readback_verified": true,
                         "note": "the request persists (clear it with reset-rated-tdp); the stored request was read back and compared byte for byte before the session closed"})
+                }
+                Command::GetPowerSource => {
+                    let settings = run(&target, nvoc_core::QueryMacosRmPowerState)?.output;
+                    json!({"backend": "macos-rm", "mode": "perf-power-source",
+                        "state": settings.state.name(), "state_code": settings.state.code(),
+                        "note": "PERF_GET_POWERSTATE (0x2080205a) read of the source the performance controller is told about; it is not a clock and no clock effect is claimed on this host"})
+                }
+                Command::SetPowerSource | Command::ResetPowerSource => {
+                    let state = power_state_write
+                        .ok_or_else(|| CliError::new("missing power-state write request"))?;
+                    let report = run(&target, nvoc_core::SetMacosRmPowerState {
+                        state, cancelled: &interrupted,
+                    })?.output;
+                    json!({"applied": true, "backend": "macos-rm", "mode": "perf-power-source",
+                        "state": report.applied.name(), "state_code": report.applied.code(),
+                        "original_state": report.original.name(),
+                        "readback_verified": true,
+                        "note": "the driver echoed the stored source back and it was compared before the session closed; the new source persists (reset-power-mode sends AC)"})
                 }
                 Command::GetTemperatureThresholds => {
                     let items=run(&target,nvoc_core::QueryTemperatureThresholds)?.output;
@@ -428,6 +453,32 @@ fn rated_tdp_write_request(
         }
     };
     Ok(Some((client, action)))
+}
+
+fn power_state_write_request(
+    invocation: &Invocation,
+    command: Command,
+) -> CliResult<Option<nvoc_core::PowerState>> {
+    match command {
+        Command::SetPowerSource => {
+            let value = invocation
+                .positionals
+                .first()
+                .ok_or_else(|| CliError::new("missing STATE (ac|battery)"))?;
+            Ok(Some(nvoc_core::PowerState::parse(value)?))
+        }
+        Command::ResetPowerSource => {
+            // The desktop default; a POSITIONAL state would only be a second
+            // way to say `set-power-mode ac`, so the reset form stays bare.
+            if !invocation.positionals.is_empty() {
+                return Err(CliError::new(
+                    "reset-power-mode takes no STATE; use set-power-mode to name one",
+                ));
+            }
+            Ok(Some(nvoc_core::PowerState::DEFAULT))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn power_write_request(

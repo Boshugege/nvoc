@@ -3141,6 +3141,70 @@ fn set_rated_tdp(py: Python<'_>, gpu: &str, client: &str, action: &str) -> PyRes
     })
 }
 
+/// Read the perf power source (macOS RM PERF_GET_POWERSTATE 0x2080205a).
+///
+/// macOS only: the value is the published AC(0)/BATTERY(1) source the
+/// performance controller is told about, not a clock.
+#[pyfunction]
+fn get_power_source(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    let value = with_target(gpu, "macos-rm", |target| {
+        let settings = run(target, nvoc_core::QueryMacosRmPowerState)
+            .map_err(to_py_err)?
+            .output;
+        Ok(value_object([
+            ("backend", Value::from("macos-rm")),
+            ("state", Value::from(settings.state.name())),
+            ("state_code", Value::from(settings.state.code())),
+        ]))
+    })?;
+    py_value(py, &value)
+}
+
+/// Tell the performance controller which power source it is on.
+///
+/// Successful writes persist; errors and cancellation restore the original
+/// value and verify it. `state` accepts `ac` or `battery`.
+#[pyfunction]
+fn set_power_source(py: Python<'_>, gpu: &str, state: &str) -> PyResult<()> {
+    let gpu_own = gpu.to_string();
+    let state = state.to_string();
+    py.detach(|| -> PyResult<()> {
+        let state = nvoc_core::PowerState::parse(&state).map_err(to_py_err)?;
+        with_target(&gpu_own, "macos-rm", |target| {
+            run(
+                target,
+                nvoc_core::SetMacosRmPowerState {
+                    state,
+                    cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                },
+            )
+            .map_err(to_py_err)?;
+            Ok(Value::Null)
+        })?;
+        Ok(())
+    })
+}
+
+/// Put the perf power source back to AC (the desktop default).
+#[pyfunction]
+fn reset_power_source(py: Python<'_>, gpu: &str) -> PyResult<()> {
+    let gpu_own = gpu.to_string();
+    py.detach(|| -> PyResult<()> {
+        with_target(&gpu_own, "macos-rm", |target| {
+            run(
+                target,
+                nvoc_core::SetMacosRmPowerState {
+                    state: nvoc_core::PowerState::DEFAULT,
+                    cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                },
+            )
+            .map_err(to_py_err)?;
+            Ok(Value::Null)
+        })?;
+        Ok(())
+    })
+}
+
 /// Return one RATED_TDP client to DEFAULT.
 #[pyfunction]
 fn reset_rated_tdp(py: Python<'_>, gpu: &str, client: &str) -> PyResult<()> {
@@ -6291,6 +6355,9 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_power_limit, m)?)?;
     m.add_function(wrap_pyfunction!(set_rated_tdp, m)?)?;
     m.add_function(wrap_pyfunction!(reset_rated_tdp, m)?)?;
+    m.add_function(wrap_pyfunction!(get_power_source, m)?)?;
+    m.add_function(wrap_pyfunction!(set_power_source, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_power_source, m)?)?;
     m.add_function(wrap_pyfunction!(set_thermal_limit, m)?)?;
     m.add_function(wrap_pyfunction!(reset_thermal_limit, m)?)?;
     m.add_function(wrap_pyfunction!(set_ppab_status, m)?)?;
@@ -6381,6 +6448,24 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn power_source_entry_points_are_registered_and_parse_their_arguments() {
+        Python::initialize();
+        Python::attach(|py| {
+            let module = PyModule::new(py, "m").unwrap();
+            _native(py, &module).unwrap();
+            for name in ["get_power_source", "set_power_source", "reset_power_source"] {
+                assert!(module.getattr(name).is_ok(), "{name} is not registered");
+            }
+        });
+        assert_eq!(
+            nvoc_core::PowerState::parse("battery").unwrap(),
+            nvoc_core::PowerState::Battery
+        );
+        assert!(nvoc_core::PowerState::parse("dc").is_err());
+        assert_eq!(nvoc_core::PowerState::DEFAULT, nvoc_core::PowerState::Ac);
+    }
 
     #[test]
     fn rated_tdp_entry_points_are_registered_and_parse_their_arguments() {

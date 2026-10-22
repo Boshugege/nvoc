@@ -1798,6 +1798,48 @@ impl Device {
         }
     }
 
+    /// Read the perf power source. Read-only.
+    pub fn power_state(&self) -> Result<crate::PowerStateSettings, Error> {
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(&|| false, |session| {
+                let _guard = lock_transport()?;
+                let mut io = NativePowerState(session.handle);
+                crate::macos_power_state::read(&mut io)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            Err(Error::Custom(
+                "macOS perf power-source control requires x86_64 macOS".into(),
+            ))
+        }
+    }
+
+    /// Successful writes persist; errors and cancellation restore the original
+    /// dword and verify it.
+    pub fn set_power_state(
+        &self,
+        state: crate::PowerState,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<crate::PowerStateWriteReport, Error> {
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(cancelled, |session| {
+                let _guard = lock_transport()?;
+                let mut io = NativePowerState(session.handle);
+                crate::macos_power_state::set(&mut io, state, cancelled)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let _ = state;
+            Err(Error::Custom(
+                "macOS perf power-source control requires x86_64 macOS".into(),
+            ))
+        }
+    }
+
     pub fn power_limit_write_supported(&self) -> bool {
         offset_writes_supported(&self.info)
     }
@@ -2186,6 +2228,39 @@ impl crate::GpuOperation for SetMacosRmRatedTdp<'_> {
     }
 }
 
+/// Read the perf power source.
+pub struct QueryMacosRmPowerState;
+impl crate::GpuOperation for QueryMacosRmPowerState {
+    type Output = crate::PowerStateSettings;
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::GetPowerSource
+    }
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.macos_rm()?.power_state()
+    }
+}
+
+/// Power-source SET: one dword, exact rollback on error/cancel.
+pub struct SetMacosRmPowerState<'a> {
+    pub state: crate::PowerState,
+    pub cancelled: &'a dyn Fn() -> bool,
+}
+impl crate::GpuOperation for SetMacosRmPowerState<'_> {
+    type Output = crate::PowerStateWriteReport;
+    fn kind(&self) -> crate::OperationKind {
+        if self.state == crate::PowerState::DEFAULT {
+            crate::OperationKind::ResetPowerSource
+        } else {
+            crate::OperationKind::SetPowerSource
+        }
+    }
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target
+            .macos_rm()?
+            .set_power_state(self.state, self.cancelled)
+    }
+}
+
 /// Same structured operation API as other setters, with explicit per-domain
 /// semantics and cooperative cancellation for the native transaction.
 pub struct SetMacosRmClockOffset<'a> {
@@ -2550,6 +2625,14 @@ unsafe extern "C" {
         cap: usize,
     ) -> u32;
     fn nvoc_macos_rm_session_rated_tdp(
+        handle: *mut SessionOpaque,
+        kind: u32,
+        block: *mut u8,
+        size: usize,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
+    fn nvoc_macos_rm_session_power_state(
         handle: *mut SessionOpaque,
         kind: u32,
         block: *mut u8,
@@ -3794,6 +3877,59 @@ impl crate::macos_control_transaction::ControlBlock<{ crate::macos_rated_tdp::BY
         Ok(request)
     }
     fn set(&mut self, block: &[u8; crate::macos_rated_tdp::BYTES]) -> Result<(), Error> {
+        let mut block = *block;
+        self.transfer(1, &mut block)
+    }
+}
+
+/// The power-source request is a single dword in both directions, so the object
+/// needs no per-call state.
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+struct NativePowerState(*mut SessionOpaque);
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl NativePowerState {
+    // Caller owns the live session and holds the transport lock across the
+    // whole transaction.
+    fn transfer(
+        &mut self,
+        kind: u32,
+        block: &mut [u8; crate::macos_power_state::BYTES],
+    ) -> Result<(), Error> {
+        let mut error = [0u8; 256];
+        // SAFETY: live session, exactly-sized writable block, no retained
+        // pointers, transport mutex held.
+        let status = unsafe {
+            nvoc_macos_rm_session_power_state(
+                self.0,
+                kind,
+                block.as_mut_ptr(),
+                crate::macos_power_state::BYTES,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(Error::Custom(format!(
+                "macOS power-source control failed: RM 0x{status:08x} {}",
+                text(&error)
+            )))
+        }
+    }
+}
+
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl crate::macos_control_transaction::ControlBlock<{ crate::macos_power_state::BYTES }>
+    for NativePowerState
+{
+    fn get(&mut self) -> Result<[u8; crate::macos_power_state::BYTES], Error> {
+        let mut request = [0u8; crate::macos_power_state::BYTES];
+        self.transfer(0, &mut request)?;
+        Ok(request)
+    }
+    fn set(&mut self, block: &[u8; crate::macos_power_state::BYTES]) -> Result<(), Error> {
         let mut block = *block;
         self.transfer(1, &mut block)
     }

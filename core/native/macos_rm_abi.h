@@ -215,6 +215,12 @@ uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *session, uint32_t kind,
 uint32_t nvoc_macos_rm_session_rated_tdp(nvoc_rm_session *session, uint32_t kind,
     void *block, size_t size, char *error, size_t cap);
 
+/* Fixed PERF power-state GET(0)/SET(1), 4B {powerState}. The value is the
+ * published AC(0)/BATTERY(1) source, checked here as well as in Rust; SET
+ * requires root. The reply echoes the stored dword, so it is the readback. */
+uint32_t nvoc_macos_rm_session_power_state(nvoc_rm_session *session, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap);
+
 /* Fixed thermal policy GET-info, GET-control(1,1440B), SET(2,1440B).
  * Rust validates the acoustic target and the complete driver-normalized reply. */
 uint32_t nvoc_macos_rm_session_thermal_policy(nvoc_rm_session *session, uint32_t kind,

@@ -892,6 +892,29 @@ uint32_t nvoc_macos_rm_session_rated_tdp(nvoc_rm_session *s, uint32_t kind,
     return status ? failure(error, cap, "rated-tdp control", status) : 0;
 }
 
+uint32_t nvoc_macos_rm_session_power_state(nvoc_rm_session *s, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap)
+{
+    if (!s || !block || kind > 1u || size != 4u)
+        return failure(error, cap, "power-state ABI arguments", UINT32_MAX);
+    unsigned char *b = block;
+    uint32_t want;
+    memcpy(&want, b, 4);
+    /* NV2080_CTRL_PERF_POWER_SOURCE: only AC(0) and BATTERY(1) are published.
+     * Measured: 2 is refused by the driver with NV_ERR_INVALID_PARAM_STRUCT,
+     * 0x1f. The GET takes no input and returns the stored value. */
+    if (kind == 1u) {
+        if (geteuid() != 0) return failure(error, cap, "power-state SET requires root", 0x1bu);
+        if (want > 1u) return failure(error, cap, "power-state outside published AC/BATTERY", 0x1fu);
+    }
+    uint32_t cmd = kind == 0u ? 0x2080205au : 0x2080205bu;
+    uint32_t status = nvx_rm_control(s->ctl, s->client, s->subdevice, cmd, block, (uint32_t)size);
+    if (status) return failure(error, cap, "power-state control", status);
+    /* The driver echoes the stored dword in both directions, which is what the
+     * readback compares; a 4-byte GET with no seed returns it too. */
+    return 0;
+}
+
 size_t nvoc_macos_rm_abi_layout(uint64_t *out, size_t count)
 {
     const uint64_t layout[NVOC_RM_LAYOUT_SLOTS] = {

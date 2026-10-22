@@ -202,6 +202,12 @@ pub enum Command {
     GetRatedTdp,
     SetRatedTdp,
     ResetRatedTdp,
+    /// macOS RM PERF power-source read (AC/battery).
+    GetPowerSource,
+    /// macOS RM PERF power-source write.
+    SetPowerSource,
+    /// macOS RM PERF power-source back to AC.
+    ResetPowerSource,
     GetPrivateFreqDomainInfo,
     GetPrivateFreqDomainStatus,
     SetPrivateFreqDomainGlobalOffset,
@@ -853,6 +859,20 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                 options: Box::leak(Box::new(["domain"])),
                 ..CommandSpec::new("reset-temp-limit",Group::Thermal,"Reset NVAPI sensor limits; macOS --domain acoustic restores the policy default")
             }),
+            (Command::GetPowerSource, CommandSpec::new("get-power-source", Group::Power, "macOS RM: read the PERF power source (PERF_GET_POWERSTATE 0x2080205a)")),
+            (
+                Command::SetPowerSource,
+                CommandSpec {
+                    arity: (1, 1),
+                    positionals: Box::leak(Box::new([PositionalArg::free(
+                        "arg_power_source_state",
+                        "STATE",
+                        "Perf power source: ac | battery",
+                    )])),
+                    ..CommandSpec::new("set-power-source", Group::Power, "macOS RM: tell the performance controller which power source it is on (PERF_SET_POWERSTATE 0x2080205b; value is echoed back; persists until reset-power-source or a reboot)")
+                },
+            ),
+            (Command::ResetPowerSource, CommandSpec::new("reset-power-source", Group::Power, "macOS RM: put the perf power source back to AC (the desktop default)")),
             (Command::ResetTempSim, CommandSpec::new("reset-temp-sim", Group::Thermal, "Disable temperature simulation and restore the real sensor reading")),
             (Command::RestartDisplayDriver, CommandSpec::new("restart-display-driver", Group::Info, "Restart the display driver (0xB4B26B65); legacy apply-OC trigger")),
             (
@@ -3853,6 +3873,11 @@ fn execute_target(
         Command::SetRatedTdp | Command::ResetRatedTdp => Err(CliError::new(
             "set-rated-tdp/reset-rated-tdp are macOS RM only; the NVAPI RATED_TDP SET is not wired",
         )),
+        Command::GetPowerSource | Command::SetPowerSource | Command::ResetPowerSource => {
+            Err(CliError::new(
+                "get/set/reset-power-source are macOS RM only (PERF power source, not the App power mode)",
+            ))
+        }
         Command::SetPrivatePermanentPstateLockUser => {
             let level = parse_usize(&invocation.positionals[0], "level")? as u32;
             let out = run(target, SetNvapiPerfLevelLock { level })?.output;
@@ -8735,6 +8760,9 @@ mod tests {
             | Command::GetRatedTdp
             | Command::SetRatedTdp
             | Command::ResetRatedTdp
+            | Command::GetPowerSource
+            | Command::SetPowerSource
+            | Command::ResetPowerSource
             | Command::GetPrivateFreqDomainInfo
             | Command::GetPrivateFreqDomainStatus
             | Command::SetPrivateFreqDomainGlobalOffset
