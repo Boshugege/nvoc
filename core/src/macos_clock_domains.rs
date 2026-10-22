@@ -26,12 +26,19 @@ pub const DOMAIN_BLOCK_BYTES: usize = 4 + 4 * 32 + 4 * 32;
 pub const DOMAIN_KHZ_OFFSET: usize = 4;
 /// Offset of the per-domain status array inside the block.
 pub const DOMAIN_STATUS_OFFSET: usize = 4 + 4 * 32;
+// The bridge carries the ids themselves, so a build without the test cfg has
+// no Rust-side reference to these; `the_constants_match_the_c_bridge` pins
+// them to it.
+#[allow(dead_code)]
 /// Command that enumerates the reported clock domains.
 pub const DOMAIN_MASK_CMD: u32 = 0x2080_9001;
+#[allow(dead_code)]
 /// Command that answers one domain's live frequency.
 pub const DOMAIN_CLOCK_CMD: u32 = 0x2080_9006;
+#[allow(dead_code)]
 /// Version word `0x20809006` requires.
 pub const DOMAIN_CLOCK_VERSION: u32 = 1;
+#[allow(dead_code)]
 /// Mode word for the enumeration: 0 is the full set the chip reports.
 pub const DOMAIN_MODE_ALL: u32 = 0;
 
