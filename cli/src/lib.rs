@@ -1004,9 +1004,9 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     positionals: Box::leak(Box::new([PositionalArg::free(
                     "arg_fan_value",
                     "VALUE",
-                    "Fan speed value: --percent (default) = percentage 0-100; --rpm = physical RPM (NVAPI-only, clamped to cooler [min, max] from get-fan-info --nvapi)",
+                    "Fan speed value: --percent (default) = percentage 0-100; --rpm = physical RPM (NVAPI), or on macOS a duty translated through the cooler max RPM and clamped to it)",
                 )])),
-                    ..CommandSpec::new("set-fan-speed", Group::Fan, "Set fan speed: --percent (default) sets cooler level in percent (NVAPI SetCoolerLevels / NVML set_fan_speed); --rpm sets physical RPM via private FanCoolerSetControl (NVAPI-only)")
+                    ..CommandSpec::new("set-fan-speed", Group::Fan, "Set fan speed: --percent (default) sets cooler level in percent (NVAPI SetCoolerLevels / NVML set_fan_speed); --rpm sets physical RPM via private FanCoolerSetControl (NVAPI), or on macOS a duty translated through the cooler max RPM")
                 },
             ),
             (

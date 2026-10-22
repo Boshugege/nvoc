@@ -404,9 +404,15 @@ fn fan_write_request(
     ) {
         return Ok(None);
     }
-    if option_bool(invocation, "rpm", false)? || option_one(invocation, "cooler").is_some() {
+    if option_one(invocation, "cooler").is_some() {
         return Err(CliError::new(
-            "macOS fan control supports percentage/auto only; --rpm and legacy --cooler are not validated; select --fan 0",
+            "macOS fan control validates cooler slot 0 only; drop legacy --cooler and select --fan 0",
+        ));
+    }
+    let rpm = option_bool(invocation, "rpm", false)?;
+    if rpm && command != Command::SetFanSpeed {
+        return Err(CliError::new(
+            "macOS --rpm applies to set-fan-speed only; use --fanstop-status for on|off and reset-fan-speed for firmware auto",
         ));
     }
     let fan = option_one(invocation, "fan").unwrap_or("all");
@@ -457,8 +463,12 @@ fn fan_write_request(
         let value = invocation
             .positionals
             .first()
-            .ok_or_else(|| CliError::new("missing fan percentage"))?;
-        nvoc_core::FanControlTarget::Percent(parse_u32_unit(value, "%", "percent")?)
+            .ok_or_else(|| CliError::new("missing fan speed"))?;
+        if rpm {
+            nvoc_core::FanControlTarget::Rpm(parse_u32_unit(value, "rpm", "rpm")?)
+        } else {
+            nvoc_core::FanControlTarget::Percent(parse_u32_unit(value, "%", "percent")?)
+        }
     };
     nvoc_core::validate_macos_fan_request(slot, target)?;
     Ok(Some((slot, target)))
@@ -807,7 +817,7 @@ mod tests {
         for args in [
             vec!["set-fan-speed", "101", "--macos-rm"],
             vec!["set-fan-speed", "35", "--fan", "1", "--macos-rm"],
-            vec!["set-fan-speed", "1800", "--rpm", "--macos-rm"],
+            vec!["set-fan-speed", "6001", "--rpm", "--macos-rm"],
             vec!["set-fan-speed", "35", "--cooler", "0", "--macos-rm"],
             vec![
                 "set-fan-speed",
@@ -831,6 +841,13 @@ mod tests {
             fan_write_request(&reset, Command::ResetFanSpeed).unwrap(),
             Some((0, nvoc_core::FanControlTarget::Auto))
         );
+        // --rpm is an argument unit, not a backend switch: the target still goes
+        // through the same cooler-0 record and is translated there.
+        let rpm = parse_args(["set-fan-speed", "1800", "--rpm", "--macos-rm"]).unwrap();
+        assert_eq!(
+            fan_write_request(&rpm, Command::SetFanSpeed).unwrap(),
+            Some((0, nvoc_core::FanControlTarget::Rpm(1800)))
+        );
     }
 
     #[test]
@@ -848,7 +865,13 @@ mod tests {
         // The clap layer owns the two shapes this command has no slot for: a
         // missing STATE, and options that belong to set-fan-speed only.
         assert!(parse_args(["set-fanstop-status", "--macos-rm"]).is_err());
-        assert!(parse_args(["set-fanstop-status", "on", "--rpm", "--macos-rm"]).is_err());
+        // --rpm has no meaning on the on/off form, where clap does accept it.
+        if let Ok(invocation) = parse_args(["set-fanstop-status", "on", "--rpm", "--macos-rm"]) {
+            assert!(
+                fan_write_request(&invocation, Command::SetFanstopStatus).is_err(),
+                "--rpm belongs to set-fan-speed"
+            );
+        }
         for args in [
             vec!["set-fanstop-status", "on", "--curve", "2", "--macos-rm"],
             vec!["set-fanstop-status", "maybe", "--macos-rm"],

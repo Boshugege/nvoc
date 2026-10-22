@@ -5,6 +5,11 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FanControlTarget {
     Percent(u32),
+    /// Physical RPM, translated to the duty fraction through the cooler's own
+    /// published max RPM. The driver has no rpm channel of its own here (mode 3
+    /// is accepted but normalises any value to a fixed 50 percent), so this is an
+    /// open-loop translation: the request lands on the nearest duty step.
+    Rpm(u32),
     Auto,
     /// Ask the firmware for its own zero-RPM stop mode instead of manual 0 percent.
     Stop,
@@ -14,6 +19,9 @@ pub enum FanControlTarget {
 pub struct FanControlSettings {
     pub slot: u32,
     pub rpm: u32,
+    /// Cooler max RPM as the driver calibrates it in the control record. Zero
+    /// means the record published no scale, which is what auto mode looks like.
+    pub max_rpm: u32,
     pub min_percent: f64,
     pub max_percent: f64,
     /// Driver status percentage, distinct from the requested control percentage.
@@ -37,12 +45,20 @@ pub fn validate_macos_fan_request(slot: u32, target: FanControlTarget) -> Result
             "macOS fan control currently validates cooler 0 only".into(),
         ));
     }
-    if let FanControlTarget::Percent(value) = target
-        && value > 100
-    {
-        return Err(Error::Custom(
-            "fan target must be within 0..100 percent".into(),
-        ));
+    match target {
+        FanControlTarget::Percent(value) if value > 100 => {
+            return Err(Error::Custom(
+                "fan target must be within 0..100 percent".into(),
+            ));
+        }
+        // A ceiling for the argument itself; the real ceiling is the cooler's
+        // own max RPM and is applied once the record has been read.
+        FanControlTarget::Rpm(value) if value > 6000 => {
+            return Err(Error::Custom(
+                "fan target must be within 0..6000 rpm".into(),
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -102,6 +118,7 @@ mod control {
         Ok(FanControlSettings {
             slot: 0,
             rpm: word(status, 20),
+            max_rpm: word(control, 32),
             min_percent: 0.0,
             max_percent: 100.0,
             current_percent: f64::from(word(status, 32)) * 100.0 / 65536.0,
@@ -130,6 +147,21 @@ mod control {
                 wanted[36..40].copy_from_slice(&1u32.to_le_bytes());
                 // NVML rounds the Q16 fraction to nearest, not an integer PWM percent readback.
                 let q16 = (value * 65536 + 50) / 100;
+                wanted[40..44].copy_from_slice(&q16.to_le_bytes());
+            }
+            FanControlTarget::Rpm(value) => {
+                let max_rpm = word(&original, 32);
+                if max_rpm < 500 {
+                    return Err(Error::Custom(format!(
+                        "fan control record publishes no cooler max rpm (read {max_rpm}); an rpm target has no scale"
+                    )));
+                }
+                let value = value.min(max_rpm);
+                wanted[36..40].copy_from_slice(&1u32.to_le_bytes());
+                // Round to nearest and clamp at full scale: the driver only takes
+                // a Q16 duty fraction, so the request cannot land below or above it.
+                let q16 = ((u64::from(value) * 65536 + u64::from(max_rpm) / 2) / u64::from(max_rpm))
+                    .min(65536) as u32;
                 wanted[40..44].copy_from_slice(&q16.to_le_bytes());
             }
             FanControlTarget::Stop => {
@@ -194,6 +226,7 @@ mod control {
             let mut b = [0; BYTES];
             b[12] = 1;
             b[20] = 3;
+            b[32..36].copy_from_slice(&2800u32.to_le_bytes());
             b[64] = 83;
             (
                 info,
@@ -291,6 +324,54 @@ mod control {
             assert_eq!(s.rpm, 0);
             assert!(s.current_percent > 64.0);
             assert!(s.target_percent < 35.001);
+        }
+        #[test]
+        fn rpm_targets_are_translated_through_the_records_own_max_rpm() {
+            let (info, status, mut io) = fixture();
+            let before = io.b;
+            // Half of the published 2800 rpm is exactly mid scale, rounded.
+            let r = apply(
+                &mut io,
+                &info,
+                &status,
+                FanControlTarget::Rpm(1400),
+                &|| false,
+            )
+            .unwrap();
+            assert_eq!(r.applied_mode, "manual");
+            assert!((r.applied_target_percent - 50.0).abs() < 0.001);
+            let mut wanted = before;
+            wanted[36..40].copy_from_slice(&1u32.to_le_bytes());
+            wanted[40..44].copy_from_slice(&32768u32.to_le_bytes());
+            assert_eq!(io.b, wanted);
+            // Above the ceiling clamps to full scale instead of overflowing 100 percent.
+            apply(
+                &mut io,
+                &info,
+                &status,
+                FanControlTarget::Rpm(6000),
+                &|| false,
+            )
+            .unwrap();
+            assert_eq!(u32::from_le_bytes(io.b[40..44].try_into().unwrap()), 65536);
+            apply(&mut io, &info, &status, FanControlTarget::Auto, &|| false).unwrap();
+            assert_eq!(io.b, before);
+        }
+        #[test]
+        fn an_rpm_target_without_a_published_scale_is_refused_before_the_set() {
+            let (info, status, mut io) = fixture();
+            io.b[32..36].fill(0);
+            let err = apply(
+                &mut io,
+                &info,
+                &status,
+                FanControlTarget::Rpm(1200),
+                &|| false,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("no cooler max rpm"), "{err}");
+            assert_eq!(io.writes, 0);
         }
         #[test]
         fn fan_errors_and_post_write_cancellation_restore_original_mode_and_target() {

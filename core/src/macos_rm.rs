@@ -1106,6 +1106,9 @@ pub struct FanReport {
     pub max_percent: Option<u32>,
     pub current_percent: Option<u32>,
     pub target_percent: Option<f64>,
+    /// Cooler max RPM from the control record; the scale an rpm request is
+    /// translated through, and absent when the record published none.
+    pub max_rpm: Option<u32>,
     pub mode: Option<String>,
     pub unavailable: BTreeMap<String, String>,
     pub notes: Vec<String>,
@@ -1365,6 +1368,7 @@ impl DeviceStatus {
             max_percent: None,
             current_percent: None,
             target_percent: None,
+            max_rpm: None,
             mode: None,
             unavailable,
             notes,
@@ -1685,7 +1689,7 @@ impl Device {
     /// Metadata identifies a fitted cooler even when its current RPM is zero.
     pub fn fan_report(&self) -> Result<FanReport, Error> {
         let s = self.fan_control_settings()?;
-        let notes=vec!["cooler identity/range come from RM metadata/status; current_percent is rounded driver status feedback, distinct from the requested target_percent. GETs are not atomic. Target is a percentage request, not a physical RPM request.".into()];
+        let notes=vec!["cooler identity/range come from RM metadata/status; current_percent is rounded driver status feedback, distinct from the requested target_percent. GETs are not atomic. The control record carries a duty percentage only: an rpm request is translated through the cooler max RPM reported here and lands on the nearest duty step.".into()];
         Ok(FanReport {
             count: 1,
             coolers: vec![FanCoolerReading {
@@ -1696,6 +1700,7 @@ impl Device {
             max_percent: Some(s.max_percent as u32),
             current_percent: Some(s.current_percent.round() as u32),
             target_percent: Some(s.target_percent),
+            max_rpm: (s.max_rpm > 0).then_some(s.max_rpm),
             mode: Some(s.mode.into()),
             unavailable: BTreeMap::new(),
             notes,
@@ -2247,7 +2252,9 @@ impl crate::GpuOperation for SetMacosRmFanControl<'_> {
     fn kind(&self) -> crate::OperationKind {
         match self.target {
             crate::FanControlTarget::Auto => crate::OperationKind::ResetFanSpeed,
-            crate::FanControlTarget::Percent(_) => crate::OperationKind::SetFanSpeed,
+            crate::FanControlTarget::Percent(_) | crate::FanControlTarget::Rpm(_) => {
+                crate::OperationKind::SetFanSpeed
+            }
             crate::FanControlTarget::Stop => crate::OperationKind::SetFanStop,
         }
     }
