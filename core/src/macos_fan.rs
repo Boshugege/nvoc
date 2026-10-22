@@ -71,6 +71,11 @@ mod control {
     pub(crate) const BYTES: usize = 980;
     pub(crate) const INFO_BYTES: usize = 1432;
     pub(crate) const STATUS_BYTES: usize = 844;
+    /// The driver's duty feedback is a live measurement and overshoots full scale
+    /// by a few hundred Q16 units when the fan is held at 100 percent (measured
+    /// 65559 against a 65536 request). Control writes stay exact; only the
+    /// reading gets this tolerance, and it is clamped back to 100 percent.
+    const FEEDBACK_OVERSHOOT_Q16: u32 = 2048;
     pub(crate) trait FanControl: ControlBlock<BYTES> {
         fn defaults(&mut self) -> Result<[u8; BYTES], Error>;
     }
@@ -108,7 +113,7 @@ mod control {
         }
         if word(status, 24) != 0
             || word(status, 28) != 65536
-            || word(status, 32) > 65536
+            || word(status, 32) > 65536 + FEEDBACK_OVERSHOOT_Q16
             || word(control, 40) > 65536
         {
             // Name the field that left the contract: a bare range complaint on a
@@ -127,7 +132,7 @@ mod control {
             max_rpm: word(control, 32),
             min_percent: 0.0,
             max_percent: 100.0,
-            current_percent: f64::from(word(status, 32)) * 100.0 / 65536.0,
+            current_percent: f64::from(word(status, 32).min(65536)) * 100.0 / 65536.0,
             target_percent: f64::from(word(control, 40)) * 100.0 / 65536.0,
             mode: mode(control)?,
         })
@@ -330,6 +335,20 @@ mod control {
             assert_eq!(s.rpm, 0);
             assert!(s.current_percent > 64.0);
             assert!(s.target_percent < 35.001);
+        }
+        #[test]
+        fn full_scale_feedback_may_overshoot_and_is_clamped_back_to_100() {
+            let (info, mut status, mut io) = fixture();
+            io.b[36..40].copy_from_slice(&1u32.to_le_bytes());
+            io.b[40..44].copy_from_slice(&65536u32.to_le_bytes());
+            status[32..36].copy_from_slice(&65559u32.to_le_bytes());
+            let s = settings(&info, &status, &io.b).unwrap();
+            assert_eq!(s.current_percent, 100.0);
+            assert_eq!(s.target_percent, 100.0);
+            // Far above the tolerance is still a different contract.
+            status[32..36].copy_from_slice(&80000u32.to_le_bytes());
+            let err = settings(&info, &status, &io.b).unwrap_err().to_string();
+            assert!(err.contains("current 80000"), "{err}");
         }
         #[test]
         fn rpm_targets_are_translated_through_the_records_own_max_rpm() {
