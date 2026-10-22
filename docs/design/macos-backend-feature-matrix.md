@@ -2484,3 +2484,13 @@ CI最初加载旧扩展导致新契约测试失败，改为显式加载本轮编
 - 最新门禁：core141、CLI94、Python Rust18；完整Python59passed/10skipped，TUI214passed，GUI281passed/13skipped；本轮最终`cargo xtask ci`已记录 **CI_EXIT=0**；硬件只读温度策略测试1 passed，source manifest与证据归档随后写入bundle。
 
 分档：**native GPU Max/acoustic读取、acoustic目标SET/default reset、归一化回读、恢复和core/CLI/Python接入已实现且实测**。不支持修改固定GPU Max，不宣称完整NVML severity表、温度曲线编辑、风扇曲线/FanStop、服务/optimizer/UI写入或热稳定性。完整阶段0→12目标继续。
+
+## 一百四十二、RATED_TDP SET 首次实机执行（单 client 单 action，立即恢复）
+
+**① 选择依据** ✔：`0x2080e06f@8` 在固件方法表**有行**（flags `0x44`），读半边 `0x2080a06e@12` 同表行（flags `0x48`），两者身份已由 §七十七定为公开 `0x2080206e/206f` 的 PERF legacy 分级；探针的 pre-record → SET → 回读 → 立即恢复 + atexit/SIGINT 兜底早在 2026-10-17 就写好并通过 6/6 CPU 回归（`stage-ratedtdp-set-gate-20261017T060217Z/`），此后一直只差授权。故本轮不发明 id、不扫描，直接执行那一发。
+
+**② 证据（测试机，一次写入）** ✔：`stage-ratedtdp-set-20261022T010316Z/`，`set.txt` rc=0。前置 `PROFILE=full sh build.sh` 新鲜构建、`--anchor-read` 判 `forward ALIVE and healthy`。V3.4a 预录 client GLOBAL(2) 原 action `DEFAULT(0)`、vPstate 1；V3.4b SET `NV_OK`；V3.4c 回读 action `FORCE_LIMIT(2)`、vPstate 保持；随即恢复 `SET 0x0, GET 0x0 (verified)` 回 `DEFAULT(0)`。同批 RUSD 快照 `tgp 11520 mW / limit 100000 mW / fan 1599 rpm / 49.9C`。
+
+**③ 顺带否证一个候选** ✔：同次 Tier-B 用例发 `0x2080a00b@780`（level-info 的 PERF 非特权分级，§七十四/七十七留下的候选）⇒ **`0x56 NV_ERR_NOT_SUPPORTED`** ⇒ 「换分级字节取 range 列」这条路对 level-info 不成立（`0x2080200b` 基态本身也回 `0x1f`）。
+
+**④ 诚实边界** ✗：①只有一次、单 client GLOBAL、单 action `FORCE_LIMIT`，其它 client（WAR/OS/PROFILE）、其它 action（EXCEED/LOCK/FLOOR）与跨 client 仲裁**未测** ✔；②**功耗效果未观测**——探针 SET 后立刻恢复，观察窗口太短，须补 hold 才能在负载里看 tgp 变化，故本轮不声称"限住了" ✗；③公共 core/CLI/Python **尚未接入**（现有公共面只有 `get-rated-tdp` 读取，没有 set），不把探针能力当产品能力 ✗；④单 client GET 的 input/vPstate 全 0，与 10-17 全 client 扫描（全 `DEFAULT`）一致，不据此推语义 ✔。
