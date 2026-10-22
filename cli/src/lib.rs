@@ -835,7 +835,10 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     ..CommandSpec::new("reset-public-vftable-offset", Group::Vfp, "Reset NVAPI VFP deltas")
                 },
             ),
-            (Command::ResetTempLimit, CommandSpec::new("reset-temp-limit", Group::Thermal, "Reset NVAPI sensor limits")),
+            (Command::ResetTempLimit, CommandSpec {
+                options: Box::leak(Box::new(["domain"])),
+                ..CommandSpec::new("reset-temp-limit",Group::Thermal,"Reset NVAPI sensor limits; macOS --domain acoustic restores the policy default")
+            }),
             (Command::ResetTempSim, CommandSpec::new("reset-temp-sim", Group::Thermal, "Disable temperature simulation and restore the real sensor reading")),
             (Command::RestartDisplayDriver, CommandSpec::new("restart-display-driver", Group::Info, "Restart the display driver (0xB4B26B65); legacy apply-OC trigger")),
             (
@@ -1763,6 +1766,14 @@ fn validate_invocation(invocation: &Invocation) -> CliResult<()> {
         }
     }
 
+    if command == Command::ResetTempLimit
+        && option_one(invocation, "domain").is_some()
+        && !macos_rm::selected(invocation.backend)
+    {
+        return Err(CliError::new(
+            "reset-temp-limit --domain is only supported by the macOS RM acoustic policy route",
+        ));
+    }
     if command == Command::ResetFanSpeed
         && option_one(invocation, "fan").is_some_and(|fan| !fan.eq_ignore_ascii_case("all"))
         && invocation.backend != BackendChoice::Nvml

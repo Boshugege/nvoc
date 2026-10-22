@@ -148,13 +148,13 @@
 | 命令 | 原 NVOC 行为（摘要） | macOS RM 状态 |
 | --- | --- | --- |
 | `get-legacy-temp-sensor` | Read NVAPI legacy 3-sensor thermal view (GPU/Memory/Board, live + physical range) | **部分已实现且实测（范围面：已实现待实测）**：入口由 core 投影作答（数组根与每传感器键沿用入口自身 `target`/`current_c`/`min_c`/`max_c`/`controller`，另加 `field`、`current_source`（每个数值注明来源：`rusd:<字段>` 或 `0x20800513:sensor<n>`）与 `unavailable`（每个 null 的理由））。**读数来源**：实时值来自 RUSD 温度段；**每传感器量程来自公共热读 `NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2 (0x20800513)`**，本轮已按 ctrl2080thermal.h 的真实结构**接线**（同一 `nvx_rm_control` 通道，只发 GET 指令，`EXECUTE_FLAGS_IGNORE_FAIL`，逐指令回报 `executed`/`result`）。传感器**按驱动自己的 target type 位掩码配对**（ctrl2080thermal.h：1=GPU 2=MEMORY 4=POWER_SUPPLY 8=BOARD，设备实测 target 0 type 1）**而非按位置**。**三态必须分开**：未发起 / 发起但未完成（驱动拒绝，含 0x62）/ 已作答——本轮实测楔子期间为**后者中的"未完成"**：`MacosRmSession` 打开即在 RUSD 映射处被拒（`RUSD allocate/map: 0x00000062 NV_ERR_RESET_REQUIRED`），故量程留 `null` 且理由写明"did not complete"（这条同时说明：楔子期间**连会话建立都失败**，偏移通道的读同样卡在这一层）。**指令未跑不得当作 0**（`range_known`/`executed` 标志决定，实测单测覆盖）；**驱动未命名 target type 的传感器不填任何入口**；本快照该字段无量值时用公共读的读数并标明来源，绝不填 0 °C。失败方向实测：入口 rc=0、四路 `null`＋各字段理由 |
-| `get-public-temp-limit` | Read the NVAPI public temp-limit range (min/default/max Celsius + throttle curve) | 未实现：访问驱动前拒绝，但点名缺失层（§一百六）：配置限制未定位，可答的是 get-legacy-temp-sensor 的实时读数 |
+| `get-public-temp-limit` | Read the NVAPI public temp-limit range (min/default/max Celsius + throttle curve) | 未实现：NVAPI public range/curve contract remains separate; native GPU Max/acoustic policy values are available through `get-temp-thresholds`, see §141 |
 | `get-temp-sim` | Read the temperature-simulation state (GetThermalSimulationMode; Secured-Overrides 'Temp faking allowed' gated) | 未实现：访问驱动前拒绝，但点名缺失层（§一百六）：仿真输入无来源（尚未定位），本后端只读真实传感器 |
-| `get-temp-thresholds` | Read temperature thresholds (NVML by default; --nvapi exposes target-temp policy) | 未实现：macOS RM 在访问驱动前拒绝 |
-| `reset-temp-limit` | Reset NVAPI sensor limits | 未实现：macOS RM 在访问驱动前拒绝 |
+| `get-temp-thresholds` | Read temperature thresholds (NVML by default; --nvapi exposes target-temp policy) | **已实现且实测**：native metadata/control reports GPU Max 88°C and acoustic min/current/max 65/83/87°C; unsupported selectors remain explicitly unavailable, see §141 |
+| `reset-temp-limit` | Reset NVAPI sensor limits | **声学策略已实现且实测**：`--domain acoustic` restores policy default 83°C with complete 1440B normalized readback; GPU Max remains fixed, see §141 |
 | `reset-temp-sim` | Disable temperature simulation and restore the real sensor reading | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-private-target-temp-limit` | Set an NVAPI target-temp (temp-limit) policy slot in Celsius for mobile sku | 未实现：macOS RM 在访问驱动前拒绝 |
-| `set-temp-limit` | Set thermal limit in Celsius: NVAPI path writes the sensor limit; NVML path writes the GPU max-temp threshold, or the acoustic target temp with --d… | 未实现：macOS RM 在访问驱动前拒绝 |
+| `set-temp-limit` | Set thermal limit in Celsius: NVAPI path writes the sensor limit; NVML path writes the GPU max-temp threshold, or the acoustic target temp with --d… | **声学目标已实现且实测**：macOS 要求显式 `--domain acoustic`，范围65..87°C；GPU Max 88°C固定并拒绝写入，见§141 |
 | `set-temp-sim` | Fake the driver-visible GPU temperature in Celsius (DANGEROUS research tool; Extended->basic fallback; Secured-Overrides gated) | 未实现：macOS RM 在访问驱动前拒绝 |
 
 ### 风扇（`Fan`，8 项）
@@ -290,7 +290,7 @@
 | 9 自动压力执行与验证器 | 限时负载、停止、结构化结果、正确性校验 | **主负载 + 校验器完成**。主负载＝原 `--vulkan-only` 渲染路径（零算法改动，仅补 loader/ICD 解析 `4993a42`）：无 env 冷启动 rc=0，5/10/30 s 阶梯与 60 s stock 负载 rc=0，错误路径（`--gpu-index` 越界 / `--pci-bus` 不匹配）rc=1，`--vulkan-window` 在非 Windows 回退 offscreen rc=0；同步遥测显示 util 峰值 100%/均值 83%、gfx 1.53→1.95 GHz、功耗 11.5→13.5 W、温度 54→62 ℃、风扇 1778→1920 rpm。校验器＝`stress-macos`（`1dcf27a`）：全量 bit-exact 比对、启动自检、负例 rc=1、60 s 限时 1206 次 dispatch/0 失败、SIGINT 优雅停止。**整体验收**（`stage9-accept-20261017T045311Z`）：3 组 feature 构建 + fmt/clippy/tests 全 rc=0；`--vulkan-only` 冷启动 rc=0、错误路径 rc=1/1/0、阶梯 rc=0；信号语义实测 `--vulkan-only` SIGINT rc=-2 / SIGTERM rc=-15（OS 默认处置、立即终止），`metal_check` `--stress 300` 收 SIGINT 后 rc=0 优雅停止。**HEAD 复跑**（`stage-vulkan-recheck-20261017T055856Z`，8/8 PASS）：无 env 冷启动 rc=0、`--gpu-index 0` 选中真设备 `GTX 1650 SUPER (NVK TU116-A)` PCI `0000:01:00.0`、越界索引 rc=1；loader=`/Library/GPUBundles/nvmtl/libvulkan.1.4.362.dylib`、ICD=`nvk_icd.json`→`libvulkan_nouveau.dylib`（**NVK，非 MoltenVK**） | 渲染负载无读回校验、`--vulkan-only` 无进程内取消（靠 SIGINT/SIGTERM 默认处置）；阶段 10 需把负载/校验器结果接进 optimizer 闭环 |
 | 10 自动扫描/优化/结果应用 | 受限闭环、保存/应用/恢复 | **部分：非 CUDA 构建 + 只读评测入口落地**。`--no-default-features --features stressor-external` 的 check/build rc=0；新增子命令 `macos-eval`（`195e7af`、证据 `stage10-eval-…`）：用 `BackendSet::MacosRm` 选设备（不再要求 `has_nvapi`），复用原 `cli-stressor-cuda-rs --vulkan-only` 限时负载 + NullMoth RM 遥测采样 + `stress-macos/metal_check --verify`，输出 `nvoc/macos-stock-eval/1`（pre/under_load/post、FPS、校验结论、`settings_written=false`）。实机 20 s：gfx 1950→1965 MHz、util 均值 87%/峰值 99%、power 12.5→13.5 W、temp 52→57.6 ℃、校验 pass。**候选/接受-回退/结果应用闭环未接入**：核心/显存偏移、board功耗及风扇现在已有共享写入与恢复；优化器仍需从NVAPI具体调用适配到这些能力。**HEAD 复跑**（`stage10-recheck-20261017T060320Z`）：`macos-eval --duration 8` rc=0，1530→1965 MHz、功率 11.4→13.6 W、温度 52.2→59.5 C、util max 100%、fan→2517 rpm，`metal_check` passed / 0 mismatch（全量 bit-exact），`settings_written=false`。"
     "**追加（`50bb01b`，2026-10-17）**：报告新增 `under_load.throttle`——负载期间的 reason mask 并集 + 断言过的原因名 + 带 mask 的样本数；实机 `--duration 8 --interval 1` 得 `samples_with_mask=5, mask_any=0, active_reasons=[]`（stock 负载下驱动未断言任何限频原因），`stressor exit=0`、`metal_check passed`、`settings_written=false`（`stage11-throttle-shared-20261017T065005Z`） | 需要接入现有macOS共享写入/恢复并完成候选评测；目前闭环停在"预检+原状态快照+限时负载+校验"这半 |
-| 11 共享入口与界面集成 | core/CLI/Python/UI/srv | **部分完成**：查询、偏移、功耗和风扇百分比/auto已共享接入core/CLI/Python；GUI/TUI既有只读启动有证据，写面尚需能力/参数适配和实机交互；srv仍observe-only | 完成支持操作的UI及服务集成 |
+| 11 共享入口与界面集成 | core/CLI/Python/UI/srv | **部分完成**：查询、偏移、功耗、风扇百分比/auto和声学温度目标已共享接入core/CLI/Python；GUI/TUI写面及srv控制闭环仍需接入 | 完成支持操作的UI及服务集成 |
 | 12 全量回归与交付 | 完整覆盖、契约/CI/review | **持续进行**：逐步CI、小提交、fork同分支交付；历史绿灯不代替新控制实测。完整goal尚未完成 | 逐族回归并最终覆盖审计 |
 
 ## 四、已知限制（本表不得当成支持声明）
@@ -2470,3 +2470,17 @@ core137、CLI94、Python Rust18；真实扩展import/validation **56 passed，0 
 核对通过，长描述/相邻variant隔离/参数提示静态回归通过。GUI/TUI回归分别281passed/13skipped、214passed；未据此宣称UI新控制实机完成。
 日志`fan-{ci,build,python-import,shared-read,entry-parity}-20261022.txt`及source manifest、SHA256SUMS存仓库外。
 CI最初加载旧扩展导致新契约测试失败，改为显式加载本轮编译扩展后通过；旧源目录扩展未覆盖。
+
+## 一百四十一、native thermal policy metadata/control接入共享core/CLI/Python并完成实机恢复
+
+选择依据：IDA9.5跟踪同版本NVML的`cDeviceGetTemperatureThreshold`、`cDeviceSetGpuAcousticTemperatureThreshold`及其metadata/cache调用，固定到GSP表中的`0x2080852a`/1784、`0x2080852c`/1440、`0x2080c52d`/1440；没有把GPU Max、acoustic target、sensor threshold和FanStop混成一个字段。完整协议与地址见`docs/reverse-engineering/nvapi/macos-thermal-policy-r610.md`。
+
+实现与验证：
+
+- 设备GPU Max固定88°C；acoustic policy2发布65..87°C、默认83°C。GET阈值保留GPU Max和acoustic min/current/max，Shutdown/Slowdown/MemoryMax/GpsCurr无来源则明确为unavailable。
+- SET只发送acoustic target+212的FX8字段；驱动回读会联动计算多个曲线值。transaction根据已验证模型核对完整归一化1440B回读，错误/取消恢复原块。
+- core `QueryTemperatureThresholds`、`SetNvmlAcousticTemp`、`SetMacosRmAcousticTarget`，CLI `get-temp-thresholds`/`set-temp-limit --domain acoustic`/`reset-temp-limit --domain acoustic`，Python `set_thermal_limit(..., 'acoustic')`/`reset_thermal_limit`已接入；显式GPU Max写入拒绝。
+- 真实产品路径：82→81→83及Python再次82→83；边界65/87也独立往返。最终1440B原块恢复，风扇980B、功耗12B、时钟8432B保持，前后anchor healthy。拒绝路径覆盖nonroot0x1b、范围、缺域、错误域、reset缺域，均在选卡前拒绝。
+- 最新门禁：core141、CLI94、Python Rust18；完整Python59passed/10skipped，TUI214passed，GUI281passed/13skipped；本轮最终`cargo xtask ci`已记录 **CI_EXIT=0**；硬件只读温度策略测试1 passed，source manifest与证据归档随后写入bundle。
+
+分档：**native GPU Max/acoustic读取、acoustic目标SET/default reset、归一化回读、恢复和core/CLI/Python接入已实现且实测**。不支持修改固定GPU Max，不宣称完整NVML severity表、温度曲线编辑、风扇曲线/FanStop、服务/optimizer/UI写入或热稳定性。完整阶段0→12目标继续。

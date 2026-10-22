@@ -78,6 +78,7 @@ EXPECTED_EXPORTS = [
     "reset_pstate_native_lock",
     "reset_temp_sim",
     "reset_tgp_watt",
+    "reset_thermal_limit",
     "reset_vfp_deltas",
     "reset_vfp_frequency_lock",
     "reset_vfp_lock",

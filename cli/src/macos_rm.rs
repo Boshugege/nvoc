@@ -56,6 +56,9 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::ResetPstateGlobalFreqOffset
             | Command::SetPowerLimit
             | Command::ResetPowerLimit
+            | Command::GetTemperatureThresholds
+            | Command::SetTempLimit
+            | Command::ResetTempLimit
             // Fixed metadata/status/control now provide percentage and mode too.
             | Command::GetFanInfo
             | Command::SetFanSpeed
@@ -74,14 +77,6 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             | Command::GetLegacyTempSensor
     ) {
         Ok(())
-    } else if command == Command::GetTemperatureThresholds {
-        Err(CliError::new(format!(
-            // The constant already ends by naming the entry that does answer
-            // (get-legacy-temp-sensor), so the wrapper adds nothing after it:
-            // the captured text stuttered that sentence twice.
-            "get-temp-thresholds is unavailable on macOS RM: {}",
-            nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON
-        )))
     } else if command == Command::GetPstateFreqRange {
         // Same shape of refusal as the thermal thresholds above: this backend
         // does answer P-state questions (get-status reports the current one),
@@ -101,7 +96,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, set-fan-speed (percent/manual), reset-fan-speed, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, get-fan-info, get-public-power-limit, get-legacy-temp-sensor. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -115,8 +110,12 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
     let write = clock_write_request(invocation, command)?;
     let power_write = power_write_request(invocation, command)?;
     let fan_write = fan_write_request(invocation, command)?;
-    let _interrupt = (write.is_some() || power_write.is_some() || fan_write.is_some())
-        .then(InterruptGuard::install);
+    let thermal_write = thermal_write_request(invocation, command)?;
+    let _interrupt = (write.is_some()
+        || power_write.is_some()
+        || fan_write.is_some()
+        || thermal_write.is_some())
+    .then(InterruptGuard::install);
     let inventory = discover_targets(BackendSet::MacosRm)?;
     let targets = inventory.targets();
     let selected = select_targets(&targets, &gpu_selector(invocation))?;
@@ -157,6 +156,23 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "power_watt": f64::from(report.applied_mw)/1000.0, "power_mw": report.applied_mw,
                         "original_power_mw": report.original_mw, "readback_verified": report.readback_verified,
                         "other_bytes_preserved": report.other_bytes_preserved})
+                }
+                Command::GetTemperatureThresholds => {
+                    let items=run(&target,nvoc_core::QueryTemperatureThresholds)?.output;
+                    serde_json::Value::Array(items.into_iter().map(|item| {
+                        let mut value=json!({"name":item.name,"celsius":item.celsius});
+                        if item.celsius.is_none() {value["unavailable"]=json!(nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON);}
+                        value
+                    }).collect())
+                }
+                Command::SetTempLimit | Command::ResetTempLimit => {
+                    let report=run(&target,nvoc_core::SetMacosRmAcousticTarget {
+                        target:thermal_write.ok_or_else(||CliError::new("missing acoustic target request"))?,cancelled:&interrupted,
+                    })?.output;
+                    json!({"applied":true,"domain":"acoustic","acoustic_target_temp_c":report.applied_celsius,
+                        "original_celsius":report.original_celsius,"policy_index":report.policy_index,
+                        "readback_verified":report.readback_verified,"other_policies_preserved":report.other_policies_preserved,
+                        "derived_fields_verified":report.derived_fields_verified})
                 }
                 Command::SetFanSpeed | Command::ResetFanSpeed => {
                     let (slot,target_value)=fan_write.ok_or_else(|| CliError::new("missing fan request"))?;
@@ -243,6 +259,7 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "memory_offset_write": device.clock_offset_write_supported(ClockDomain::Memory),
                         "power_limit_write": device.power_limit_write_supported(),
                         "fan_percent_write": device.fan_percent_write_supported(),
+                        "acoustic_target_write":device.acoustic_target_write_supported(),
                     }));
                 }
             }
@@ -274,6 +291,32 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
         },
         results,
     })
+}
+
+fn thermal_write_request(
+    invocation: &Invocation,
+    command: Command,
+) -> CliResult<Option<nvoc_core::AcousticTarget>> {
+    if !matches!(command, Command::SetTempLimit | Command::ResetTempLimit) {
+        return Ok(None);
+    }
+    if option_one(invocation, "domain") != Some("acoustic") {
+        return Err(CliError::new(
+            "macOS thermal control requires explicit --domain acoustic (65..87 Celsius); GPU Max is a separate fixed 88 Celsius policy",
+        ));
+    }
+    let target = if command == Command::ResetTempLimit {
+        nvoc_core::AcousticTarget::Default
+    } else {
+        let raw = invocation
+            .positionals
+            .first()
+            .ok_or_else(|| CliError::new("missing Celsius target"))?;
+        let c = parse_i32_unit(raw, "c", "celsius")?;
+        nvoc_core::validate_macos_acoustic_target(c)?;
+        nvoc_core::AcousticTarget::Celsius(c)
+    };
+    Ok(Some(target))
 }
 
 fn fan_write_request(
@@ -577,7 +620,7 @@ mod tests {
 
     #[test]
     fn unsupported_commands_are_rejected_before_driver_access() {
-        let invocation = parse_args(["set-temp-limit", "70", "--macos-rm"]);
+        let invocation = parse_args(["set-fan-curve", "0", "40:800,60:1200,75:1800", "--macos-rm"]);
         assert!(
             invocation
                 .unwrap_err()
@@ -586,7 +629,7 @@ mod tests {
         );
         // Also check callers constructing Invocations without the parser.
         let mut invocation = parse_args(["get-info", "--macos-rm"]).unwrap();
-        invocation.command = Some(Command::SetTempLimit);
+        invocation.command = Some(Command::SetFanCurve);
         let error = run_invocation(&invocation).unwrap_err().to_string();
         assert!(error.contains("unavailable on macOS RM"));
         assert!(!error.contains("driver loaded"));
@@ -629,7 +672,7 @@ mod tests {
         // Stage-8 read face: throttle reasons are RM-backed now, so the
         // dedicated command joins the macOS allow-list.
         assert!(validate(Command::GetThrottleReasons).is_ok());
-        for command in [Command::SetTempLimit, Command::SetFanCurve] {
+        for command in [Command::SetFanCurve, Command::SetTempSim] {
             let error = validate(command).unwrap_err().to_string();
             assert!(error.contains("unavailable on macOS RM"), "{error}");
         }
@@ -750,74 +793,59 @@ mod tests {
     }
 
     #[test]
-    fn the_legacy_thermal_view_is_allowed_while_the_threshold_entries_stay_refused() {
-        // Stage 11 item 5, temperature family. The backend publishes live
-        // sensor readings, so the legacy thermal *view* answers from them; the
-        // entries that ask for something this backend never reads stay refused,
-        // with the reason living in the allow-list rather than in a fabricated
-        // number.
-        assert!(validate(Command::GetLegacyTempSensor).is_ok());
-        for command in [
-            // Thresholds (slowdown/shutdown/max) and the temp-limit range
-            // (min/default/max + curve) are policy reads: the RUSD section
-            // carries the reading, not the policy.
+    fn thermal_queries_and_explicit_acoustic_writes_have_distinct_contracts() {
+        for cmd in [
+            Command::GetLegacyTempSensor,
             Command::GetTemperatureThresholds,
-            Command::GetPublicTempLimit,
-            Command::GetTempSim,
             Command::SetTempLimit,
             Command::ResetTempLimit,
         ] {
-            let error = validate(command).unwrap_err().to_string();
-            assert!(error.contains("unavailable on macOS RM"), "{error}");
+            assert!(validate(cmd).is_ok());
         }
-        let allowed = validate(Command::GetTemperatureThresholds)
-            .unwrap_err()
-            .to_string();
-        assert!(allowed.contains("get-legacy-temp-sensor"), "{allowed}");
-        // The threshold entry is refused for a reason of its own, not with the
-        // list: this backend does publish sensor readings (the legacy view is
-        // allowed just above), so the list alone would read as "no thermal data
-        // on this path". The reason is the shared core constant the Python
-        // entry quotes, so the two cannot drift apart.
-        assert!(
-            allowed.contains(nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON),
-            "{allowed}"
+        for cmd in [
+            Command::GetPublicTempLimit,
+            Command::GetTempSim,
+            Command::SetTempSim,
+        ] {
+            assert!(
+                validate(cmd)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unavailable on macOS RM")
+            );
+        }
+        for args in [
+            vec!["set-temp-limit", "82", "--macos-rm"],
+            vec!["set-temp-limit", "82", "--domain", "gpu", "--macos-rm"],
+            vec!["set-temp-limit", "64", "--domain", "acoustic", "--macos-rm"],
+            vec!["set-temp-limit", "88", "--domain", "acoustic", "--macos-rm"],
+            vec!["reset-temp-limit", "--macos-rm"],
+        ] {
+            let i = parse_args(args).unwrap();
+            assert!(thermal_write_request(&i, i.command.unwrap()).is_err());
+        }
+        let i = parse_args([
+            "set-temp-limit",
+            "82C",
+            "--domain",
+            "acoustic",
+            "--macos-rm",
+        ])
+        .unwrap();
+        assert_eq!(
+            thermal_write_request(&i, Command::SetTempLimit).unwrap(),
+            Some(nvoc_core::AcousticTarget::Celsius(82))
         );
+        let i = parse_args(["reset-temp-limit", "--domain", "acoustic", "--macos-rm"]).unwrap();
+        assert_eq!(
+            thermal_write_request(&i, Command::ResetTempLimit).unwrap(),
+            Some(nvoc_core::AcousticTarget::Default)
+        );
+        assert!(parse_args(["reset-temp-limit", "--domain", "acoustic", "--nvapi"]).is_err());
         let pstate = validate(Command::GetPstateFreqRange)
             .unwrap_err()
             .to_string();
-        assert!(
-            pstate.contains(nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON),
-            "{pstate}"
-        );
-        assert!(pstate.contains("get-pstate-global-freq-offset"), "{pstate}");
-        // Both refusals open with the entry name, then the shared constant, then
-        // the entry that does answer -- and nothing that restates the shape the
-        // reason already names: the first version stuttered ("it reads the
-        // per-pstate clock table, and the per-pstate clock table has no source
-        // here"). This prefix check is what keeps that from coming back.
-        let thresholds_prefix = "get-temp-thresholds is unavailable on macOS RM: ";
-        assert!(allowed.starts_with(thresholds_prefix), "{allowed}");
-        assert!(
-            allowed[thresholds_prefix.len()..]
-                .starts_with(nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON),
-            "{allowed}"
-        );
-        let pstate_prefix = "get-pstate-freq-range is unavailable on macOS RM: ";
-        assert!(pstate.starts_with(pstate_prefix), "{pstate}");
-        assert!(
-            pstate[pstate_prefix.len()..]
-                .starts_with(nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON),
-            "{pstate}"
-        );
-        // An entry with no read source *in* this backend still keeps the
-        // list-shaped refusal: `get-temp-sim` used to be the example here, and
-        // no longer is -- it now names the layer it is missing (see
-        // `every_refused_read_of_the_three_families_names_its_layer`), because
-        // the list ends by explaining a write gate, which is the wrong layer
-        // for a read.
-        let list_shaped = validate(Command::SetTempLimit).unwrap_err().to_string();
-        assert!(list_shaped.contains("supported commands:"), "{list_shaped}");
+        assert!(pstate.contains(nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON));
     }
 
     /// Stage 11 item 5, third pass: the eight read entries of the three families
@@ -895,7 +923,7 @@ mod tests {
             validate(Command::GetPublicTempLimit)
                 .unwrap_err()
                 .to_string()
-                .contains("get-legacy-temp-sensor")
+                .contains("get-temp-thresholds")
         );
     }
 

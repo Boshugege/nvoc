@@ -446,3 +446,48 @@ fn shared_fan_info_reads_metadata_and_preserves_a_stopped_cooler() {
     assert!(!nvapi_init_attempted());
     println!("settings={settings:?}; report={report:?}; shared={shared:?}");
 }
+
+#[test]
+#[ignore = "requires validated TU116 thermal policy; fixed GETs only"]
+fn shared_temperature_thresholds_keep_fixed_max_and_acoustic_target_distinct() {
+    let _serial = serial();
+    let inventory = discover_targets(BackendSet::MacosRm).unwrap();
+    let targets = inventory.targets();
+    let target = targets[0];
+    let device = target.macos_rm().unwrap();
+    let policy = device.thermal_policy_settings().unwrap();
+    assert_eq!(
+        (
+            policy.gpu_max.minimum_celsius,
+            policy.gpu_max.default_celsius,
+            policy.gpu_max.maximum_celsius
+        ),
+        (88, 88, 88)
+    );
+    assert_eq!(
+        (
+            policy.acoustic.minimum_celsius,
+            policy.acoustic.default_celsius,
+            policy.acoustic.maximum_celsius
+        ),
+        (65, 83, 87)
+    );
+    let thresholds = run(&target, nvoc_core::QueryTemperatureThresholds)
+        .unwrap()
+        .output;
+    for (name, expected) in [
+        ("GpuMax", Some(88)),
+        ("AcousticMin", Some(65)),
+        ("AcousticCurr", Some(policy.acoustic.current_celsius as u32)),
+        ("AcousticMax", Some(87)),
+        ("GpsCurr", None),
+        ("Shutdown", None),
+    ] {
+        assert_eq!(
+            thresholds.iter().find(|t| t.name == name).unwrap().celsius,
+            expected
+        );
+    }
+    assert!(!nvapi_init_attempted());
+    println!("policy={policy:?}; thresholds={thresholds:?}");
+}

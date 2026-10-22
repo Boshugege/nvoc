@@ -250,3 +250,20 @@ class TestMacosFanValidation:
     def test_software_policy_is_distinct_from_firmware_auto(self, pynvoc):
         with pytest.raises(ValueError, match="manual or auto"):
             pynvoc.set_fan("not-a-gpu", "macos-rm", "0", "continuous", 35)
+
+
+class TestMacosThermalValidation:
+    @pytest.mark.skipif(
+        __import__("sys").platform != "darwin", reason="macOS policy route"
+    )
+    def test_gpu_max_is_not_silently_changed_to_acoustic(self, pynvoc):
+        with pytest.raises(ValueError, match="acoustic"):
+            pynvoc.set_thermal_limit("absent-gpu", 82)
+
+    @pytest.mark.skipif(
+        __import__("sys").platform != "darwin", reason="macOS policy route"
+    )
+    @pytest.mark.parametrize("value", [64, 88])
+    def test_acoustic_window_precedes_gpu_selection(self, pynvoc, value):
+        with pytest.raises(RuntimeError, match=r"65\.\.87"):
+            pynvoc.set_thermal_limit("absent-gpu", value, "acoustic")

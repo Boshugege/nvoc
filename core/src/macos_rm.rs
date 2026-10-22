@@ -107,6 +107,7 @@ pub struct SettingsCapabilities {
     pub memory_offset_write: bool,
     pub power_limit_write: bool,
     pub fan_percent_write: bool,
+    pub acoustic_target_write: bool,
 }
 
 /// Whether this backend supports the bulk settings write contract.
@@ -126,7 +127,7 @@ pub const SETTINGS_RESTORE_SUPPORTED: bool = false;
 ///
 /// Graphics additive offset has a separate transactional route. Other families
 /// still need their own protocol, bounds, readback and recovery validation.
-pub const MACOS_RM_WRITE_GATE_REASON: &str = "bulk settings/restore and this control family remain unavailable (SETTINGS_WRITE_SUPPORTED is false); graphics and memory additive offsets have validated transactional SET routes and per-domain write capabilities; board power limits and cooler0 percentage/firmware-auto control also have validated routes. Other controls and unattended optimization remain gated";
+pub const MACOS_RM_WRITE_GATE_REASON: &str = "bulk settings/restore and this control family remain unavailable (SETTINGS_WRITE_SUPPORTED is false); graphics and memory additive offsets have validated transactional SET routes and per-domain write capabilities; board power limits and cooler0 percentage/firmware-auto and acoustic thermal target control also have validated routes. Other controls and unattended optimization remain gated";
 
 /// Why a family that needs a *write* is listed as unavailable: the write half of
 /// these ids carries the legacy privileged bits, so an unprivileged client is
@@ -160,16 +161,11 @@ pub const VF_CURVE_UNREADABLE_REASON: &str = "the VF read half exists and is non
 /// The thermal family *is* read -- the sensor path answered with a temperature
 /// before the wedge -- so what is absent for a limit is a different field, and
 /// that distinction is exactly what the retired blanket sentence lost.
-pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "the thermal family itself is readable (0x20800513 answered a sensor reading before the wedge), and the *configured* limit is a different field that has not been located yet -- but it is located enough to say where it is not: the SDK's thermal control family is exactly two ids (0x20800513 and its non-privileged twin 0x20808513) and its opcodes cover targets, sensors, readings, reading ranges and a sensor target index, so no limit or policy opcode exists in the family we already call successfully; on the client side the configured limit is a *policy* -- a per-policy id, a Celsius value and a remove-TDP-limit flag, with PFF alongside it -- so the shape of the value is known and only the RM control that carries the policy query is still unlocated, and the in-tree NVAPI copy quotes no RM id for it at all (thermal.rs has zero, the whole gpu.rs has ten); what does answer on macOS is the live reading of every sensor this backend knows, through get-legacy-temp-sensor (see notes)";
+pub const THERMAL_LIMIT_UNREADABLE_REASON: &str = "native thermal policies are readable: GPU Max is fixed 88 Celsius and acoustic target has a separate 65..87 Celsius transaction; the NVAPI public temp-limit range/throttle-curve contract is not connected to this entry; use get-temp-thresholds for native policy values (see notes)";
 
-/// The boost path is a SET, so it sits behind the same gate as the write
-/// families; nothing about it has been read, and nothing is claimed.
-/// The temperature-*threshold* entry asks for NVML's severity table (slow,
-/// warning, shutdown and the hardware pair). This backend answers the thermal
-/// family successfully, but the table itself has no source yet, so the entry is
-/// refused rather than left to fail with a platform-level message that would
-/// read as "no thermal data on this path" -- which the reading disproves.
-pub const THERMAL_THRESHOLDS_UNREADABLE_REASON: &str = "the threshold table has no source here, and the family that would carry it has been read: 0x20800513 answered NV_OK with one target and one sensor reading 47 on the driver's own [0,127] range (its non-privileged twin 0x20808513 is the same read), and the SDK's thermal control family is exactly those two ids -- its opcodes cover targets, sensors, readings, reading ranges and a sensor target index, so no severity/threshold opcode exists in the family this host answers; the thresholds are therefore unlocated rather than absent, and the *configured* policy limit is a different field again (see thermal_limit); what does answer on macOS is the live reading of every sensor this backend knows, through get-legacy-temp-sensor (see notes)";
+/// Missing channels of the partially available native threshold table. The
+/// device query reports independently sourced GPU-Max/acoustic values.
+pub const THERMAL_THRESHOLDS_UNREADABLE_REASON: &str = "GPU Max and acoustic min/current/max thresholds are implemented from thermal policy metadata/control; Shutdown selector3 returned NV_ERR_NOT_SUPPORTED (0x56), Slowdown cache decoding is unlocated, and MemoryMax/GpsCurr selectors are 0xff on this device (see notes)";
 
 /// NVML's pstate entry emits a table of P-state to clock pairs. This backend
 /// publishes the *current* P-state and per-domain offsets, so the table has no
@@ -294,6 +290,7 @@ pub struct DeviceSettings {
     pub power_limit_requested_mw: Option<u32>,
     pub power_limit_policy: Option<crate::PowerPolicySettings>,
     pub fan_control: Option<crate::FanControlSettings>,
+    pub thermal_policy: Option<crate::ThermalPolicySettings>,
     pub pcie_link_gen: Option<u32>,
     pub memory_total_bytes: Option<u64>,
     pub memory_used_bytes: Option<u64>,
@@ -410,6 +407,7 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
         power_limit_requested_mw: status.power_limit_requested_mw,
         power_limit_policy: None,
         fan_control: None,
+            thermal_policy: None,
         pcie_link_gen: status.pcie_link_gen,
         memory_total_bytes: info.memory_total_bytes,
         memory_used_bytes: status.memory_used_bytes,
@@ -431,12 +429,14 @@ fn settings_from(info: &DeviceInfo, status: &DeviceStatus) -> DeviceSettings {
             memory_offset_write: offset_writes_supported(info),
             power_limit_write: offset_writes_supported(info),
             fan_percent_write: offset_writes_supported(info),
+            acoustic_target_write: offset_writes_supported(info),
         },
         notes: vec![
             "responder: these ids are answered by the GSP firmware, not by a host RM table row (NVRM forwards legacy ids with bit 0x8000 set), so every parameter block is sized against the GSP's own export table rather than the NVAPI caller struct.".into(),
             "read: P-state, enforced/requested power limit, PCIe generation, board/SKU and memory sizes come from the same RM snapshot as get-status; sensor readings are separate (see get-status).".into(),
             "write: graphics/memory additive offsets and board power-limit and cooler0 percentage/auto writes are implemented; other control families remain unavailable. NVRM still enforces root for SET. On this host a private clock/voltage SET is not even reachable from an unprivileged client: the write half of these ids is one category byte over (0x2080901B -> 0x2080D01C: the 0x80-0xBF legacy-non-privileged byte gains 0x40 and the message id advances by one), and NVRM's legacy forwarder refuses 0xC000 commands below root with 0x1b before the GSP sees them. Behind that gate the GSP handler exists (its own preconditions are enumerated in docs/reverse-engineering/nvapi/gsp-method-table-and-legacy-forwarding.md section 4.4). Graphics/memory SET validates identity, a readable current value, a bounded step and exact recovery; other control families still require independent validation. The GSP must not be in the RESET_REQUIRED state.".into(),
             "clock-domain configuration is read from 0x20809019 directory and 0x2080901b control: selector +8 = 0 means signed i32 kHz at record +12; relative/unknown modes remain unavailable as additive kHz. RM776 supplies live frequency only. The control mask selects directory indices, not public domain bits; the current 0xff read mask covers the first eight records. Probe validation demonstrated core +15 MHz and exact restoration; public graphics/memory SET now uses a snapshot/SET/full-readback/rollback transaction; other writes remain separately gated. The measured 0x20809025 range records report +/-18750 kHz, without a proven per-domain range mapping".into(),
+            "thermal: native policy metadata/control distinguish fixed GPU Max88 from acoustic65..87/default83 Celsius. Driver-derived curve/threshold fields are verified separately from the single target sent in SET. Shutdown/Slowdown/MemoryMax/GpsCurr remain unavailable as stated by THERMAL_THRESHOLDS_UNREADABLE_REASON; sensor limits and software stop temperatures are separate.".into(),
             "fan: measured cooler0 metadata/status/control use fixed 1432/844/980-byte blocks. Settings read mode, target percentage, independent status percentage and RPM; manual/firmware-auto SET uses exact full-block verification/rollback. Curves/FanStop/RPM-target mode are separate and remain unavailable.".into(),
             "voltage/rails: rails-get-info 0x2080B201 answers NV_OK at its own 2444-byte size (the earlier 0x1f came from the NVAPI-era size, not from a missing command), while perf-get-level-info-v2 0x2080200B still returns 0x1f. EDPp limit info and pmumon clock samples return NV_ERR_NOT_SUPPORTED (0x56).".into(),
         ],
@@ -1558,6 +1558,53 @@ impl Device {
         }
     }
 
+    pub fn acoustic_target_write_supported(&self) -> bool {
+        offset_writes_supported(&self.info)
+    }
+    pub fn thermal_policy_settings(&self) -> Result<crate::ThermalPolicySettings, Error> {
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(&|| false, |session| {
+                let _guard = lock_transport()?;
+                let mut io = NativeThermalPolicy(session.handle);
+                let info = io.info()?;
+                let current = crate::macos_control_transaction::ControlBlock::get(&mut io)?;
+                crate::macos_thermal_policy::settings(&info, &current)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            Err(Error::Custom(
+                "macOS thermal policy requires x86_64 macOS".into(),
+            ))
+        }
+    }
+    pub fn set_acoustic_target(
+        &self,
+        target: crate::AcousticTarget,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<crate::AcousticTargetWriteReport, Error> {
+        if let crate::AcousticTarget::Celsius(c) = target {
+            crate::validate_macos_acoustic_target(c)?;
+        }
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(cancelled, |session| {
+                let _guard = lock_transport()?;
+                let mut io = NativeThermalPolicy(session.handle);
+                let info = io.info()?;
+                crate::macos_thermal_policy::apply(&mut io, &info, target, cancelled)
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let _ = cancelled;
+            Err(Error::Custom(
+                "macOS thermal policy requires x86_64 macOS".into(),
+            ))
+        }
+    }
+
     pub fn fan_percent_write_supported(&self) -> bool {
         offset_writes_supported(&self.info)
     }
@@ -1771,6 +1818,19 @@ impl Device {
             Err(error) => settings
                 .notes
                 .push(format!("board power policy: not read ({error})")),
+        }
+        match self.thermal_policy_settings() {
+            Ok(policy) => {
+                settings.thermal_policy = Some(policy);
+                settings.unavailable.remove("thermal_limit");
+                settings.unavailable.insert("gpu_max_write".into(),"the measured GPU Max policy has min/default/max 88/88/88 Celsius; acoustic target control is separate".into());
+            }
+            Err(error) => {
+                settings.unavailable.insert(
+                    "thermal_limit".into(),
+                    format!("thermal policy read failed: {error}"),
+                );
+            }
         }
         match self.fan_control_settings() {
             Ok(fan) => {
@@ -1986,6 +2046,23 @@ fn validate_clock_preflight(
         ));
     }
     Ok(())
+}
+
+/// Acoustic target with complete normalized readback and exact rollback.
+pub struct SetMacosRmAcousticTarget<'a> {
+    pub target: crate::AcousticTarget,
+    pub cancelled: &'a dyn Fn() -> bool,
+}
+impl crate::GpuOperation for SetMacosRmAcousticTarget<'_> {
+    type Output = crate::AcousticTargetWriteReport;
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::SetNvmlAcousticTemp
+    }
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target
+            .macos_rm()?
+            .set_acoustic_target(self.target, self.cancelled)
+    }
 }
 
 /// Percentage/auto control with cooperative cancellation and full-block rollback.
@@ -2366,6 +2443,14 @@ unsafe extern "C" {
         cap: usize,
     ) -> u32;
     fn nvoc_macos_rm_session_fan(
+        handle: *mut SessionOpaque,
+        kind: u32,
+        block: *mut u8,
+        size: usize,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
+    fn nvoc_macos_rm_session_thermal_policy(
         handle: *mut SessionOpaque,
         kind: u32,
         block: *mut u8,
@@ -3417,6 +3502,53 @@ impl OffsetBlock {
     }
 }
 
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+struct NativeThermalPolicy(*mut SessionOpaque);
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl NativeThermalPolicy {
+    fn transfer(&mut self, kind: u32, block: &mut [u8]) -> Result<(), Error> {
+        let mut error = [0u8; 256];
+        // SAFETY: caller owns the live session and holds the transport mutex;
+        // C validates the fixed operation and exact writable buffer size.
+        let status = unsafe {
+            nvoc_macos_rm_session_thermal_policy(
+                self.0,
+                kind,
+                block.as_mut_ptr(),
+                block.len(),
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(Error::Custom(format!(
+                "macOS thermal policy control failed: RM 0x{status:08x} {}",
+                text(&error)
+            )))
+        }
+    }
+    fn info(&mut self) -> Result<Vec<u8>, Error> {
+        let mut block = vec![0; crate::macos_thermal_policy::INFO_BYTES];
+        self.transfer(0, &mut block)?;
+        Ok(block)
+    }
+}
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+impl crate::macos_control_transaction::ControlBlock<{ crate::macos_thermal_policy::BYTES }>
+    for NativeThermalPolicy
+{
+    fn get(&mut self) -> Result<[u8; crate::macos_thermal_policy::BYTES], Error> {
+        let mut b = [0; crate::macos_thermal_policy::BYTES];
+        self.transfer(1, &mut b)?;
+        Ok(b)
+    }
+    fn set(&mut self, block: &[u8; crate::macos_thermal_policy::BYTES]) -> Result<(), Error> {
+        let mut b = *block;
+        self.transfer(2, &mut b)
+    }
+}
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 struct NativeFanControl(*mut SessionOpaque);
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
@@ -4612,6 +4744,7 @@ mod tests {
             power_limit_requested_mw: None,
             power_limit_policy: None,
             fan_control: None,
+            thermal_policy: None,
             pcie_link_gen: None,
             memory_total_bytes: None,
             memory_used_bytes: None,
@@ -4631,6 +4764,7 @@ mod tests {
                 memory_offset_write: false,
                 power_limit_write: false,
                 fan_percent_write: false,
+                acoustic_target_write: false,
             },
             notes: Vec::new(),
         }

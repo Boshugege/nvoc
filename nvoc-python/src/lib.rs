@@ -1485,6 +1485,32 @@ fn settings_macos_rm_to_map(
             serde_json::to_value(policy).unwrap_or(Value::Null),
         );
     }
+    if let Some(policy) = &settings.thermal_policy {
+        map.insert(
+            "thermal_policy".into(),
+            serde_json::to_value(policy).unwrap_or(Value::Null),
+        );
+        map.insert(
+            "gpu_max_temperature_c".into(),
+            i64_value(i64::from(policy.gpu_max.current_celsius)),
+        );
+        map.insert(
+            "acoustic_target_current_c".into(),
+            i64_value(i64::from(policy.acoustic.current_celsius)),
+        );
+        map.insert(
+            "acoustic_target_min_c".into(),
+            i64_value(i64::from(policy.acoustic.minimum_celsius)),
+        );
+        map.insert(
+            "acoustic_target_default_c".into(),
+            i64_value(i64::from(policy.acoustic.default_celsius)),
+        );
+        map.insert(
+            "acoustic_target_max_c".into(),
+            i64_value(i64::from(policy.acoustic.maximum_celsius)),
+        );
+    }
     if let Some(fan) = &settings.fan_control {
         map.insert(
             "fan_control".into(),
@@ -1631,6 +1657,10 @@ fn settings_macos_rm_to_map(
             ("memory_offset_write", bool_value(caps.memory_offset_write)),
             ("power_limit_write", bool_value(caps.power_limit_write)),
             ("fan_percent_write", bool_value(caps.fan_percent_write)),
+            (
+                "acoustic_target_write",
+                bool_value(caps.acoustic_target_write),
+            ),
         ]),
     );
     if !settings.unavailable.is_empty() {
@@ -1979,10 +2009,16 @@ fn normalize_temperature_thresholds(target: &GpuTarget<'_>) -> PyResultValue {
         .output
         .into_iter()
         .map(|item| {
-            value_object([
+            let mut value = value_object([
                 ("name", Value::String(item.name.to_string())),
                 ("celsius", option_u32(item.celsius)),
-            ])
+            ]);
+            if target.has_macos_rm() && item.celsius.is_none() {
+                value["celsius"] = Value::Null;
+                value["unavailable"] =
+                    Value::String(nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON.into());
+            }
+            value
         })
         .collect();
     Ok(Value::Array(items))
@@ -2554,11 +2590,11 @@ fn query_cooler_info(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn query_temperature_thresholds(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
-    refuse_without_source(
-        "query_temperature_thresholds",
-        nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON,
+    let value = with_target(
+        gpu,
+        fan_power_backends(cfg!(target_os = "macos")),
+        normalize_temperature_thresholds,
     )?;
-    let value = with_target(gpu, "nvml", normalize_temperature_thresholds)?;
     py_value(py, &value)
 }
 
@@ -3078,7 +3114,40 @@ fn set_power_limit(py: Python<'_>, gpu: &str, backend: &str, value: u32) -> PyRe
 }
 
 #[pyfunction]
-fn set_thermal_limit(py: Python<'_>, gpu: &str, celsius: i32) -> PyResult<()> {
+#[pyo3(signature=(gpu,celsius,domain=None))]
+fn set_thermal_limit(
+    py: Python<'_>,
+    gpu: &str,
+    celsius: i32,
+    domain: Option<&str>,
+) -> PyResult<()> {
+    if cfg!(target_os = "macos") {
+        if domain != Some("acoustic") {
+            return Err(invalid_value(
+                "macOS GPU Max is fixed88 Celsius; select domain='acoustic' explicitly",
+            ));
+        }
+        nvoc_core::validate_macos_acoustic_target(celsius).map_err(to_py_err)?;
+        return py.detach(|| {
+            with_target(gpu, "macos-rm", |target| {
+                run(
+                    target,
+                    nvoc_core::SetMacosRmAcousticTarget {
+                        target: nvoc_core::AcousticTarget::Celsius(celsius),
+                        cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                    },
+                )
+                .map_err(to_py_err)?;
+                Ok(Value::Null)
+            })?;
+            Ok(())
+        });
+    }
+    if domain.is_some() {
+        return Err(invalid_value(
+            "set_thermal_limit domain selection is currently implemented for macOS acoustic only",
+        ));
+    }
     let gpu_own = gpu.to_string();
     py.detach(|| -> PyResult<()> {
         let gpu: &str = &gpu_own;
@@ -3099,6 +3168,29 @@ fn set_thermal_limit(py: Python<'_>, gpu: &str, celsius: i32) -> PyResult<()> {
         } else {
             run(&target, SetTemperatureLimit { celsius }).map_err(to_py_err)?;
         }
+        Ok(())
+    })
+}
+
+#[pyfunction]
+fn reset_thermal_limit(py: Python<'_>, gpu: &str, domain: &str) -> PyResult<()> {
+    if !cfg!(target_os = "macos") || domain != "acoustic" {
+        return Err(invalid_value(
+            "reset_thermal_limit requires the macOS acoustic domain",
+        ));
+    }
+    py.detach(|| {
+        with_target(gpu, "macos-rm", |target| {
+            run(
+                target,
+                nvoc_core::SetMacosRmAcousticTarget {
+                    target: nvoc_core::AcousticTarget::Default,
+                    cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
+                },
+            )
+            .map_err(to_py_err)?;
+            Ok(Value::Null)
+        })?;
         Ok(())
     })
 }
@@ -6123,6 +6215,7 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(set_clock_offset, m)?)?;
     m.add_function(wrap_pyfunction!(set_power_limit, m)?)?;
     m.add_function(wrap_pyfunction!(set_thermal_limit, m)?)?;
+    m.add_function(wrap_pyfunction!(reset_thermal_limit, m)?)?;
     m.add_function(wrap_pyfunction!(set_ppab_status, m)?)?;
     m.add_function(wrap_pyfunction!(query_tgp_watt_range, m)?)?;
     m.add_function(wrap_pyfunction!(set_tgp_watt, m)?)?;
@@ -6268,14 +6361,6 @@ mod tests {
     #[test]
     fn shape_less_entries_name_the_missing_layer_not_the_platform() {
         let cases = [
-            (
-                "query_temperature_thresholds",
-                nvoc_core::THERMAL_THRESHOLDS_UNREADABLE_REASON,
-                // Names the layer: the opcode that would carry a threshold is
-                // not in the family this host answers, so the field is
-                // unlocated rather than absent.
-                "no severity/threshold opcode exists in the family this host answers",
-            ),
             (
                 "query_pstates",
                 nvoc_core::PSTATE_FREQ_TABLE_UNREADABLE_REASON,
@@ -6662,6 +6747,7 @@ mod tests {
             power_limit_requested_mw: Some(100_000),
             power_limit_policy: None,
             fan_control: None,
+            thermal_policy: None,
             pcie_link_gen: Some(3),
             memory_total_bytes: Some(4_294_967_296),
             memory_used_bytes: Some(209_649_664),
@@ -6712,6 +6798,7 @@ mod tests {
                 memory_offset_write: false,
                 power_limit_write: false,
                 fan_percent_write: false,
+                acoustic_target_write: false,
             },
             notes: vec!["read: ...".to_string()],
         };

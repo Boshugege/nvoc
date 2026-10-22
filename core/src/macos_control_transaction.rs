@@ -51,13 +51,33 @@ pub(crate) fn write_block<T: ControlBlock<N>, const N: usize>(
     cancelled: &dyn Fn() -> bool,
     description: String,
 ) -> Result<(), Error> {
+    write_block_with_readback(io, original, wanted, wanted, cancelled, description)
+}
+
+/// Some controls normalize derived fields after SET. The caller must construct
+/// the complete expected reply from a validated model. Rollback always compares
+/// the complete original bytes, independently of this forward-readback model.
+pub(crate) fn write_block_with_readback<T: ControlBlock<N>, const N: usize>(
+    io: &mut T,
+    original: [u8; N],
+    wanted: [u8; N],
+    expected: [u8; N],
+    cancelled: &dyn Fn() -> bool,
+    description: String,
+) -> Result<(), Error> {
     if cancelled() {
         return Err(Error::Custom(format!(
             "{description}: cancelled before SET"
         )));
     }
     if original == wanted {
-        return Ok(());
+        return if original == expected {
+            Ok(())
+        } else {
+            Err(Error::Custom(format!(
+                "{description}: unchanged request has inconsistent expected readback"
+            )))
+        };
     }
     let mut rollback = Rollback {
         io,
@@ -67,7 +87,7 @@ pub(crate) fn write_block<T: ControlBlock<N>, const N: usize>(
     };
     let outcome = (|| {
         rollback.io.set(&wanted)?;
-        if rollback.io.get()? != wanted {
+        if rollback.io.get()? != expected {
             return Err(Error::Custom(format!(
                 "{}: full-block readback mismatch",
                 rollback.description

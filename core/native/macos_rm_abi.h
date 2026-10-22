@@ -210,6 +210,11 @@ uint32_t nvoc_macos_rm_session_fan(nvoc_rm_session *session, uint32_t kind,
 uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *session, uint32_t kind,
     void *block, size_t size, char *error, size_t cap);
 
+/* Fixed thermal policy GET-info(0,1784B), GET-control(1,1440B), SET(2,1440B).
+ * Rust validates the acoustic target and the complete driver-normalized reply. */
+uint32_t nvoc_macos_rm_session_thermal_policy(nvoc_rm_session *session, uint32_t kind,
+    void *block, size_t size, char *error, size_t cap);
+
 /* The public thermal read face: NV2080_CTRL_CMD_THERMAL_SYSTEM_EXECUTE_V2
  * (0x20800513), an in-tree header-defined opcode batch whose read opcodes
  * (targets/sensors available, a sensor's reading, its reading range, its target

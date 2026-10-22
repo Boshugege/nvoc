@@ -745,6 +745,9 @@ impl GpuOperation for QueryTemperatureThresholds {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        if target.has_macos_rm() {
+            return Ok(target.macos_rm()?.thermal_policy_settings()?.thresholds());
+        }
         low_nvml::get_nvml_temperature_thresholds(target.nvml()?, target.id.0)
             .ok_or_else(|| {
                 Error::Custom(format!(
@@ -860,6 +863,9 @@ impl GpuOperation for SetTemperatureLimit {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        if target.has_macos_rm() {
+            return Err(Error::Custom("macOS GPU Max is a fixed 88 Celsius policy, not a writable acoustic target; choose the acoustic domain explicitly".into()));
+        }
         low_nvml::set_nvml_temperature_limit(target.nvml()?, target.id.0, self.celsius)?;
         Ok(AppliedValue {
             requested: self.celsius,
@@ -885,6 +891,15 @@ impl GpuOperation for SetNvmlAcousticTemp {
     }
 
     fn run(&self, target: &GpuTarget<'_>) -> Result<Self::Output, Error> {
+        if target.has_macos_rm() {
+            let report = target
+                .macos_rm()?
+                .set_acoustic_target(crate::AcousticTarget::Celsius(self.celsius), &|| false)?;
+            return Ok(AppliedValue {
+                requested: self.celsius,
+                applied: report.applied_celsius,
+            });
+        }
         low_nvml::set_nvml_acoustic_temperature(target.nvml()?, target.id.0, self.celsius)?;
         Ok(AppliedValue {
             requested: self.celsius,
