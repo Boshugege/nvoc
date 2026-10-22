@@ -2571,6 +2571,8 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 
 **④ 实现** ✔：新增 `core/src/macos_clock_domains.rs`（`DOMAIN_MASK_CMD`/`DOMAIN_CLOCK_CMD`/`DOMAIN_CLOCK_VERSION`，260 字节定长块 = mask + 32×kHz + 32×status，`parse_domains` 只解码 mask 置位的位，短块拒绝而不是截断）；C 桥 `nvoc_macos_rm_session_clock_domains` 先枚举再逐位置位读，**单域被拒只留 status、不折成 0**；core `ClockDomainReadout`/`ClockDomainView`（`clock_khz`+`clock_mhz`+`reason`）、`Device::clock_domains`（先复核身份，session 用完即关）、`QueryMacosRmClockDomains`；CLI 新命令 `get-clock-domain`（`Group::Clock`，allowlist 放行，其他后端给出口径一致的拒绝文本，带人类可读 formatter，回绝的位在 MHz 列显示 `RM 0x…` 而不是空白）；Python `get_clock_domain` 与 `__all__` 导出。域按**位**报告而不翻译成 graphics/memory：这里的位图与 offset SET 用的公共域不是同一套编号，命名会是猜。
 
-**⑤ 证据（测试机，产品命令）** ✔：见 `stage-clock-domain-20261022T…/`（`SHA256SUMS` 校验通过）。
+**⑤ 证据（测试机，产品命令，全序列）** ✔：`stage-clock-domain-20261022T0430Z/`（`00..08` 步，`SHA256SUMS` 校验通过）。只读命令不写块，所以核对的是"前后保护状态逐字一致"而不是回滚：`00/08` 的 HEAD、工作树、二进制 md5 `diff` 为空。`01/02` 两次 root 调用 mask 恒 `0x03FC007F`（15 位）而 MHz 列在 1543–1547 间逐次变动，证明读的是实时频率；`03` `--fan 0` 被 clap 拒绝；`04` 普通用户可读（无 `0x1b`）；`05` Python `get_clock_domain("0x0100")` 回同一 mask 的 15 条记录、无需 root；`06` 相邻域未动（offset `P0/core/+0`、power-source `ac`、fan-info `mode auto`）；`07` `get-status` 仍正常。
 
-**⑥ 边界** ✗：`+0` 的模式字 0/1 只知位图不同，语义未定（0 = 全量，1 = 更窄的子集，按实测原样记录）；域位与公共 graphics/memory 域的对应未建立，因此不能直接当作锁定通道；`get-status` 已有的 gpc/mem 读数来自 RM776，与本命令的两条路径互不覆盖；`0x20809014` 仍 `0x1f`，锁定时钟继续挂着。
+**⑥ 门禁** ✔：`cargo xtask ci` → `CI_EXIT=0`（本机 aarch64-linux 与测试机各一次）。顺带修掉门禁/实测抓到的一处真回归：macOS 分支对**所有**载荷都走值块渲染，命令自带的 formatter 在这里被静默忽略（新命令第一版打出来的就是通用块）；改成"有 formatter 就用 formatter"，值块只做兜底（命令没有 formatter、或 formatter 对本载荷无话可说时）。测试机 `_native.abi3.so` 须手工 `maturin develop --release` 重编，否则 Python 侧 `ImportError`。
+
+**⑦ 边界** ✗：`+0` 的模式字 0/1 只知位图不同，语义未定（0 = 全量，1 = 更窄的子集，按实测原样记录）；域位与公共 graphics/memory 域的对应未建立，因此不能直接当作锁定通道；`get-status` 已有的 gpc/mem 读数来自 RM776，与本命令的两条路径互不覆盖；`0x20809014` 仍 `0x1f`，锁定时钟继续挂着。
