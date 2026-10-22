@@ -309,6 +309,82 @@ pub fn first_difference(
         })
 }
 
+/// Why a pre-write read cannot be used as the comparison target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightFault {
+    /// The driver answered a different entry count than it was given.
+    Count,
+    /// The driver moved the entry to another vPstate or domain.
+    Identity,
+    /// The driver normalised a bound to zero, or inverted the window.
+    Bounds,
+}
+
+impl fmt::Display for PreflightFault {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Count => "the driver answers a different entry count",
+            Self::Identity => "the driver moves the entry to another vPstate or domain",
+            Self::Bounds => "the driver leaves no usable window behind",
+        })
+    }
+}
+
+/// Checks the pre-write read before it is trusted as a comparison target.
+///
+/// The driver's answer is *not* the request: it replaces the floor with the
+/// window's effective floor, which is the stored floor raised to the live clock,
+/// and echoes the ceiling. That makes the answer state-dependent, so it is only
+/// rejected when it could not be written back at all -- a moved identity, an
+/// erased bound or an inverted window (a floor above the ceiling). A floor that
+/// merely moved is accepted and becomes the value the readback is held to.
+pub fn check_preflight(
+    requested: &[LockWindow],
+    answered: &[LockWindow],
+) -> Result<(), (PreflightFault, LockWindow, Option<LockWindow>)> {
+    if requested.len() != answered.len() {
+        let want = requested[requested.len().saturating_sub(1)];
+        return Err((PreflightFault::Count, want, answered.first().copied()));
+    }
+    for (want, got) in requested.iter().zip(answered) {
+        if want.pstate != got.pstate || want.domain != got.domain {
+            return Err((PreflightFault::Identity, *want, Some(*got)));
+        }
+        if !got.bounds_present() || got.min_khz > got.max_khz {
+            return Err((PreflightFault::Bounds, *want, Some(*got)));
+        }
+    }
+    Ok(())
+}
+
+/// The readback comparison used after the write.
+///
+/// Identity and ceiling are exact; the floor only has to stay inside the window,
+/// because the driver recomputes it from the clock the write itself just moved.
+pub fn first_stable_difference(
+    wanted: &[LockWindow],
+    readback: &[LockWindow],
+) -> Option<(LockWindow, Option<LockWindow>)> {
+    wanted
+        .iter()
+        .enumerate()
+        .find_map(|(index, want)| {
+            let got = readback.get(index).copied();
+            let stable = got.is_some_and(|got| {
+                got.pstate == want.pstate
+                    && got.domain == want.domain
+                    && got.max_khz == want.max_khz
+                    && got.min_khz <= got.max_khz
+            });
+            (!stable).then_some((*want, got))
+        })
+        .or_else(|| {
+            readback
+                .get(wanted.len())
+                .map(|extra| (wanted[wanted.len() - 1], Some(*extra)))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,6 +532,66 @@ mod tests {
         );
         let extra = vec![graphics(1_000_000, 1_200_000), LockWindow::new(8, 2, 1, 2)];
         assert!(first_difference(&want, &extra).is_some());
+    }
+
+    #[test]
+    fn a_preflight_accepts_a_raised_floor_but_not_an_inverted_window() {
+        let want = vec![graphics(1_000_000, 1_200_000)];
+        // The driver raises the floor to the live clock: still writable.
+        let raised = vec![graphics(1_082_343, 1_200_000)];
+        assert_eq!(check_preflight(&want, &raised), Ok(()));
+        // A floor above the ceiling has no window left.
+        let inverted = vec![graphics(1_202_343, 1_200_000)];
+        assert_eq!(
+            check_preflight(&want, &inverted),
+            Err((
+                PreflightFault::Bounds,
+                graphics(1_000_000, 1_200_000),
+                Some(graphics(1_202_343, 1_200_000))
+            ))
+        );
+        // Zeroed bounds and moved identity are faults of their own.
+        assert!(matches!(
+            check_preflight(&want, &[graphics(0, 1_200_000)]),
+            Err((PreflightFault::Bounds, _, _))
+        ));
+        assert_eq!(
+            check_preflight(&want, &[LockWindow::new(4, DOMAIN_GRAPHICS, 1, 2)]),
+            Err((
+                PreflightFault::Identity,
+                graphics(1_000_000, 1_200_000),
+                Some(LockWindow::new(4, DOMAIN_GRAPHICS, 1, 2))
+            ))
+        );
+        assert_eq!(
+            check_preflight(&want, &[]),
+            Err((PreflightFault::Count, graphics(1_000_000, 1_200_000), None))
+        );
+    }
+
+    #[test]
+    fn a_readback_may_move_the_floor_but_not_the_ceiling_or_the_domain() {
+        let want = vec![graphics(1_080_000, 1_620_000)];
+        // Same identity and ceiling, floor recomputed by the driver.
+        assert_eq!(
+            first_stable_difference(&want, &[graphics(1_620_000, 1_620_000)]),
+            None
+        );
+        assert_eq!(
+            first_stable_difference(&want, &[graphics(1_080_000, 1_700_000)]),
+            Some((
+                graphics(1_080_000, 1_620_000),
+                Some(graphics(1_080_000, 1_700_000))
+            ))
+        );
+        assert_eq!(
+            first_stable_difference(&want, &[LockWindow::new(8, 2, 1_080_000, 1_620_000)]),
+            Some((
+                graphics(1_080_000, 1_620_000),
+                Some(LockWindow::new(8, 2, 1_080_000, 1_620_000))
+            ))
+        );
+        assert!(first_stable_difference(&want, &[]).is_some());
     }
 
     #[test]

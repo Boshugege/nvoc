@@ -1990,16 +1990,19 @@ impl Device {
         let mut session = MacosRmSession::open()?;
         let result = (|| {
             check_lock_identity(&self.info, session.identity())?;
+            // The pre-write read is both the rollback snapshot and the value the
+            // readback is held to; the driver's normalisation of the floor is
+            // part of the answer rather than a miss.
             let expected = session.read_locked_clocks(request)?;
-            if let Some((want, got)) = macos_lock::first_difference(request, &expected) {
+            if let Err((fault, want, got)) = macos_lock::check_preflight(request, &expected) {
                 return Err(Error::Custom(format!(
-                    "locked-clock preflight: the driver normalises {want} to {} before any write",
+                    "locked-clock preflight: {fault}: {want} answers {} before any write",
                     got.map_or_else(|| "nothing".to_string(), |window| window.to_string())
                 )));
             }
             session.write_locked_clocks(request)?;
             let applied = session.read_locked_clocks(request)?;
-            if let Some((want, got)) = macos_lock::first_difference(&expected, &applied) {
+            if let Some((want, got)) = macos_lock::first_stable_difference(&expected, &applied) {
                 let rollback: Result<(), String> = (|| {
                     session
                         .write_locked_clocks(&expected)
@@ -2007,7 +2010,7 @@ impl Device {
                     let check = session
                         .read_locked_clocks(&expected)
                         .map_err(|err| err.to_string())?;
-                    match macos_lock::first_difference(&expected, &check) {
+                    match macos_lock::first_stable_difference(&expected, &check) {
                         None => Ok(()),
                         Some((back, now)) => Err(format!(
                             "restore readback wants {back}, device answers {}",
