@@ -30,6 +30,10 @@ pub const BYTES: usize = 648;
 /// The GET that owns the locked-clock write as its twin: `0x20809040`, whose
 /// answer is a format word and a count of the windows locked right now.
 pub const STATE_BYTES: usize = 4808;
+
+/// How many leading dwords of that block a report keeps. Enough to see whether
+/// a table starts at offset 8 without carrying the whole 4.7 kB through JSON.
+pub const STATE_HEAD_WORDS: usize = 32;
 /// Format word `+0`, count `+4`, first entry `+8`.
 pub const HEADER_BYTES: usize = 8;
 /// One entry stride.
@@ -124,15 +128,15 @@ pub struct LockedClockWriteReport {
     pub requested: Vec<LockWindow>,
     pub snapshot: Vec<LockWindow>,
     pub applied: Vec<LockWindow>,
-    /// The dword the twin read (`0x20809040`) leaves at offset 4 while the write
-    /// is in place. `None` when that read did not happen.
+    /// The head of the twin read's answer (`0x20809040`) while the write is in
+    /// place, plus the offset-4 dword that `parse_state_count` reads.
     ///
-    /// It is **not** known to be a count of locked windows: a zero background
-    /// answers 0, a probe-shaped 100..200 MHz request answers 0, and this
-    /// product's in-place 1620..1700 MHz write answered **48**, which is not a
-    /// plausible number of locked windows. It is published as a raw field with
-    /// no interpretation.
-    pub twin_word_at_4: Option<u32>,
+    /// Raw on purpose. With nothing locked the whole 4808-byte block is zero
+    /// apart from the format word, so the layout of anything after offset 8 has
+    /// never been seen; offset 4 answered 48 for an in-place 1620..1700 MHz write
+    /// and 0 for zero and probe-shaped reads, and 48 is not a plausible window
+    /// count. Neither the field nor the stride is published as understood.
+    pub twin_block_head: Option<(Vec<u32>, Option<u32>)>,
 }
 
 /// Read the window count out of a `0x20809040` block.

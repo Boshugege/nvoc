@@ -2095,7 +2095,17 @@ impl Device {
             session.write_locked_clocks(request)?;
             // While the write is in place, ask the twin what is stored. This is
             // the piece the normalisation read cannot answer.
-            let twin_word_at_4 = session.read_locked_state_count().ok();
+            // Head of the twin's answer while the write is in place. Held raw: the
+            // stride and the meaning of the fields after the format word are not
+            // established, and guessing a layout is how a backend starts lying.
+            let twin_block_head = session.read_locked_state_block().ok().map(|block| {
+                let words = block
+                    .chunks_exact(4)
+                    .take(macos_lock::STATE_HEAD_WORDS)
+                    .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                    .collect::<Vec<_>>();
+                (words, macos_lock::parse_state_count(&block).ok())
+            });
             let applied = session.read_locked_clocks(request)?;
             if let Some((want, got)) = macos_lock::first_stable_difference(&expected, &applied) {
                 let rollback: Result<(), String> = (|| {
@@ -2128,7 +2138,7 @@ impl Device {
                 requested: request.to_vec(),
                 snapshot: expected,
                 applied,
-                twin_word_at_4,
+                twin_block_head,
             })
         })();
         let closed = session.close();
@@ -2923,7 +2933,8 @@ unsafe extern "C" {
     ) -> u32;
     fn nvoc_macos_rm_session_locked_state(
         handle: *mut SessionOpaque,
-        count: *mut u32,
+        block: *mut u8,
+        size: usize,
         error: *mut u8,
         cap: usize,
     ) -> u32;
@@ -4688,21 +4699,24 @@ impl MacosRmSession {
         Ok(())
     }
 
-    /// How many locked windows the twin read (`0x20809040`) reports right now.
+    /// The block the write's GET twin (`0x20809040`, 4808 bytes) answers with,
+    /// while the write is in place.
     ///
-    /// This is the only observed way to see a stored lock: `0x20809014` answers
-    /// how the driver would normalise a request, not what it holds.
+    /// `0x20809014` answers how the driver would normalise a request, not what
+    /// it holds; this is the family the write is paired with. What the block's
+    /// fields mean is not established, so it is carried raw.
     #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    pub fn read_locked_state_count(&mut self) -> Result<u32, Error> {
+    pub fn read_locked_state_block(&mut self) -> Result<Vec<u8>, Error> {
         let _guard = lock_transport()?;
-        let mut count: u32 = 0;
+        let mut block = vec![0u8; macos_lock::STATE_BYTES];
         let mut error = [0u8; 256];
-        // SAFETY: the session is live, the count outlives the call, and the
-        // transport is serialized.
+        // SAFETY: the session is live, the block is the size the ABI requires,
+        // and the transport is serialized.
         let status = unsafe {
             nvoc_macos_rm_session_locked_state(
                 self.handle,
-                &mut count,
+                block.as_mut_ptr(),
+                block.len(),
                 error.as_mut_ptr(),
                 error.len(),
             )
@@ -4713,11 +4727,11 @@ impl MacosRmSession {
                 text(&error)
             )));
         }
-        Ok(count)
+        Ok(block)
     }
 
     #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
-    pub fn read_locked_state_count(&mut self) -> Result<u32, Error> {
+    pub fn read_locked_state_block(&mut self) -> Result<Vec<u8>, Error> {
         Err(Error::Custom(
             "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
         ))

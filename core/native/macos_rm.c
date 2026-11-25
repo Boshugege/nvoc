@@ -710,20 +710,19 @@ uint32_t nvoc_macos_rm_session_locked_clocks(nvoc_rm_session *s, uint32_t write,
  * answers the format word and the number of windows that are locked right now,
  * which is the only observed way to see a stored lock rather than the driver's
  * normalisation of a request (that is what 0x20809014 gives). */
-uint32_t nvoc_macos_rm_session_locked_state(nvoc_rm_session *s, uint32_t *count,
+uint32_t nvoc_macos_rm_session_locked_state(nvoc_rm_session *s, void *block, size_t size,
                                             char *error, size_t cap)
 {
-    static unsigned char block[NVOC_RM_LOCK_STATE_BYTES];
-    uint32_t status;
-    if (!s || !count)
+    if (!s || !block || size < NVOC_RM_LOCK_STATE_BYTES)
         return failure(error, cap, "locked-state ABI arguments", UINT32_MAX);
-    memset(block, 0, sizeof block);
-    block[0] = 1u; /* FORMAT_WORD; a zeroed block is format 0 and selects nothing */
-    status = nvx_rm_control(s->ctl, s->client, s->subdevice, 0x20809040u, block,
-                            (uint32_t) sizeof block);
-    if (status)
-        return failure(error, cap, "locked-state GET", status);
-    memcpy(count, block + 4, 4);
+    memset(block, 0, NVOC_RM_LOCK_STATE_BYTES);
+    ((unsigned char *) block)[0] = 1u; /* FORMAT_WORD */
+    {
+        uint32_t status = nvx_rm_control(s->ctl, s->client, s->subdevice, 0x20809040u,
+                                         block, (uint32_t) NVOC_RM_LOCK_STATE_BYTES);
+        if (status)
+            return failure(error, cap, "locked-state GET", status);
+    }
     return 0;
 }
 

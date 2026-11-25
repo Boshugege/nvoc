@@ -223,7 +223,13 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         // and a probe-shaped request both answer 0 there, while
                         // this write answered 48, so it is not established to be
                         // a count of locked windows and must not be read as one.
-                        "twin_word_at_4": report.twin_word_at_4,
+                        "twin_block_head": report.twin_block_head.as_ref().map(|(words, count)| {
+                            json!({
+                                "words": words,
+                                "count_at_4": count,
+                                "note": "raw head of 0x20809040's answer while the write is in place; neither the fields nor a stride are established",
+                            })
+                        }),
                         "floor_note": "the driver keeps the highest floor it has seen; a lower request is accepted and not applied",
                         "readback_verified": true, "restored_on_mismatch": true})
                 }

@@ -214,8 +214,8 @@ uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *session, uint32_t i
 #define NVOC_RM_LOCK_STATE_BYTES 4808
 uint32_t nvoc_macos_rm_session_locked_clocks(nvoc_rm_session *session, uint32_t write,
     void *block, size_t size, char *error, size_t cap);
-uint32_t nvoc_macos_rm_session_locked_state(nvoc_rm_session *session, uint32_t *count,
-    char *error, size_t cap);
+uint32_t nvoc_macos_rm_session_locked_state(nvoc_rm_session *session, void *block,
+    size_t size, char *error, size_t cap);
 
 /* Clock-domain enumeration: fills 4-byte mask, 32 kHz words, 32 statuses
  * (260 bytes) from 0x20809001 mode 0 plus one 0x20809006 version-1 read per
