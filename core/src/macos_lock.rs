@@ -760,8 +760,8 @@ mod state_count_tests {
         assert!(err.contains("format word"), "{err}");
     }
 
-    fn block_with_records(records: &[[u32; 12]]) -> alloc_vec {
-        let mut block = alloc_vec::from(vec![0u8; STATE_BYTES]);
+    fn block_with_records(records: &[[u32; 12]]) -> Vec<u8> {
+        let mut block = vec![0u8; STATE_BYTES];
         for (index, record) in records.iter().enumerate() {
             let base = STATE_RECORD_BASE + index * STATE_RECORD_BYTES;
             for (slot, word) in record.iter().enumerate() {
@@ -770,8 +770,6 @@ mod state_count_tests {
         }
         block
     }
-
-    type alloc_vec = Vec<u8>;
 
     fn record(min: u32, max: u32) -> [u32; 12] {
         [
@@ -806,9 +804,9 @@ mod state_count_tests {
 
     #[test]
     fn an_answer_with_nothing_stored_has_no_records() {
-        assert!(parse_state_records(&vec![0u8; STATE_BYTES]).is_empty());
+        assert!(parse_state_records(&[0u8; STATE_BYTES]).is_empty());
         // Short of one record: nothing to read, nothing invented.
-        assert!(parse_state_records(&vec![0xffu8; STATE_RECORD_BASE + 8]).is_empty());
+        assert!(parse_state_records(&[0xffu8; STATE_RECORD_BASE + 8]).is_empty());
     }
 
     #[test]
