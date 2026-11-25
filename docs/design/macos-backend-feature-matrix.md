@@ -2981,4 +2981,4 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 
 **③ 代码** ✔：默认改为 `--stress-elements 4194304`、`--stress-iters 2000`；repeat 文档新增 `resolution`（`noise_threshold_percent` / `baseline_clock_mhz` / `one_step_percent` / `warning`）。core 新增 `step_percent()` 与 `resolution_warning()`（噪声 ≥ 一档 ⇒ 给出"这一轮报没有增益不能读成偏移没有效果"）+ 4 条单测。
 
-**④ 边界** ✗：这些数值是**本卡本驱动**测出来的，换卡要重测；单负载形状、三轮、窗口 20 s，不是稳定性认证；两批共十二次写入全部回读并复位（`settings_written: true`）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。证据：`outputs/stage-eval-defaultshape-20261125T200509Z/`（5 文件 + `SHA256SUMS`）。
+**④ 边界** ✗：这些数值是**本卡本驱动**测出来的，换卡要重测；单负载形状、三轮、窗口 20 s，不是稳定性认证；两批共十二次写入全部回读并复位（`settings_written: true`）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。证据：`outputs/stage-eval-defaultshape-20261125T195729Z/`（4 文件，4M×500 那批）与 `outputs/stage-eval-defaultshape-20261125T200509Z/`（5 文件，4M×2000 及合并剖析），各有 `SHA256SUMS`。
