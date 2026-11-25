@@ -218,11 +218,17 @@ impl ControlBackend for MacosRmBackend {
         Ok(sensors_from_status(&status))
     }
 
-    fn read_fan(&mut self, _gpu_index: usize) -> Option<FanReading> {
-        // The RM channel reports fan rpm, not duty %, and `FanReading` only
-        // carries a percentage: there is no honest mapping, so the duty stays
-        // unknown rather than being derived from rpm.
-        None
+    fn read_fan(&mut self, gpu_index: usize) -> Option<FanReading> {
+        // The duty the *driver* holds is published: the cooler0 control record
+        // carries a target percent (that is what `get-fan-info` prints as
+        // `target_percent`), so it is reported as the duty reading instead of
+        // being derived from rpm. When the record publishes no target the duty
+        // stays unknown rather than becoming a default-looking zero.
+        let report = self.gpu(gpu_index).ok()?.device.fan_report().ok()?;
+        let percent = report.target_percent?;
+        Some(FanReading {
+            percent: Some(percent.round().clamp(0.0, 100.0) as u32),
+        })
     }
 
     fn read_power_watts(&mut self, gpu_index: usize) -> Option<f32> {
@@ -573,6 +579,8 @@ mod tests {
         assert_eq!(backend.read_power_limit_w(0).unwrap(), None);
         assert_eq!(backend.read_temp_limit_c(0).unwrap(), None);
         assert_eq!(backend.read_freq_ceiling_mhz(0), None);
+        // Still None with no GPU attached: the duty now comes from the driver's
+        // own control record, so a missing device must not read as 0 percent.
         assert!(backend.read_fan(0).is_none());
         assert!(backend.read_vf_curve(0).is_err());
         assert!(
