@@ -543,6 +543,35 @@ impl ControlBackend for MacosRmBackend {
         .map(|_| ())
     }
 
+    fn write_fan_rpm(&mut self, gpu_index: usize, rpm: u32) -> Result<(), String> {
+        self.forget_readout();
+        // An rpm target is translated through the cooler's own published scale,
+        // so the admission has to happen where that scale is known: the core
+        // refuses a target past it and names the span, before any SET.
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmFanControl {
+                slot: 0,
+                target: nvoc_core::FanControlTarget::Rpm(rpm),
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
+    }
+
+    fn write_fan_stop(&mut self, gpu_index: usize) -> Result<(), String> {
+        self.forget_readout();
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmFanControl {
+                slot: 0,
+                target: nvoc_core::FanControlTarget::Stop,
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
+    }
+
     fn write_freq_cap_khz(&mut self, _gpu_index: usize, _cap_khz: u32) -> Result<(), String> {
         Err(NO_FREQUENCY_UNDO.to_string())
     }

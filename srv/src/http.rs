@@ -6,7 +6,7 @@
 //! a successful preflight.
 
 use crate::config::{
-    ControlMode, INTERVAL_MS_MAX, INTERVAL_MS_MIN, LoopKind, RuntimeConfig, SensorKind,
+    ControlMode, INTERVAL_MS_MAX, INTERVAL_MS_MIN, LoopKind, ManualFan, RuntimeConfig, SensorKind,
 };
 use crate::controller::GpuControlStatus;
 use crate::monitor::{OffsetBackend, OffsetDomain};
@@ -658,7 +658,9 @@ fn handle_request(
                         POST /pid?target_c=&kp=&ki=&kd=&base_percent=&min_percent=&max_percent=&emergency_delta_c=&idle_delta_c=&temp_guard_c=&min_mhz=&max_mhz=&interval_ms=&sensor=\n\
                         POST /mode?value=auto|pid|manual\n\
                         POST /loop?value=fan_temp|freq_temp|freq_power\n\
-                        POST /fan?percent=0-100        (switches to manual)\n\
+                        POST /fan?percent=0-100        (switches to manual)
+                        POST /fan?rpm=N | ?mode=stop   (macOS RM: physical rpm target,
+                                                        firmware zero-RPM mode)\n\
                         POST /restore                  (alias of /mode?value=auto)\n\
                         POST /oc_global?oc=<kHz>&gpu=<index>\n\
                         POST /shutdown\n\
@@ -749,15 +751,54 @@ fn handle_request(
                     "Conflict: active backend is read-only (macOS RM); manual fan control is unavailable",
                 );
             }
-            match params.get("percent").and_then(|s| s.parse::<u32>().ok()) {
-                Some(p) if p <= 100 => {
-                    let mut cfg = lock(config);
-                    cfg.mode = ControlMode::Manual;
-                    cfg.manual_percent = p;
-                    info!("manual fan duty {p}% via HTTP");
-                    text_response(request, 200, format!("OK: manual {p}%"));
+            // Three forms, one at a time: a duty percentage, a physical rpm
+            // target, or the firmware's zero-RPM stop mode. Refusing an
+            // ambiguous request is the point — two forms in one call would
+            // leave the configuration saying two things.
+            let percent = params.get("percent").is_some();
+            let rpm = params.get("rpm").is_some();
+            let stop = params
+                .get("mode")
+                .map(|m| m.eq_ignore_ascii_case("stop"))
+                .unwrap_or(false);
+            if usize::from(percent) + usize::from(rpm) + usize::from(stop) > 1 {
+                return text_response(
+                    request,
+                    400,
+                    "Bad request: give one of 'percent', 'rpm' or 'mode=stop'",
+                );
+            }
+            if stop {
+                let mut cfg = lock(config);
+                cfg.mode = ControlMode::Manual;
+                cfg.manual_fan = ManualFan::Stop;
+                info!("manual fan stop (firmware zero-rpm mode) via HTTP");
+                return text_response(request, 200, "OK: manual fanstop");
+            }
+            if rpm {
+                match params.get("rpm").and_then(|s| s.parse::<u32>().ok()) {
+                    Some(value) if value > 0 => {
+                        let mut cfg = lock(config);
+                        cfg.mode = ControlMode::Manual;
+                        cfg.manual_fan = ManualFan::Rpm;
+                        cfg.manual_rpm = value;
+                        info!("manual fan target {value} rpm via HTTP");
+                        text_response(request, 200, format!("OK: manual {value} rpm"));
+                    }
+                    _ => text_response(request, 400, "Bad request: 'rpm' must be non-zero"),
                 }
-                _ => text_response(request, 400, "Bad request: 'percent' must be 0–100"),
+            } else {
+                match params.get("percent").and_then(|s| s.parse::<u32>().ok()) {
+                    Some(p) if p <= 100 => {
+                        let mut cfg = lock(config);
+                        cfg.mode = ControlMode::Manual;
+                        cfg.manual_fan = ManualFan::Percent;
+                        cfg.manual_percent = p;
+                        info!("manual fan duty {p}% via HTTP");
+                        text_response(request, 200, format!("OK: manual {p}%"));
+                    }
+                    _ => text_response(request, 400, "Bad request: 'percent' must be 0–100"),
+                }
             }
         }
         "/restore" => {

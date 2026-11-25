@@ -5,7 +5,9 @@
 //! The controller is backend-agnostic ([`ControlBackend`]) so the whole
 //! state machine is unit-testable without a GPU.
 
-use crate::config::{ControlMode, FreqParams, LoopKind, PidParams, RuntimeConfig, SensorKind};
+use crate::config::{
+    ControlMode, FreqParams, LoopKind, ManualFan, PidParams, RuntimeConfig, SensorKind,
+};
 use crate::monitor::{OffsetBackend, OffsetDomain};
 use crate::pid::{PidController, PidTerms};
 use serde::Serialize;
@@ -250,6 +252,24 @@ pub trait ControlBackend: Send {
     fn reset_power_limit(&mut self, gpu_index: usize) -> Result<(), String>;
     fn reset_temp_limit(&mut self, gpu_index: usize) -> Result<(), String>;
     fn write_fan_percent(&mut self, gpu_index: usize, percent: u32) -> Result<(), String>;
+    /// Hold a physical rpm target.
+    ///
+    /// Only a backend whose control record publishes the cooler's scale can
+    /// translate one, so the default says which surface is missing instead of
+    /// rounding the target into a percentage.
+    fn write_fan_rpm(&mut self, _gpu_index: usize, _rpm: u32) -> Result<(), String> {
+        Err(
+            "this backend takes a fan percentage only; an rpm target needs a cooler scale"
+                .to_string(),
+        )
+    }
+    /// Ask the firmware for its zero-RPM stop mode.
+    fn write_fan_stop(&mut self, _gpu_index: usize) -> Result<(), String> {
+        Err(
+            "this backend takes a fan percentage only; the firmware stop mode is not exposed"
+                .to_string(),
+        )
+    }
     /// The fan plane this backend writes inside: the duty span, the cooler's
     /// own rpm scale, and the state the driver holds now.
     ///
@@ -267,6 +287,15 @@ pub trait ControlBackend: Send {
     fn restore_fan_auto(&mut self, gpu_index: usize) -> Result<(), String>;
     /// Clear the frequency lock (undoes the soft wall).
     fn restore_freq_auto(&mut self, gpu_index: usize) -> Result<(), String>;
+}
+
+/// What `ControlMode::Manual` pinned, so an unchanged configuration is not
+/// re-written on every tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualFanKey {
+    Percent(u32),
+    Rpm(u32),
+    Stop,
 }
 
 /// The fan plane as the backend publishes it.
@@ -340,6 +369,10 @@ pub struct GpuController {
     loop_kind: LoopKind,
     applied_mode: ControlMode,
     last_written: Option<u32>,
+    /// The fan form pinned by `ControlMode::Manual`, which may be an rpm target
+    /// or the firmware's stop mode rather than a percentage. Kept apart from
+    /// `last_written` because the PID and frequency paths speak in percent.
+    last_fan_pin: Option<ManualFanKey>,
     failsafe: FailsafeState,
     fail_streak: u32,
     emergency_active: bool,
@@ -371,6 +404,7 @@ impl GpuController {
             loop_kind,
             applied_mode: ControlMode::Auto,
             last_written: None,
+            last_fan_pin: None,
             failsafe: FailsafeState::Ok,
             fail_streak: 0,
             emergency_active: false,
@@ -429,6 +463,7 @@ impl GpuController {
             }
         }
         self.last_written = None;
+        self.last_fan_pin = None;
         self.applied_mode = ControlMode::Auto;
         self.emergency_active = false;
         self.idle_active = false;
@@ -513,6 +548,7 @@ impl GpuController {
         );
         self.loop_kind = cfg.loop_kind;
         self.last_written = None;
+        self.last_fan_pin = None;
         self.pid.reset();
         self.emergency_active = false;
         self.idle_active = false;
@@ -553,15 +589,34 @@ impl GpuController {
     fn tick_manual(&mut self, index: usize, cfg: &RuntimeConfig, backend: &mut dyn ControlBackend) {
         match self.loop_kind {
             LoopKind::FanTemp => {
-                let target = cfg.manual_percent.min(100);
-                if self.last_written != Some(target) {
-                    match backend.write_fan_percent(index, target) {
+                // One pinned fan form at a time: percent (every backend), or an
+                // rpm target / the firmware's stop mode (macOS only). A backend
+                // that cannot express the configured form says so and the tick
+                // does not invent a percentage in its place.
+                let key = match cfg.manual_fan {
+                    ManualFan::Percent => ManualFanKey::Percent(cfg.manual_percent.min(100)),
+                    ManualFan::Rpm => ManualFanKey::Rpm(cfg.manual_rpm),
+                    ManualFan::Stop => ManualFanKey::Stop,
+                };
+                if self.last_fan_pin != Some(key) {
+                    let written = match cfg.manual_fan {
+                        ManualFan::Percent => {
+                            backend.write_fan_percent(index, cfg.manual_percent.min(100))
+                        }
+                        ManualFan::Rpm => backend.write_fan_rpm(index, cfg.manual_rpm),
+                        ManualFan::Stop => backend.write_fan_stop(index),
+                    };
+                    match written {
                         Ok(()) => {
-                            self.last_written = Some(target);
+                            self.last_fan_pin = Some(key);
+                            self.last_written = match key {
+                                ManualFanKey::Percent(p) => Some(p),
+                                _ => None,
+                            };
                             self.last_error = None;
                         }
                         Err(e) => {
-                            log::error!("GPU {index}: manual fan write {}% failed: {e}", target);
+                            log::error!("GPU {index}: manual fan write {key:?} failed: {e}");
                             self.last_error = Some(e);
                         }
                     }
@@ -629,6 +684,7 @@ impl GpuController {
                 self.fail_streak += 1;
                 self.last_error = Some(e);
                 if self.fail_streak >= cfg.read_fail_reset.max(1) {
+                    self.last_fan_pin = None;
                     if self.last_written.is_some() {
                         // Hand the actuator back to the driver and keep
                         // re-trying while the pin/wall is ours: the driver
@@ -973,6 +1029,10 @@ mod tests {
         /// Temps returned per read_temps call (popped; last one repeats).
         temps: Vec<Result<SensorBundle, String>>,
         writes: Vec<u32>,
+        /// rpm targets and stop requests, in the order they were asked for.
+        fan_targets: Vec<String>,
+        /// Whether this mock can express an rpm target / stop mode at all.
+        takes_rpm: bool,
         restores: usize,
         fail_writes: bool,
         /// restore_fan_auto fails this many times before succeeding.
@@ -999,6 +1059,8 @@ mod tests {
                     ..Default::default()
                 })],
                 writes: Vec::new(),
+                fan_targets: Vec::new(),
+                takes_rpm: false,
                 restores: 0,
                 fail_writes: false,
                 restore_fails: 0,
@@ -1052,6 +1114,31 @@ mod tests {
         }
         fn read_freq_ceiling_mhz(&mut self, _i: usize) -> Option<f32> {
             self.ceiling
+        }
+        fn write_fan_rpm(&mut self, _i: usize, rpm: u32) -> Result<(), String> {
+            if self.fail_writes {
+                return Err("write rejected".to_string());
+            }
+            if !self.takes_rpm {
+                // Exactly what the real default says: the surface is missing,
+                // and nothing is rounded into a percentage instead.
+                return Err(
+                    "this backend takes a fan percentage only; an rpm target needs a cooler scale"
+                        .to_string(),
+                );
+            }
+            self.fan_targets.push(format!("{rpm} rpm"));
+            Ok(())
+        }
+        fn write_fan_stop(&mut self, _i: usize) -> Result<(), String> {
+            if self.fail_writes {
+                return Err("write rejected".to_string());
+            }
+            if !self.takes_rpm {
+                return Err("this backend takes a fan percentage only; the firmware stop mode is not exposed".to_string());
+            }
+            self.fan_targets.push("stop".to_string());
+            Ok(())
         }
         fn write_fan_percent(&mut self, _i: usize, p: u32) -> Result<(), String> {
             if self.fail_writes {
@@ -1174,6 +1261,90 @@ mod tests {
     }
 
     #[test]
+    fn manual_rpm_target_is_asked_for_as_an_rpm_not_as_a_percentage() {
+        let mut c = GpuController::new(
+            PidController::from_params(&PidParams::default()),
+            LoopKind::FanTemp,
+        );
+        let mut m = Mock::steady(60.0);
+        m.takes_rpm = true;
+        let mut config = cfg(ControlMode::Manual);
+        config.manual_fan = ManualFan::Rpm;
+        config.manual_rpm = 1400;
+        tick(&mut c, &mut m, &config);
+        tick(&mut c, &mut m, &config);
+        assert_eq!(
+            m.fan_targets,
+            vec!["1400 rpm".to_string()],
+            "one pin, no repeat"
+        );
+        assert!(
+            m.writes.is_empty(),
+            "an rpm target must not be sent as a duty"
+        );
+        assert_eq!(c.last_fan_pin, Some(ManualFanKey::Rpm(1400)));
+    }
+
+    #[test]
+    fn the_stop_mode_is_a_pin_of_its_own() {
+        let mut c = GpuController::new(
+            PidController::from_params(&PidParams::default()),
+            LoopKind::FanTemp,
+        );
+        let mut m = Mock::steady(60.0);
+        m.takes_rpm = true;
+        let mut config = cfg(ControlMode::Manual);
+        config.manual_fan = ManualFan::Stop;
+        tick(&mut c, &mut m, &config);
+        assert_eq!(m.fan_targets, vec!["stop".to_string()]);
+        assert!(m.writes.is_empty());
+        // Switching the configured form re-pins; the record cannot be assumed
+        // to still be in the old mode.
+        config.manual_fan = ManualFan::Percent;
+        config.manual_percent = 20;
+        tick(&mut c, &mut m, &config);
+        assert_eq!(m.writes, vec![20]);
+    }
+
+    #[test]
+    fn a_backend_without_the_surface_is_named_instead_of_being_given_a_percentage() {
+        let mut c = GpuController::new(
+            PidController::from_params(&PidParams::default()),
+            LoopKind::FanTemp,
+        );
+        let mut m = Mock::steady(60.0);
+        m.takes_rpm = false;
+        let mut config = cfg(ControlMode::Manual);
+        config.manual_fan = ManualFan::Rpm;
+        config.manual_rpm = 1400;
+        let st = tick(&mut c, &mut m, &config);
+        assert!(
+            m.writes.is_empty(),
+            "no duty may stand in for the rpm target"
+        );
+        assert!(m.fan_targets.is_empty());
+        let error = st.last_error.expect("the refusal is reported");
+        assert!(error.contains("percentage only"), "{error}");
+        assert_eq!(
+            c.last_fan_pin, None,
+            "a failed pin is not remembered as ours"
+        );
+    }
+
+    #[test]
+    fn an_rpm_pin_without_a_target_is_refused_by_the_configuration() {
+        let mut config = RuntimeConfig {
+            manual_fan: ManualFan::Rpm,
+            manual_rpm: 0,
+            ..RuntimeConfig::default()
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("manual_rpm must be non-zero"), "{error}");
+        config.manual_rpm = 1400;
+        config.validate().expect("a non-zero rpm target is valid");
+    }
+
+    #[test]
     fn manual_mode_pins_once_and_restore_hands_back() {
         let mut c = GpuController::new(
             PidController::from_params(&PidParams::default()),
@@ -1266,6 +1437,8 @@ mod tests {
                 }),
             ],
             writes: Vec::new(),
+            fan_targets: Vec::new(),
+            takes_rpm: false,
             restores: 0,
             fail_writes: false,
             restore_fails: 0,
@@ -1330,6 +1503,8 @@ mod tests {
         let mut m = Mock {
             temps: vec![Err("sensor gone".into())],
             writes: vec![50],
+            fan_targets: Vec::new(),
+            takes_rpm: false,
             restores: 0,
             fail_writes: false,
             restore_fails: 0,
@@ -1374,6 +1549,8 @@ mod tests {
         let mut m = Mock {
             temps: vec![Err("sensor gone".into())],
             writes: Vec::new(),
+            fan_targets: Vec::new(),
+            takes_rpm: false,
             restores: 0,
             fail_writes: false,
             restore_fails: 2,
@@ -1482,6 +1659,8 @@ mod tests {
                 }),
             ],
             writes: Vec::new(),
+            fan_targets: Vec::new(),
+            takes_rpm: false,
             restores: 0,
             fail_writes: false,
             restore_fails: 0,

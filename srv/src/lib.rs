@@ -32,6 +32,7 @@ pub mod service;
 pub mod web;
 
 pub use config::{
-    ControlMode, FreqParams, GpuSelection, LoopKind, PidParams, RuntimeConfig, SensorKind,
+    ControlMode, FreqParams, GpuSelection, LoopKind, ManualFan, PidParams, RuntimeConfig,
+    SensorKind,
 };
 pub use controller::{ControlBackend, GpuControlStatus, SensorBundle};

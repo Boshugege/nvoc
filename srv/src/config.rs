@@ -410,6 +410,24 @@ impl PidParams {
     }
 }
 
+/// How `ControlMode::Manual` holds the fan.
+///
+/// A pinned percentage is what every backend can express; an rpm target and the
+/// firmware's zero-RPM mode are macOS-only surfaces. Keeping this as a small
+/// enum rather than a pair of optional numbers means the configuration has one
+/// fan pin at a time, so no field can silently disagree with another.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualFan {
+    /// Hold `manual_percent` percent.
+    #[default]
+    Percent,
+    /// Hold `manual_rpm` rpm, translated through the cooler's own scale.
+    Rpm,
+    /// Ask the firmware for its zero-RPM stop mode.
+    Stop,
+}
+
 /// Full service configuration (one TOML document).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -426,6 +444,15 @@ pub struct RuntimeConfig {
     pub mode: ControlMode,
     /// Pinned duty for `ControlMode::Manual`.
     pub manual_percent: u32,
+    /// How `ControlMode::Manual` holds the fan: `percent` (the default, and the
+    /// only form NVAPI and NVML take), `rpm` (a physical target, translated
+    /// through the cooler's own published scale — macOS only), or `stop` (the
+    /// firmware's zero-RPM mode, again macOS only). The form that a backend
+    /// cannot express is refused when the tick applies it, naming the backend,
+    /// rather than silently falling back to `manual_percent`.
+    pub manual_fan: ManualFan,
+    /// The rpm target for `ManualFan::Rpm`.
+    pub manual_rpm: u32,
     /// Which control loop is active (exactly one at a time).
     pub loop_kind: LoopKind,
     /// Fan→temperature loop parameters.
@@ -457,6 +484,8 @@ impl Default for RuntimeConfig {
             gpus: GpuSelection::default(),
             mode: ControlMode::default(),
             manual_percent: 50,
+            manual_fan: ManualFan::default(),
+            manual_rpm: 1800,
             auth: AuthMode::default(),
             auth_group: "wheel,sudo".to_string(),
             loop_kind: LoopKind::default(),
@@ -516,6 +545,9 @@ impl RuntimeConfig {
         }
         if self.manual_percent > 100 {
             return Err("manual_percent must be 0–100".to_string());
+        }
+        if self.manual_fan == ManualFan::Rpm && self.manual_rpm == 0 {
+            return Err("manual_rpm must be non-zero for manual_fan = rpm".to_string());
         }
         if self.read_fail_reset == 0 || self.read_fail_reset > 100 {
             return Err("read_fail_reset must be 1–100".to_string());
