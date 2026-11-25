@@ -785,6 +785,26 @@ def test_no_published_window_leaves_the_rows_unbounded() -> None:
     assert app.actions == ["apply core offset"]
 
 
+def test_a_lopsided_window_is_judged_end_by_end() -> None:
+    tab, _app = make_tab()
+    tab._absorb_offset_window({
+        "clock_offset_window": {"min_khz": -8_000, "max_khz": 18_750}
+    })
+
+    assert tab._offset_window_error({"core": -12}) is not None
+    assert tab._offset_window_error({"core": -8}) is None
+    assert tab._offset_window_error({"core": 19}) is not None
+    assert tab._offset_window_summary() == "driver span -8 .. +18.75 MHz"
+
+
+def test_a_half_read_window_bounds_nothing() -> None:
+    tab, _app = make_tab()
+    tab._absorb_offset_window({"clock_offset_window": {"max_khz": 18_750}})
+
+    assert tab._offset_window is None
+    assert tab._offset_window_error({"core": 500}) is None
+
+
 def test_a_window_that_disappears_stops_bounding_the_rows() -> None:
     """Switching to a card/transport that publishes no span must drop the old
     one, or the previous card's bounds would refuse this card's writes."""

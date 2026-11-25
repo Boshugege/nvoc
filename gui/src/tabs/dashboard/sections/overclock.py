@@ -2859,6 +2859,14 @@ class OverclockTab:
         an unseen window is not a window of zero.
         """
         window = limits.get("clock_offset_window")
+        # Both ends or nothing: a window read from one end only would bound the
+        # wrong direction on a lopsided span, and inventing the missing end is
+        # the same mistake as assuming a window nobody published.
+        if isinstance(window, dict) and not (
+            isinstance(window.get("min_khz"), int)
+            and isinstance(window.get("max_khz"), int)
+        ):
+            window = None
         self._offset_window = window if isinstance(window, dict) else None
         try:
             label = getattr(self, "_offset_window_label", None)
@@ -2875,10 +2883,17 @@ class OverclockTab:
         window = getattr(self, "_offset_window", None)
         if not isinstance(window, dict):
             return ""
+        min_khz = window.get("min_khz")
         max_khz = window.get("max_khz")
-        if not isinstance(max_khz, int):
+        if not isinstance(min_khz, int) or not isinstance(max_khz, int):
             return ""
-        text = f"driver span ±{abs(max_khz) / 1000.0:g} MHz"
+        min_mhz = min_khz / 1000.0
+        max_mhz = max_khz / 1000.0
+        # Symmetric reads best as ±x; lopsided has to show both ends.
+        if min_mhz == -max_mhz:
+            text = f"driver span ±{max_mhz:g} MHz"
+        else:
+            text = f"driver span {min_mhz:+g} .. {max_mhz:+g} MHz"
         potential = window.get("potential")
         if isinstance(potential, dict):
             percent = potential.get("max_percent")
@@ -2898,14 +2913,16 @@ class OverclockTab:
         window = getattr(self, "_offset_window", None)
         if not isinstance(window, dict):
             return None
+        min_khz = window.get("min_khz")
         max_khz = window.get("max_khz")
-        if not isinstance(max_khz, int):
+        if not isinstance(min_khz, int) or not isinstance(max_khz, int):
             return None
-        max_mhz = abs(max_khz) / 1000.0
+        min_mhz = min_khz / 1000.0
+        max_mhz = max_khz / 1000.0
         over = {
             name: value
             for name, value in rows.items()
-            if isinstance(value, (int, float)) and abs(value) > max_mhz
+            if isinstance(value, (int, float)) and not (min_mhz <= value <= max_mhz)
         }
         if not over:
             return None

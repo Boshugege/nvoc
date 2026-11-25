@@ -636,6 +636,32 @@ def test_overclock_writes_inside_the_driver_window() -> None:
     ]
 
 
+def test_overclock_judges_a_lopsided_window_end_by_end() -> None:
+    # The negative end is what bounds a negative offset: -12 MHz is outside a
+    # span that only allows -8, even though |max| is 18.75. Judging by the
+    # larger magnitude would let it through to a driver that then refuses it.
+    app = FakeApp()
+    app.cache.settings["clock_offset_window"] = {"min_khz": -8_000, "max_khz": 18_750}
+    controller = OverclockController(app)
+
+    assert controller.offset_window_error({"core": -12}) is not None
+    assert controller.offset_window_error({"core": -8}) is None
+    assert controller.offset_window_error({"core": 18}) is None
+    assert controller.offset_window_error({"core": 19}) is not None
+    assert controller.offset_window_summary() == "driver span -8 .. +18.75 MHz"
+
+
+def test_overclock_needs_both_window_ends_to_bound_anything() -> None:
+    # A window read from one end only would bound the wrong direction, so a
+    # half-read window is treated as no window at all.
+    app = FakeApp()
+    app.cache.settings["clock_offset_window"] = {"max_khz": 18_750}
+    controller = OverclockController(app)
+
+    assert controller.offset_window() is None
+    assert controller.offset_window_error({"core": 500}) is None
+
+
 def test_overclock_summary_is_empty_when_no_window_was_published() -> None:
     app = FakeApp()
     controller = OverclockController(app)

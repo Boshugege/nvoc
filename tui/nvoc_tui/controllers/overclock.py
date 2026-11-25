@@ -283,17 +283,34 @@ class OverclockController(PaneController):
         window = self.app.cache.settings.get("clock_offset_window")
         if not isinstance(window, dict):
             return None
+        # Both ends or nothing: a window read from one end only would bound the
+        # wrong direction on a lopsided span, and inventing the missing end is
+        # the same mistake as assuming a window nobody published.
+        if not isinstance(window.get("min_khz"), int):
+            return None
         if not isinstance(window.get("max_khz"), int):
             return None
         return window
+
+    def offset_window_bounds(self) -> tuple[float, float] | None:
+        """The published span in MHz as (min, max), or None when unbounded."""
+        window = self.offset_window()
+        if window is None:
+            return None
+        return window["min_khz"] / 1000.0, window["max_khz"] / 1000.0
 
     def offset_window_summary(self) -> str:
         """One line for the OC pane: the span, and what it is worth."""
         window = self.offset_window()
         if window is None:
             return ""
-        max_mhz = abs(window["max_khz"]) / 1000.0
-        text = f"driver span ±{max_mhz:g} MHz"
+        min_mhz, max_mhz = self.offset_window_bounds()
+        # A symmetric span reads best as ±x; a lopsided one has to show both
+        # ends, or the reader cannot tell which way it is lopsided.
+        if min_mhz == -max_mhz:
+            text = f"driver span ±{max_mhz:g} MHz"
+        else:
+            text = f"driver span {min_mhz:+g} .. {max_mhz:+g} MHz"
         potential = window.get("potential")
         if isinstance(potential, dict):
             percent = potential.get("max_percent")
@@ -313,11 +330,11 @@ class OverclockController(PaneController):
         window = self.offset_window()
         if window is None:
             return None
-        max_mhz = abs(window["max_khz"]) / 1000.0
+        min_mhz, max_mhz = self.offset_window_bounds()
         over = {
             name: value
             for name, value in offsets.items()
-            if isinstance(value, int) and abs(value) > max_mhz
+            if isinstance(value, int) and not (min_mhz <= value <= max_mhz)
         }
         if not over:
             return None
