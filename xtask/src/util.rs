@@ -189,7 +189,47 @@ pub fn apply_uv_index(command: &mut Command) {
 
 /// Builds `uv run --locked --package <package> --group dev --no-config …`,
 /// the same invocation shape ci.yml uses for every Python step.
+/// Whether `uv` is on PATH.
+///
+/// The gate's Python steps go through `uv run` so they use the locked
+/// dependency set. A machine without `uv` (a macOS test box, for one) still has
+/// the same tools in the checkout's `.venv`, and running them from there is
+/// what a person does by hand anyway -- so the fallback runs the same binary
+/// with the same arguments rather than skipping the step.
+fn uv_available() -> bool {
+    Command::new("uv")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// The checkout's own `.venv/bin/<tool>`, when `uv` is missing and that tool is
+/// there. Returns the command to run instead, or None to keep the `uv` path.
+fn venv_tool(root: &Path, extra: &[&str]) -> Option<Command> {
+    if uv_available() {
+        return None;
+    }
+    let tool = extra.first()?;
+    let path = root.join(".venv").join("bin").join(tool);
+    if !path.is_file() {
+        return None;
+    }
+    println!(
+        "  uv is not installed here; running {} from the checkout's .venv with the same arguments",
+        path.display()
+    );
+    let mut command = Command::new(path);
+    command.args(&extra[1..]);
+    command.current_dir(root);
+    Some(command)
+}
+
 pub fn uv_run(root: &Path, package: &str, extra: &[&str]) -> Command {
+    if let Some(command) = venv_tool(root, extra) {
+        return command;
+    }
     let mut command = Command::new("uv");
     command.args([
         "run",
