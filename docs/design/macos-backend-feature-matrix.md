@@ -3820,3 +3820,15 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 - CLI JSON 输出 `storage_matches_applied`；`pynvoc.set_gpu_locked_clocks` 也输出它和 `records`（此前 Python 侧只给固定几个键，看不到驱动存了什么）。
 
 **③ 单测** ✔：`storage_matches` 覆盖 匹配 / 不匹配 / 任一侧为空 三种；`nvoc-core` lib 232 → **234** 通过；`cargo xtask ci` → `CI_EXIT=0`。
+
+## 二百二十七、把"读得到存下来的窗口"接进服务与 Python（GUI/TUI 的入口不再只能是 `null`）
+
+**① 服务侧** ✔：`srv` 的 macOS 后端 `read_locked_window` 原本直接返回 `Ok(None)`，注释写"这条传输上没有可读的状态"。现在有了：`0x20809040` 就是驱动存窗口的表（§二百二十一、§二百二十四）。改为跑 `ReadMacosRmLockedState`，把最新一条记录的 kHz 折成 MHz 返回。⇒ `GET /api/oc` 的 `locked_window` 在 macOS 上**不再是永远 `null`**；表里没有记录时仍是 `null`（"没有窗口"≠"0 的窗口"）。
+
+**② 核心侧** ✔：新增 op `ReadMacosRmLockedState`（`OperationKind::QueryGpuStatus`）与设备方法 `locked_state()`：拿快照 → 开 session → 校验身份 → 读整块 → `parse_state_count` + `parse_state_records`。**这是纯读**，不发任何 SET。
+
+**③ Python 侧** ✔：`pynvoc.get_gpu_locked_state(gpu)` 返回 `count_at_4`、`records`、`stored_window_khz`；已加进 `__init__` 的导入与 `__all__`、以及 `test_import.py` 的导出清单。**写之前先看存了什么**，不再只能靠写一次去"读出"状态。
+
+**④ 单测** ✔：`LockedStateReport::stored_window()` 覆盖 有记录 / 默认空；`nvoc-core` lib 234 → **235** 通过；`cargo xtask ci` → `CI_EXIT=0`。
+
+**⑤ 未硬件验证** ✖：测试机自第 84 轮起一直失联（`No route to host`，子网重扫无果），所以这三处改动**只有编译、单测与 CI 绿**，**没有真机读数**。第 85 轮的 `set-gpu-locked-clocks` / `get_gpu_locked_state` 实测一开机就补。
