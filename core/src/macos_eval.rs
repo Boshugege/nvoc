@@ -511,6 +511,59 @@ fn gap_as_null<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok
     }
 }
 
+/// Whether a fold result is allowed to be promoted as a winner.
+///
+/// Repetition alone answers "did the throughput number come back"; it does not
+/// answer "did the clock move". A candidate whose throughput rose while the
+/// clock it is supposed to be buying stayed flat is an unexplained gain, and this
+/// backend's whole offset window is small enough that such a gain is far more
+/// likely to be scheduling luck than a clock effect. So promotion asks both
+/// questions, and says which one failed.
+///
+/// No clock telemetry is not the same as a flat clock: without samples the
+/// promotion rests on the throughput fold alone, which the `clock_known` flag
+/// keeps visible to the reader.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromotionGate {
+    pub reproduced: bool,
+    pub clock_consistent: bool,
+    pub clock_known: bool,
+    pub promotable: bool,
+    pub reason: &'static str,
+}
+
+pub fn promotion_gate(reproduced: bool, clock: Option<&ClockAgreement>) -> PromotionGate {
+    match clock {
+        Some(agreement) => {
+            let promotable = reproduced && agreement.consistent;
+            PromotionGate {
+                reproduced,
+                clock_consistent: agreement.consistent,
+                clock_known: true,
+                promotable,
+                reason: if promotable {
+                    "the throughput repeated and the clock moved by about the same amount"
+                } else if reproduced {
+                    "the throughput repeated but the clock change does not account for it"
+                } else {
+                    "the throughput did not repeat"
+                },
+            }
+        }
+        None => PromotionGate {
+            reproduced,
+            clock_consistent: false,
+            clock_known: false,
+            promotable: reproduced,
+            reason: if reproduced {
+                "the throughput repeated; no clock telemetry, so promotion rests on the fold alone"
+            } else {
+                "the throughput did not repeat"
+            },
+        },
+    }
+}
+
 /// The clock a window actually ran at, taken from the driver's own samples.
 ///
 /// The offset this backend accepts is small -- the device reports a span of about
@@ -970,6 +1023,41 @@ mod tests {
         let text = serde_json::to_string(fifteen).unwrap();
         assert!(text.contains("\"percent_per_round\":[null,0.68]"), "{text}");
         assert!(!text.contains("NaN"), "{text}");
+    }
+
+    #[test]
+    fn a_repeated_gain_the_clock_explains_is_promotable() {
+        let clock = clock_agreement(Some(0.775), 0.788, 0.5);
+        let gate = promotion_gate(true, Some(&clock));
+        assert!(gate.promotable);
+        assert!(gate.clock_known);
+        assert!(gate.reason.contains("moved by about the same amount"));
+    }
+
+    #[test]
+    fn a_repeated_gain_the_clock_does_not_explain_is_not_promotable() {
+        let clock = clock_agreement(Some(0.0), 0.9, 0.5);
+        let gate = promotion_gate(true, Some(&clock));
+        assert!(!gate.promotable, "a gain with a flat clock is unexplained");
+        assert!(gate.reproduced);
+        assert!(gate.reason.contains("does not account for it"));
+    }
+
+    #[test]
+    fn a_gain_that_did_not_repeat_is_not_promotable_even_with_a_moved_clock() {
+        let clock = clock_agreement(Some(0.775), 0.7, 0.5);
+        assert!(!promotion_gate(false, Some(&clock)).promotable);
+    }
+
+    #[test]
+    fn no_clock_telemetry_falls_back_to_the_fold_and_says_so() {
+        let gate = promotion_gate(true, None);
+        assert!(gate.promotable);
+        assert!(
+            !gate.clock_known,
+            "the reader must see the clock was not checked"
+        );
+        assert!(gate.reason.contains("no clock telemetry"));
     }
 
     #[test]

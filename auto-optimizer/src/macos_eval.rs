@@ -743,19 +743,33 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                 } else {
                     Some(deltas.iter().sum::<f64>() / deltas.len() as f64)
                 };
+                let agreement =
+                    nvoc_core::clock_agreement(mean_clock, verdict.percent_mean, threshold);
+                let gate = nvoc_core::promotion_gate(verdict.reproduced, Some(&agreement));
                 json!({
                     "target": verdict.target,
                     "requested_khz": verdict.requested_khz,
                     "clock_percent_per_round": deltas,
-                    "agreement": nvoc_core::clock_agreement(
-                        mean_clock,
-                        verdict.percent_mean,
-                        threshold,
-                    ),
+                    "agreement": agreement,
+                    "promotion": gate,
                 })
             })
             .collect::<Vec<_>>();
-        let winner = verdicts.iter().find(|verdict| verdict.reproduced);
+        // Promotion asks two questions: did the number come back, and did the
+        // clock move by about the same amount. A repeated gain the clock does not
+        // account for stays in the report and does not become a winner.
+        let winner = verdicts
+            .iter()
+            .find(|verdict| {
+                clock_checks
+                    .iter()
+                    .find(|check| {
+                        check["requested_khz"].as_i64() == Some(i64::from(verdict.requested_khz))
+                            && check["target"].as_str() == Some(verdict.target.as_str())
+                    })
+                    .is_some_and(|check| check["promotion"]["promotable"].as_bool() == Some(true))
+            })
+            .cloned();
         Some(json!({
             "schema": "nvoc/macos-repeat/1",
             "rounds_requested": rounds_wanted,
@@ -775,6 +789,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             "verdicts": verdicts,
             "winner": winner,
             "note": nvoc_core::REPEAT_NOTE,
+            "promotion_note": "a winner has to repeat *and* have its clock move by about the same amount; a repeated gain the clock does not account for stays in the report and is not promoted",
         }))
     } else {
         None
