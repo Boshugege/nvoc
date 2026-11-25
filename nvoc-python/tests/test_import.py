@@ -27,6 +27,7 @@ EXPECTED_EXPORTS = [
     "get_core_voltage_control",
     "get_display_list",
     "get_gpu_locked_clocks",
+    "get_gpu_locked_state",
     "get_oc_scanner_incomplete",
     "get_pmgr_arbiter",
     "get_power_source",

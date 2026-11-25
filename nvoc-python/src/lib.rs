@@ -3321,6 +3321,35 @@ fn get_gpu_locked_clocks(
     py_value(py, &value)
 }
 
+/// Read the locked-clock table the driver stores (`0x20809040`).
+///
+/// This is a read of stored state, not a normalisation query: it needs no
+/// window to answer, and what it returns is the table the driver keeps, with
+/// the newest record carrying the window it was last given. Nothing is written.
+#[pyfunction]
+fn get_gpu_locked_state(py: Python<'_>, gpu: &str) -> PyResult<Py<PyAny>> {
+    let value = with_target(gpu, "macos-rm", |target| {
+        let report = run(target, nvoc_core::ReadMacosRmLockedState)
+            .map_err(to_py_err)?
+            .output;
+        Ok(value_object([
+            ("backend", Value::from("macos-rm")),
+            (
+                "count_at_4",
+                report.count_at_4.map_or(Value::Null, Value::from),
+            ),
+            ("records", locked_records_value(&report.records)),
+            (
+                "stored_window_khz",
+                report.stored_window().map_or(Value::Null, |(min, max)| {
+                    value_object([("min_khz", Value::from(min)), ("max_khz", Value::from(max))])
+                }),
+            ),
+        ]))
+    })?;
+    py_value(py, &value)
+}
+
 /// Write the locked-clock window for one domain/vPstate.
 ///
 /// The write re-reads the normalised snapshot first, verifies the full readback
@@ -6673,6 +6702,7 @@ fn _native(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(reset_rated_tdp, m)?)?;
     m.add_function(wrap_pyfunction!(get_clock_domain, m)?)?;
     m.add_function(wrap_pyfunction!(get_gpu_locked_clocks, m)?)?;
+    m.add_function(wrap_pyfunction!(get_gpu_locked_state, m)?)?;
     m.add_function(wrap_pyfunction!(set_gpu_locked_clocks, m)?)?;
     m.add_function(wrap_pyfunction!(get_power_source, m)?)?;
     m.add_function(wrap_pyfunction!(set_power_source, m)?)?;
@@ -6778,6 +6808,7 @@ mod tests {
             _native(py, &module).unwrap();
             assert!(module.getattr("get_clock_domain").is_ok());
             assert!(module.getattr("get_gpu_locked_clocks").is_ok());
+            assert!(module.getattr("get_gpu_locked_state").is_ok());
             assert!(module.getattr("set_gpu_locked_clocks").is_ok());
         });
     }
