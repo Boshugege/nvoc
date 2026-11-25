@@ -511,6 +511,31 @@ fn gap_as_null<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok
     }
 }
 
+/// Whether a round should wait before it starts.
+///
+/// Repeated rounds on a card that is still cooling measure the card's thermal
+/// drift as much as the candidate: the die was seen 68 C at the end of one
+/// window and the clock steps down 1950 -> 1920 MHz on the way there. A round
+/// that waits for a target die temperature starts from a comparable state, and
+/// the temperature it actually started at is reported so a reader can see
+/// whether the control worked.
+///
+/// No telemetry is not "cool enough": without a temperature reading the wait is
+/// pointless, and pretending otherwise would hide that the control was not in
+/// effect.
+pub fn needs_cooldown(temperature_c: Option<f64>, target_c: f64) -> bool {
+    match temperature_c {
+        Some(temperature) => temperature > target_c,
+        None => false,
+    }
+}
+
+/// Whether the wait has run out. A bounded wait that reports its failure is
+/// better than a round that quietly starts hot.
+pub fn cooldown_expired(elapsed_s: f64, timeout_s: f64) -> bool {
+    timeout_s > 0.0 && elapsed_s >= timeout_s
+}
+
 /// One candidate seen across several independent rounds of the same sweep.
 ///
 /// A single round can promote a candidate on one lucky window. Repeating the
@@ -871,6 +896,30 @@ mod tests {
         let text = serde_json::to_string(fifteen).unwrap();
         assert!(text.contains("\"percent_per_round\":[null,0.68]"), "{text}");
         assert!(!text.contains("NaN"), "{text}");
+    }
+
+    #[test]
+    fn a_hot_die_waits_and_a_cool_one_does_not() {
+        assert!(needs_cooldown(Some(60.0), 48.0));
+        assert!(!needs_cooldown(Some(47.5), 48.0));
+        assert!(
+            !needs_cooldown(Some(48.0), 48.0),
+            "at the target is cool enough"
+        );
+    }
+
+    #[test]
+    fn no_temperature_reading_does_not_mean_cool_enough_to_start() {
+        // Waiting is pointless without a reading, but the report must not be
+        // able to claim the control was in effect.
+        assert!(!needs_cooldown(None, 48.0));
+    }
+
+    #[test]
+    fn a_wait_ends_at_its_timeout() {
+        assert!(!cooldown_expired(10.0, 240.0));
+        assert!(cooldown_expired(240.0, 240.0));
+        assert!(!cooldown_expired(1e9, 0.0), "no timeout never expires");
     }
 
     #[test]

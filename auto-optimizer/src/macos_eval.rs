@@ -73,6 +73,10 @@ pub struct StockEvalOptions {
     /// promote a candidate on one lucky window; more than one asks whether it
     /// happens again.
     pub candidate_rounds: u32,
+    /// Die temperature each candidate round waits for before it starts; 0
+    /// disables the wait.
+    pub cooldown_to_c: f64,
+    pub cooldown_timeout_s: f64,
     pub plan: Vec<PlanRequest>,
     /// One candidate applies a write half and puts it back; two or three make a
     /// sweep, which additionally repeats the baseline window so the run can
@@ -164,8 +168,67 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         candidate_rounds: *matches
             .get_one::<u32>("candidate-rounds")
             .ok_or_else(|| error("missing --candidate-rounds"))?,
+        cooldown_to_c: *matches
+            .get_one::<f64>("cooldown-to-c")
+            .ok_or_else(|| error("missing --cooldown-to-c"))?,
+        cooldown_timeout_s: *matches
+            .get_one::<f64>("cooldown-timeout-s")
+            .ok_or_else(|| error("missing --cooldown-timeout-s"))?,
         plan: parse_plan_requests(&plan_values)?,
         candidates,
+    })
+}
+
+/// What a candidate round started from. Recorded whether or not a cooldown was
+/// asked for, so a reader can see the die temperature behind each round's number
+/// instead of assuming the rounds were comparable.
+#[derive(Clone)]
+struct RoundStart {
+    temperature_c: Option<f64>,
+    waited_s: f64,
+    cooled: bool,
+    timed_out: bool,
+}
+
+/// Waits for the die to reach `--cooldown-to-c` before a round starts.
+///
+/// Read-only: it polls the status the driver already reports and never writes.
+/// A wait that runs out starts the round anyway and says so, rather than either
+/// hanging or pretending the round started cool.
+fn wait_for_cool(gpu: &GpuTarget<'_>, opts: &StockEvalOptions) -> Result<RoundStart, Error> {
+    let target = opts.cooldown_to_c;
+    let started = Instant::now();
+    let mut temperature = run(gpu, QueryMacosRmStatus)
+        .ok()
+        .and_then(|status| status.output.temperature_c);
+    if target <= 0.0 {
+        return Ok(RoundStart {
+            temperature_c: temperature,
+            waited_s: 0.0,
+            cooled: false,
+            timed_out: false,
+        });
+    }
+    while nvoc_core::needs_cooldown(temperature, target) {
+        let elapsed = started.elapsed().as_secs_f64();
+        if nvoc_core::cooldown_expired(elapsed, opts.cooldown_timeout_s) {
+            return Ok(RoundStart {
+                temperature_c: temperature,
+                waited_s: elapsed,
+                cooled: false,
+                timed_out: true,
+            });
+        }
+        std::thread::sleep(Duration::from_secs(5));
+        temperature = run(gpu, QueryMacosRmStatus)
+            .ok()
+            .and_then(|status| status.output.temperature_c);
+    }
+    Ok(RoundStart {
+        temperature_c: temperature,
+        waited_s: started.elapsed().as_secs_f64(),
+        cooled: true,
+        timed_out: false,
     })
 }
 
@@ -467,7 +530,10 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
     let rounds_wanted = opts.candidate_rounds.clamp(1, 4);
     let mut round_runs: Vec<Vec<(PlanRequest, CandidateRun)>> = Vec::new();
     let mut round_repeats: Vec<Option<LoadRun>> = Vec::new();
+    let mut round_starts: Vec<RoundStart> = Vec::new();
     for _round in 0..rounds_wanted {
+        let start = wait_for_cool(gpu, &opts)?;
+        round_starts.push(start);
         let mut this_round: Vec<(PlanRequest, CandidateRun)> = Vec::new();
         for request in &opts.candidates {
             let run = run_candidate(gpu, &opts, request)?;
@@ -612,6 +678,15 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             "rounds_requested": rounds_wanted,
             "rounds_measured": per_round.len(),
             "round_floors": per_round_floors,
+            "round_starts": round_starts
+                .iter()
+                .map(|start| json!({
+                    "temperature_c": start.temperature_c,
+                    "waited_s": start.waited_s,
+                    "cooled": start.cooled,
+                    "timed_out": start.timed_out,
+                }))
+                .collect::<Vec<_>>(),
             "verdicts": verdicts,
             "winner": winner,
             "note": nvoc_core::REPEAT_NOTE,
@@ -674,6 +749,8 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             "stress_iters": opts.stress_iters,
             "stress_verify_sample": opts.stress_verify_sample,
             "candidate_rounds": rounds_wanted,
+            "cooldown_to_c": opts.cooldown_to_c,
+            "cooldown_timeout_s": opts.cooldown_timeout_s,
             "plan_requests": opts.plan.len(),
         },
         "mode": if opts.dry_run {

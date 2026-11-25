@@ -157,6 +157,33 @@ fn macos_eval_command() -> Command {
                 .help("Metal load: iterations per thread (ignored by --load-source vulkan)"),
         )
         .arg(
+            Arg::new("cooldown-to-c")
+                .long("cooldown-to-c")
+                .value_name("C")
+                .num_args(1)
+                .value_parser(clap::value_parser!(f64))
+                .default_value("0")
+                .help(
+                    "Wait for the die to reach this temperature before each candidate round \
+                     starts (0 = do not wait). Repeated rounds on a card that is still cooling \
+                     measure thermal drift as much as the candidate: the die was measured at \
+                     68 C at the end of a sustained window and the clock steps down 1950 -> 1920 \
+                     MHz on the way there",
+                ),
+        )
+        .arg(
+            Arg::new("cooldown-timeout-s")
+                .long("cooldown-timeout-s")
+                .value_name("S")
+                .num_args(1)
+                .value_parser(clap::value_parser!(f64))
+                .default_value("240")
+                .help(
+                    "Give up waiting for the cooldown temperature after this many seconds and \
+                     start the round hot, recording that it started hot",
+                ),
+        )
+        .arg(
             Arg::new("candidate-rounds")
                 .long("candidate-rounds")
                 .value_name("N")
