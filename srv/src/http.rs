@@ -287,6 +287,7 @@ fn handle_api(
                             "max_rpm": f.max_rpm,
                             "mode": f.mode,
                             "current_percent": f.current_percent,
+                            "target_percent": f.target_percent,
                             "rpm": f.rpm,
                         })
                     }),

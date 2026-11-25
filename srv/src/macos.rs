@@ -523,6 +523,7 @@ impl ControlBackend for MacosRmBackend {
             max_rpm: fan.max_rpm,
             mode: fan.mode.to_string(),
             current_percent: fan.current_percent,
+            target_percent: fan.target_percent,
             rpm: fan.rpm_is_plausible().then_some(fan.rpm),
         })
     }

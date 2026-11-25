@@ -279,8 +279,12 @@ pub struct FanWindow {
     pub max_rpm: u32,
     /// `auto` / `manual` / `fanstop`, as the record names it.
     pub mode: String,
-    /// The duty the driver is holding right now, in percent.
+    /// The duty the driver is holding right now, in percent. This is the
+    /// cooler's feedback, not the request: it lags while the fan spins up or
+    /// down, and it is not the number a caller just wrote.
     pub current_percent: f64,
+    /// The duty the driver was asked to hold, in percent.
+    pub target_percent: f64,
     /// The tachometer reading, when it is a believable sample of this cooler.
     pub rpm: Option<u32>,
 }
