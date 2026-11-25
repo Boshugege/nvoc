@@ -324,6 +324,21 @@ fn handle_api(
                 return text_response(request, 503, "backend not ready");
             };
             let detail = format!("gpu {index} {watts} W");
+            // The board policy publishes its own span; a value past it is
+            // refused here, before the device is touched, exactly as the
+            // frequency offset above is.
+            if let Some(refusal) = limit_window_refusal(
+                watts as i32,
+                backend
+                    .read_power_limit_w(index)
+                    .ok()
+                    .flatten()
+                    .map(|r| (r.0 as i32, r.2 as i32)),
+                "W",
+            ) {
+                log::warn!("oc.power refused: {refusal}");
+                return text_response(request, 409, format!("Refused: {refusal}"));
+            }
             let response = audited_write(auth_user, "oc.power", detail, || {
                 backend.write_power_limit_w(index, watts)
             });
@@ -342,6 +357,18 @@ fn handle_api(
                 return text_response(request, 503, "backend not ready");
             };
             let detail = format!("gpu {index} {c} °C");
+            if let Some(refusal) = limit_window_refusal(
+                c,
+                backend
+                    .read_temp_limit_c(index)
+                    .ok()
+                    .flatten()
+                    .map(|r| (r.0, r.2)),
+                "C",
+            ) {
+                log::warn!("oc.temp refused: {refusal}");
+                return text_response(request, 409, format!("Refused: {refusal}"));
+            }
             let response = audited_write(auth_user, "oc.temp", detail, || {
                 backend.write_temp_limit_c(index, c)
             });
@@ -407,6 +434,17 @@ fn offset_window_refusal(value_mhz: i32, window: Option<(f32, f32)>) -> Option<S
         (max_mhz * 1000.0).round() as i32,
     );
     verdict.reason
+}
+
+/// Refuse a power or thermal value the driver's own span does not hold.
+///
+/// Same rule as [`offset_window_refusal`] and the same words, because these are
+/// the same question about a different unit: `window` is the span the transport
+/// publishes (min, max) in `unit`, and `None` (nothing published) refuses
+/// nothing.
+fn limit_window_refusal(value: i32, window: Option<(i32, i32)>, unit: &str) -> Option<String> {
+    let (min, max) = window?;
+    nvoc_core::limit_verdict(value, min, max, unit).reason
 }
 
 fn oc_offset_params(
@@ -974,7 +1012,7 @@ fn handle_oc_global(
 
 #[cfg(test)]
 mod tests {
-    use super::offset_window_refusal;
+    use super::{limit_window_refusal, offset_window_refusal};
 
     #[test]
     fn a_published_span_refuses_an_offset_past_it() {
@@ -995,5 +1033,32 @@ mod tests {
     fn no_published_span_refuses_nothing() {
         // NVAPI/NVML publish no window; "not told" is not "no span".
         assert_eq!(offset_window_refusal(500, None), None);
+    }
+
+    #[test]
+    fn a_published_board_policy_refuses_a_power_past_it() {
+        let refusal = limit_window_refusal(120, Some((70, 100)), "W").expect("refused");
+        assert!(refusal.contains("120 W"), "{refusal}");
+        assert!(refusal.contains("70 .. 100 W"), "{refusal}");
+        assert!(refusal.contains("nothing was written"), "{refusal}");
+        // Inside the span — including the floor, which is a legal value.
+        assert_eq!(limit_window_refusal(70, Some((70, 100)), "W"), None);
+        assert_eq!(limit_window_refusal(100, Some((70, 100)), "W"), None);
+    }
+
+    #[test]
+    fn a_published_acoustic_policy_refuses_a_target_past_it() {
+        let refusal = limit_window_refusal(95, Some((65, 87)), "C").expect("refused");
+        assert!(refusal.contains("95 C"), "{refusal}");
+        assert!(refusal.contains("65 .. 87 C"), "{refusal}");
+        assert_eq!(limit_window_refusal(87, Some((65, 87)), "C"), None);
+    }
+
+    #[test]
+    fn an_unpublished_window_refuses_nothing() {
+        // "Not told" is not "no span": a transport that publishes no policy
+        // window must behave exactly as it did before this gate existed.
+        assert_eq!(limit_window_refusal(500, None, "W"), None);
+        assert_eq!(limit_window_refusal(-5, None, "C"), None);
     }
 }

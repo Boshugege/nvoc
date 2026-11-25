@@ -572,7 +572,7 @@ pub struct OffsetVerdict {
 }
 
 pub fn offset_verdict(value_khz: i32, window_min_khz: i32, window_max_khz: i32) -> OffsetVerdict {
-    let admitted = value_khz >= window_min_khz && value_khz <= window_max_khz;
+    let admitted = span_holds(value_khz, window_min_khz, window_max_khz);
     let value_mhz = f64::from(value_khz) / 1000.0;
     let (min_mhz, max_mhz) = (
         f64::from(window_min_khz) / 1000.0,
@@ -592,6 +592,49 @@ pub fn offset_verdict(value_khz: i32, window_min_khz: i32, window_max_khz: i32) 
         admitted,
         reason,
     }
+}
+
+/// A verdict on whether a value sits inside the span a driver published, for
+/// windows that are not frequency offsets.
+///
+/// The board power policy (whole watts) and the acoustic target (whole degrees
+/// Celsius) each publish their own minimum and maximum, and each is what the
+/// matching write sets. The judgement is the same end-by-end one
+/// [`offset_verdict`] makes — both ends inclusive — so an edge that the driver
+/// accepts is admitted by the writer too, and a value past the span is refused
+/// rather than clamped.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LimitVerdict {
+    pub value: i32,
+    pub window_min: i32,
+    pub window_max: i32,
+    /// True when the span holds the value; `false` means "do not send this".
+    pub admitted: bool,
+    /// Why it was refused, in unit-carrying words. `None` when admitted.
+    pub reason: Option<String>,
+}
+
+pub fn limit_verdict(value: i32, window_min: i32, window_max: i32, unit: &str) -> LimitVerdict {
+    let admitted = span_holds(value, window_min, window_max);
+    let reason = (!admitted).then(|| {
+        format!(
+            "{value} {unit} is outside the span the driver itself accepts \
+             ({window_min} .. {window_max} {unit}); the driver rejects a value past it rather \
+             than clamping, so nothing was written"
+        )
+    });
+    LimitVerdict {
+        value,
+        window_min,
+        window_max,
+        admitted,
+        reason,
+    }
+}
+
+/// The shared end-by-end rule: both ends belong to the span.
+fn span_holds(value: i32, window_min: i32, window_max: i32) -> bool {
+    value >= window_min && value <= window_max
 }
 
 /// What one clock step is worth as a percentage, for comparing a measurement's
@@ -1766,5 +1809,39 @@ mod tests {
                 .contains("-8 .. +18.75 MHz")
         );
         assert!(offset_verdict(-8_000, -8_000, 18_750).admitted);
+    }
+
+    #[test]
+    fn a_limit_verdict_admits_both_ends_of_the_published_span() {
+        // 70..100 W: the card's own policy. Both ends are legal values, not
+        // "almost the ends" — an off-by-one here would refuse the card's floor.
+        for value in [70, 85, 100] {
+            let verdict = limit_verdict(value, 70, 100, "W");
+            assert!(verdict.admitted, "{value} W should be admitted");
+            assert_eq!(verdict.reason, None);
+        }
+        for value in [69, 101] {
+            assert!(!limit_verdict(value, 70, 100, "W").admitted, "{value} W");
+        }
+    }
+
+    #[test]
+    fn a_refused_limit_says_which_span_and_which_unit() {
+        let verdict = limit_verdict(95, 65, 87, "C");
+        assert!(!verdict.admitted);
+        let reason = verdict.reason.expect("a refusal says why");
+        assert!(reason.contains("95 C"), "{reason}");
+        assert!(reason.contains("65 .. 87 C"), "{reason}");
+        assert!(reason.contains("nothing was written"), "{reason}");
+        // No MHz anywhere: this window is not a frequency offset.
+        assert!(!reason.contains("MHz"), "{reason}");
+    }
+
+    #[test]
+    fn an_inverted_span_refuses_every_value_rather_than_wrapping() {
+        // A half-read or inverted window must not admit anything: wrapping the
+        // comparison would make 80 "inside" both 100..70 orders of magnitude out.
+        assert!(!limit_verdict(80, 100, 70, "W").admitted);
+        assert!(limit_verdict(80, 100, 70, "W").reason.is_some());
     }
 }
