@@ -66,7 +66,8 @@ int nvx_stage2_tierb_read(nvx_ctx *c);
 /* Read-only raw GET of one explicit (id, size) pair, hex-dumped.  The ids come
  * from the corrected method table, never from a size sweep; a refusal is
  * printed with its status and never retried at another size. */
-int nvx_stage2_raw_read(nvx_ctx *c, NvU32 cmd, unsigned size);
+int nvx_stage2_raw_read(nvx_ctx *c, NvU32 cmd, unsigned size,
+                        const char *seed_path);
 /* Explicit, read-only RATED_TDP GET probe: the one public perf-side read pair
  * (NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL). Never sends its SET twin. */
 int nvx_stage2_anchor_read(nvx_ctx *c);

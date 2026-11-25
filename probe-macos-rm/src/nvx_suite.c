@@ -716,7 +716,8 @@ static void item_legacy_probes(nvx_ctx *c)
  * measurement of a named row, not a sweep.  A refusal is printed with its
  * status and the caller is expected to stop there; a 0x65/0x62 answer aborts.
  * Nothing is written, and no second size is ever tried for the same id. */
-int nvx_stage2_raw_read(nvx_ctx *c, NvU32 cmd, unsigned size)
+int nvx_stage2_raw_read(nvx_ctx *c, NvU32 cmd, unsigned size,
+                        const char *seed_path)
 {
     static uint8_t buf[64 * 1024];
     if (!c->hSubdevice) {
@@ -729,6 +730,25 @@ int nvx_stage2_raw_read(nvx_ctx *c, NvU32 cmd, unsigned size)
         return -1;
     }
     memset(buf, 0, size);
+    if (seed_path) {
+        FILE *f = fopen(seed_path, "r");
+        unsigned n = 0, v;
+        if (!f) {
+            nvx_emit(c, "V2.raw", "raw-read", 0, NVX_V_SKIP,
+                     "cannot open seed file %s", seed_path);
+            return -1;
+        }
+        while (n < size && fscanf(f, "%x", &v) == 1) buf[n++] = (uint8_t)v;
+        /* Anything left over means the file is longer than the block. */
+        int extra = (n == size) && fscanf(f, "%x", &v) == 1;
+        fclose(f);
+        if (n != size || extra) {
+            nvx_emit(c, "V2.raw", "raw-read", 0, NVX_V_SKIP,
+                     "seed file has %s byte count, expected exactly %u",
+                     extra ? "more than the" : "the wrong", size);
+            return -1;
+        }
+    }
     NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice, cmd, buf, size);
     if (st != 0) {
         nvx_emit(c, "V2.raw", "raw-read", st, NVX_V_REJECTED,
