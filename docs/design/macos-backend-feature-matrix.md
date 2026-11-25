@@ -3702,3 +3702,17 @@ No such file or directory (os error 2)
 **⑤ 边界** ✔：这不是 Windows 门禁的替代；`uv` 存在时仍走 `uv run --locked`，锁文件语义未被绕过。
 
 **⑥ 证据** ✔：`outputs/stage12-macos-gate-green-20261126T111500Z/`（`xtask-ci.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百二十、锁定窗口 SET handler 静态看过：它是**薄壳**，"问 IDA 要块布局"这条路由此**判死**
+
+**① 方法表行（本机 `gsp_tu10x.bin`，脚本 `nvoc-analysis/gsp_dis.py`）** ✔：`0x2080d041 paramSize=648 flags=0x44 acc=0 pFunc=0x4d9f350`——和我们在 648 字节上写的记录一致。
+
+**② handler 本身不解析参数** ✔：`0x4d9f350` 只做三件事——顺着 `a0+0x158 → +0xe0 → +0x2000` 找到对象、查三个标志位，然后**从那个对象的 vtable 取 `+0x28` 槽**、把**调用方的参数块**当 `a2` 传进去 `jalr`，返回它的状态。⇒ **真正读那 648 字节的代码属于运行时对象，不属于这个函数**。
+
+**③ 因此"块布局"（entry count 语义、stride、`0x20809040` 的 offset 4）静态从这里读不出来** ✗。这不是"没时间做"，是**这条入口在结构上不成立**：静态侧只能看到一次间接调用。
+
+**④ 顺带一个不该忽略的细节** ✔：错误路径 `0x4d9f410` 把 `a2 = 0x2048` 传给 memset 类帮手清**参数块**后返回 `0x56`；`0x2048` 不是 648 ⇒ 那块缓冲的长度**不是**方法的 `paramSize`，别把两者当成同一个东西。
+
+**⑤ 所以布局问题回到原处** ✔：只余"驱动自己的答复"这一侧——已记录的 in-place 两个样本（count_at_4 = 96 / 144）+ 逐字不变的 entry words。**下一步只能是硬件上的受控实验**（改 entry count、看 `0x20809040` 回的块怎么变），不是静态分析。
+
+**⑥ 证据** ✔：`outputs/stage-set-handler-static-20261126T113000Z/`（`lock-set-handler-0x4d9f350.txt`、`lock-table-0x20809040.txt`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。本轮**零 GPU 请求、零写入、零提权、零重启**。
