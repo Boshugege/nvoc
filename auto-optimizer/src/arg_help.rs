@@ -65,7 +65,10 @@ fn macos_eval_command() -> Command {
              for the same bounded load, verified, then restored to the exact original \
              offset and read back. The report's `candidate` section carries the driver's \
              own apply/restore read-backs and `settled` says whether the round trip was \
-             clean -- not that the candidate is fast or stable.",
+             clean -- not that the candidate is fast or stable. Repeat the flag two or \
+             three times for a sweep: the baseline window is measured twice, the spread \
+             between those two windows is the noise floor, and a candidate inside it is \
+             reported as indistinguishable instead of being promoted.",
         )
         .arg(
             Arg::new("duration")
@@ -158,8 +161,9 @@ fn macos_eval_command() -> Command {
                 .long("apply-candidate")
                 .value_name("TARGET=DELTA")
                 .num_args(1)
+                .action(clap::ArgAction::Append)
                 .help(
-                    "Apply ONE offset candidate after the stock load, hold it for the same \
+                    "Apply one offset candidate after the stock load, hold it for the same \
                      bounded load, verify, then put the original offset back exactly, e.g. \
                      --apply-candidate graphics=-25mhz. TARGET must be a public domain this \
                      backend can address (graphics or memory); DELTA is signed kHz, \

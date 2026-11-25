@@ -331,6 +331,82 @@ pub fn throughput_delta(
     })
 }
 
+/// How much the score moves between two identical windows.
+///
+/// A sweep can only declare a winner if it knows its own noise. Two stock
+/// windows back to back on the same card give that directly: the mean says
+/// where the baseline sits, the largest gap from the mean says how far one
+/// window can wander for no reason at all.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct NoiseFloor {
+    pub windows: usize,
+    pub mean_per_second: f64,
+    /// Largest absolute deviation from the mean, as a percentage of the mean.
+    /// One window is not a spread, so this is `None` until there are two.
+    pub spread_percent: Option<f64>,
+}
+
+pub fn noise_floor(runs: &[LoadThroughput]) -> Option<NoiseFloor> {
+    if runs.is_empty() {
+        return None;
+    }
+    let mean = runs.iter().map(|r| r.iterations_per_second).sum::<f64>() / runs.len() as f64;
+    if mean <= 0.0 {
+        return None;
+    }
+    let spread_percent = (runs.len() > 1).then(|| {
+        runs.iter()
+            .map(|r| (r.iterations_per_second - mean).abs() * 100.0 / mean)
+            .fold(0.0_f64, f64::max)
+    });
+    Some(NoiseFloor {
+        windows: runs.len(),
+        mean_per_second: mean,
+        spread_percent,
+    })
+}
+
+/// One candidate's window judged against the measured noise.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SweepVerdict {
+    pub target: String,
+    pub requested_khz: i32,
+    pub percent: f64,
+    /// True only when the window beat the baseline by more than the baseline
+    /// wandered on its own. A gain inside the spread is reported, never
+    /// selected.
+    pub beats_noise: bool,
+}
+
+pub const SWEEP_NOTE: &str = "Candidates are ranked against a baseline repeat, not against \
+a single window: the spread between two identical stock windows is the smallest \
+difference this card can resolve, and any candidate inside it is reported as \
+indistinguishable rather than promoted.";
+
+/// Rank candidates by their measured window, refusing to promote anything the
+/// noise floor cannot separate. Order is best-first, and a tie keeps the order
+/// the caller asked for, so a repeat run is comparable.
+pub fn rank_sweep(
+    floor: &NoiseFloor,
+    candidates: &[(String, i32, LoadThroughput)],
+) -> Vec<SweepVerdict> {
+    let mut verdicts: Vec<SweepVerdict> = candidates
+        .iter()
+        .map(|(target, requested_khz, run)| {
+            let percent =
+                (run.iterations_per_second - floor.mean_per_second) * 100.0 / floor.mean_per_second;
+            SweepVerdict {
+                target: target.clone(),
+                requested_khz: *requested_khz,
+                percent,
+                beats_noise: floor.spread_percent.is_some_and(|spread| percent > spread),
+            }
+        })
+        .collect();
+    verdicts.sort_by(|a, b| b.percent.total_cmp(&a.percent));
+    verdicts
+}
+
 /// Keep the stressor's rolling FPS footer for the report without dumping the
 /// whole log; the last few `[VKGFX-H]` lines carry the final rates.
 pub fn fps_tail(stdout: &[u8]) -> Vec<String> {
@@ -699,5 +775,66 @@ mod tests {
             ..baseline.clone()
         };
         assert_eq!(throughput_delta(&dead, &candidate), None);
+    }
+
+    fn window(iterations_per_second: f64) -> LoadThroughput {
+        LoadThroughput {
+            mode: "stress".into(),
+            iterations: 48,
+            verified: 48,
+            failures: 0,
+            elapsed_ms: 20_000,
+            iterations_per_second,
+            verified_full_buffer: true,
+            stopped_by_signal: false,
+        }
+    }
+
+    #[test]
+    fn one_window_is_not_a_noise_floor() {
+        // A single stock window says where the baseline sits but not how far it
+        // wanders, so the spread stays unknown instead of being called zero.
+        let floor = noise_floor(&[window(2.4)]).expect("floor");
+        assert_eq!(floor.windows, 1);
+        assert_eq!(floor.spread_percent, None);
+        assert_eq!(noise_floor(&[]), None);
+    }
+
+    #[test]
+    fn the_spread_is_the_worst_gap_between_two_identical_windows() {
+        let floor = noise_floor(&[window(2.40), window(2.45)]).expect("floor");
+        // mean 2.425, gaps 0.025 (1.03%) and 0.025 (1.03%)
+        assert!((floor.mean_per_second - 2.425).abs() < 1e-12);
+        let spread = floor.spread_percent.expect("spread");
+        assert!((spread - 1.0309278350515463).abs() < 1e-9, "{spread}");
+    }
+
+    #[test]
+    fn a_gain_inside_the_noise_is_reported_and_never_promoted() {
+        let floor = noise_floor(&[window(2.40), window(2.45)]).expect("floor");
+        let candidates = vec![
+            // +0.6%: smaller than the 1.03% spread -> indistinguishable
+            ("graphics=-15mhz".to_string(), -15_000, window(2.44)),
+            // +4%: outside the spread -> a real winner
+            ("graphics=-60mhz".to_string(), -60_000, window(2.52)),
+        ];
+        let ranked = rank_sweep(&floor, &candidates);
+        assert_eq!(ranked[0].target, "graphics=-60mhz");
+        assert!(ranked[0].beats_noise);
+        assert_eq!(ranked[1].target, "graphics=-15mhz");
+        assert!(!ranked[1].beats_noise, "{}", ranked[1].percent);
+    }
+
+    #[test]
+    fn a_single_baseline_window_can_never_declare_a_winner() {
+        // Without a repeat there is no measured spread, so the honest answer is
+        // "cannot tell", even for a window that looks much faster.
+        let floor = noise_floor(&[window(2.40)]).expect("floor");
+        let ranked = rank_sweep(
+            &floor,
+            &[("graphics=-60mhz".to_string(), -60_000, window(3.0))],
+        );
+        assert!(!ranked[0].beats_noise);
+        assert!(ranked[0].percent > 20.0);
     }
 }

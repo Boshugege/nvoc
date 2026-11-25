@@ -59,10 +59,10 @@ pub use macos_lock::{DOMAINS, LockWindow, domain_name, is_single_bit};
 pub mod macos_offset;
 pub mod macos_rm;
 pub use macos_eval::{
-    CANDIDATE_NOTE, CandidateOutcome, LoadSummary, LoadThroughput, PLAN_NOTE, PlanDocument,
-    PlanRequest, Stats, THROUGHPUT_NOTE, ThrottleSummary, ThroughputDelta, candidate_outcome,
-    fps_tail, load_summary, metal_throughput, parse_plan_requests, plan_document, stats,
-    throttle_summary, throughput_delta,
+    CANDIDATE_NOTE, CandidateOutcome, LoadSummary, LoadThroughput, NoiseFloor, PLAN_NOTE,
+    PlanDocument, PlanRequest, SWEEP_NOTE, Stats, SweepVerdict, THROUGHPUT_NOTE, ThrottleSummary,
+    ThroughputDelta, candidate_outcome, fps_tail, load_summary, metal_throughput, noise_floor,
+    parse_plan_requests, plan_document, rank_sweep, stats, throttle_summary, throughput_delta,
 };
 pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{

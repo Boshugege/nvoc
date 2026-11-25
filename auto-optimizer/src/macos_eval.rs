@@ -27,6 +27,10 @@ use nvoc_core::{
     plan_document, run, throughput_delta,
 };
 use serde_json::{Value, json};
+
+/// Each candidate is a full apply/hold/verify/restore transaction in one boot,
+/// so the cap is deliberately small: this is evidence gathering, not a scanner.
+const SWEEP_MAX_CANDIDATES: usize = 3;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -62,9 +66,10 @@ pub struct StockEvalOptions {
     pub stress_elements: u64,
     pub stress_iters: u64,
     pub plan: Vec<PlanRequest>,
-    /// The one candidate to apply, hold and put back; `None` keeps the run
-    /// read-only.
-    pub candidate: Option<PlanRequest>,
+    /// One candidate applies a write half and puts it back; two or three make a
+    /// sweep, which additionally repeats the baseline window so the run can
+    /// measure its own noise; empty keeps the run read-only.
+    pub candidates: Vec<PlanRequest>,
 }
 
 fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
@@ -106,15 +111,17 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         .get_many::<String>("apply-candidate")
         .map(|values| values.cloned().collect())
         .unwrap_or_default();
-    let mut candidate = parse_plan_requests(&candidate_values)?.into_iter();
-    let candidate = candidate.next();
-    if candidate.is_some() && candidate_values.len() > 1 {
-        return Err(error(
-            "macos-eval applies at most one candidate per run; a sweep belongs in the scanner",
-        ));
+    let candidates = parse_plan_requests(&candidate_values)?;
+    // Every candidate is a full apply/measure/restore transaction, so the cap
+    // is about how many writes one boot should carry, not about the channel.
+    if candidates.len() > SWEEP_MAX_CANDIDATES {
+        return Err(error(format!(
+            "macos-eval takes at most {SWEEP_MAX_CANDIDATES} candidates per run; each one is an \
+             apply/measure/restore transaction and more than that is a scanner's job"
+        )));
     }
     let dry_run = matches.get_flag("dry-run");
-    if candidate.is_some() && dry_run {
+    if !candidates.is_empty() && dry_run {
         return Err(error(
             "--apply-candidate writes an offset and cannot be combined with --dry-run;              use --plan to evaluate the same candidate without writing it",
         ));
@@ -144,7 +151,7 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
             .get_one::<u64>("stress-iters")
             .ok_or_else(|| error("missing --stress-iters"))?,
         plan: parse_plan_requests(&plan_values)?,
-        candidate,
+        candidates,
     })
 }
 
@@ -310,6 +317,15 @@ struct CandidateRun {
 /// The candidate's target as the offset write addresses it. Only the domains
 /// this backend has a validated record for are accepted: naming one it cannot
 /// write would turn a refusal into a silently different domain.
+/// Human label for a plan target, used only in messages: the report keeps the
+/// structured target so nothing is parsed back out of prose.
+fn target_label(target: &OffsetStepTarget) -> String {
+    match target {
+        OffsetStepTarget::Domain(name) => name.clone(),
+        OffsetStepTarget::DomainBit(bit) => format!("bit:0x{bit:x}"),
+    }
+}
+
 fn clock_domain_for(target: &OffsetStepTarget) -> Result<ClockDomain, Error> {
     match target {
         OffsetStepTarget::Domain(name) if name == "graphics" => Ok(ClockDomain::Graphics),
@@ -415,11 +431,75 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         run_bounded_load(gpu, &opts)?
     };
     let verifier = run_verifier(opts.metal_check.as_ref(), opts.dry_run)?;
-    // The write half, when asked for: one candidate applied after the stock
-    // measurement, held for its own bounded load, verified under load, restored.
-    let candidate = match &opts.candidate {
-        Some(request) => Some(run_candidate(gpu, &opts, request)?),
-        None => None,
+    // The write half, when asked for: candidates applied one at a time after the
+    // stock measurement, each held for its own bounded load, verified under load
+    // and restored before the next one starts.
+    let mut runs: Vec<(PlanRequest, CandidateRun)> = Vec::new();
+    for request in &opts.candidates {
+        let run = run_candidate(gpu, &opts, request)?;
+        // Stop the moment a restore is not read back: the next candidate would
+        // otherwise be stacked on top of an offset nobody verified was undone.
+        if run.restored.is_none() {
+            return Err(error(format!(
+                "candidate {} was applied but its restore was not read back; stopping instead of \
+                 applying another candidate on top",
+                target_label(&request.target)
+            )));
+        }
+        if run.exit_code != Some(0) {
+            return Err(error(format!(
+                "the load exited with {:?} while candidate {} was held",
+                run.exit_code,
+                target_label(&request.target)
+            )));
+        }
+        runs.push((request.clone(), run));
+    }
+    let candidate = runs.first().map(|(_, run)| run);
+    // A sweep also repeats the stock window, because a ranking against a single
+    // baseline window cannot tell a gain from the baseline's own wander.
+    let baseline_repeat = if runs.len() > 1 {
+        Some(run_bounded_load(gpu, &opts)?)
+    } else {
+        None
+    };
+    let sweep = if runs.len() > 1 {
+        let mut windows: Vec<nvoc_core::LoadThroughput> = Vec::new();
+        windows.extend(load.throughput.clone());
+        windows.extend(
+            baseline_repeat
+                .as_ref()
+                .and_then(|run| run.throughput.clone()),
+        );
+        match nvoc_core::noise_floor(&windows) {
+            Some(floor) => {
+                let measured: Vec<(String, i32, nvoc_core::LoadThroughput)> = runs
+                    .iter()
+                    .filter_map(|(request, run)| {
+                        run.throughput.as_ref().map(|throughput| {
+                            (
+                                target_label(&request.target),
+                                request.delta_khz,
+                                throughput.clone(),
+                            )
+                        })
+                    })
+                    .collect();
+                let verdicts = nvoc_core::rank_sweep(&floor, &measured);
+                Some(json!({
+                    "schema": "nvoc/macos-sweep/1",
+                    "baseline_windows": floor,
+                    "candidates_measured": measured.len(),
+                    "candidates_requested": runs.len(),
+                    "verdicts": verdicts,
+                    "winner": verdicts.iter().find(|v| v.beats_noise),
+                    "note": nvoc_core::SWEEP_NOTE,
+                }))
+            }
+            None => None,
+        }
+    } else {
+        None
     };
     // A `--plan` request is evaluated against the snapshot read above, whether
     // or not a load follows it: the plan is about the state, not the load. In a
@@ -437,7 +517,6 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
 
     let report = json!({
         "schema": "nvoc/macos-stock-eval/1",
-        "mode": if opts.dry_run { "dry-run" } else { "stock-load" },
         "gpu": {
             "index": gpu.index,
             "gpu_id": gpu.id.0,
@@ -467,9 +546,20 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             "stress_iters": opts.stress_iters,
             "plan_requests": opts.plan.len(),
         },
-        "settings_written": candidate
-            .as_ref()
-            .is_some_and(|run| run.applied.readback_verified && run.restored.is_some()),
+        "mode": if opts.dry_run {
+            "dry-run"
+        } else if runs.len() > 1 {
+            "sweep"
+        } else if runs.len() == 1 {
+            "candidate"
+        } else {
+            "stock-load"
+        },
+        "settings_written": runs
+            .iter()
+            .all(|(_, run)| run.applied.readback_verified && run.restored.is_some())
+            && !runs.is_empty(),
+        "sweep": sweep,
         "write_gate": match &candidate {
             Some(run) => if run.restored.is_some() {
                 "write: one candidate offset was applied to one clock domain through \
@@ -504,7 +594,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         },
         "verifier": verifier,
         "candidate": candidate.as_ref().map(|run| candidate_outcome(
-            opts.candidate.as_ref().map_or(0, |request| request.delta_khz),
+            runs.first().map_or(0, |(request, _)| request.delta_khz),
             &run.applied,
             run.restored.as_ref(),
         )),
@@ -532,10 +622,11 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             load.exit_code
         )));
     }
-    if let Some(run) = &candidate.filter(|run| run.exit_code != Some(0)) {
+    if let Some((request, run)) = runs.iter().find(|(_, run)| run.exit_code != Some(0)) {
         return Err(error(format!(
-            "the Vulkan stressor exited with {:?} while the candidate was held",
-            run.exit_code
+            "the load exited with {:?} while candidate {} was held",
+            run.exit_code,
+            target_label(&request.target)
         )));
     }
     Ok(())
