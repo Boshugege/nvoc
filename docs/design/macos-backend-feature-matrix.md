@@ -3338,3 +3338,15 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **② 改法** ✔：三种形态（percent / rpm / stop）的响应文本都改成 `Recorded: …; the control loop applies it on its next tick (the device is not written by this request)`。**状态码仍是 200**，因为语义确实是"请求已受理"；没有改成 202/409，因为那会把配置面和执行面的界线往后挪，而这条路由的历史行为如此——要改语义应当单独决策，本轮只把话说准。
 
 **③ 测试** ✔：`cargo test -p nvoc-srv --lib` **73 passed**；`cargo xtask ci` = `CI_EXIT=0`。
+
+## 一百九十六、优化器第 11–12 阶段的现状清点（只读核对，防止下一轮从零再猜）
+
+`auto-optimizer/src/macos_eval.rs`（967 行）已经是 macOS 的评测通道，不是空白：
+
+- `--plan`：只算候选、不写；`--apply-candidate`：**每个候选都是一次完整的 apply/hold/verify/restore 事务**，且与 `--dry-run` 互斥（源码里直接拒）；
+- 每进程候选数有上限，理由写在源码里：`one candidate per boot` 的探针纪律（叠加多条 SET 会把 GSP 推到 latch）；
+- 轮询 `nvoc_core::macos_rm::DeviceStatus` 取时钟窗口、等待降温、跑可选 verifier（`stress-macos/metal_check`）。
+
+⇒ 因此"优化器 11–12 阶段未动"这个说法**不准确**：写入口、候选上限、restore、verifier 都在。真正缺的是**扫描（stage 12，多候选自动推进）**——而它与探针纪律直接冲突（一 boot 一候选），所以它不是漏做，是**被纪律挡住**，要做得先设计跨重启的续跑协议（候选落盘、boot 计数、崩溃后从下一个候选续），这是独立设计任务，不属于"补个循环"。
+
+本轮没有代码改动；结论写在这里供下一轮直接开工。
