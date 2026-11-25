@@ -2982,3 +2982,22 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **③ 代码** ✔：默认改为 `--stress-elements 4194304`、`--stress-iters 2000`；repeat 文档新增 `resolution`（`noise_threshold_percent` / `baseline_clock_mhz` / `one_step_percent` / `warning`）。core 新增 `step_percent()` 与 `resolution_warning()`（噪声 ≥ 一档 ⇒ 给出"这一轮报没有增益不能读成偏移没有效果"）+ 4 条单测。
 
 **④ 边界** ✗：这些数值是**本卡本驱动**测出来的，换卡要重测；单负载形状、三轮、窗口 20 s，不是稳定性认证；两批共十二次写入全部回读并复位（`settings_written: true`）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。证据：`outputs/stage-eval-defaultshape-20261125T195729Z/`（4 文件，4M×500 那批）与 `outputs/stage-eval-defaultshape-20261125T200509Z/`（5 文件，4M×2000 及合并剖析），各有 `SHA256SUMS`。
+
+## 一百七十六、偏移窗口"值多少"由读面自己说
+
+**① 读面** ✔：`get-pstate-global-freq-offset` 之前只报 `window_min_khz/window_max_khz`（±18 750 kHz），读者要自己换算才知道这在本卡上**不到 1 %**。条目现在自带 `potential`（真机输出）：
+
+```
+clock 1530000 kHz, offset 0 kHz, window -18750..18750 kHz (3 records)
+potential: window -18.75..18.75 MHz at clock 1530.0 MHz -> -1.225 % .. 1.225 %
+```
+
+百分比的分母是**当前时钟**：空闲（1530 MHz）读作 ±1.225 %，boost（1935 MHz）读作 ±0.969 %，同一件事的两张面孔；`clock_mhz` 一并给出，读者不用猜分母。note 明确写"更大的偏移会被拒绝而不是钳制；时钟按离散档位跳，所以能兑现的增益可能比这个跨度少一档"。
+
+**② 代码** ✔：core 新增 `offset_potential()` + `OffsetPotential`（无时钟 ⇒ 百分比 `null`，**不是 0**）+ 2 条单测；CLI `offset_entry_json` 增加 `potential`，测试锁住 `window_max_mhz = 18.75`、百分比 ≈1.19（合成时钟 1575 MHz）与 note 存在。
+
+**③ 这一条不是测量** ✗：它是**驱动自报窗口**的换算。兑现多少要看时钟档（§一百七十三 的 `clock_window`），增益是否可信要看 gate（§一百七十四）；分辨率够不够看 `resolution`（§一百七十五）。四者是四件不同的事，报告里分开写。
+
+**④ 服务面未接（说清原因）** ✗：`srv` 的 `/oc` 还没接这个块。该后端按设计拒绝"按名字取单域偏移"——时钟文档（`0x20809061`）的域位没有全部映射到 core/mem 名称，所以每域窗口读不出来；要接通得先解决域位映射，而不是把窗口硬塞进 `/oc`。
+
+**⑤ 证据** ✔：`outputs/stage-cli-offsetpotential-20261125T201727Z/`（3 文件 + `SHA256SUMS`）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
