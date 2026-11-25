@@ -3107,3 +3107,27 @@ apply_all_without_a_window   : [["apply core offset", "apply memory offset"]]
 **④ 测试** ✔：`gui/tests/test_overclock.py` 新增四条；`pytest -q gui/tests/` **303 passed / 13 skipped**；`cargo xtask ci` = `CI_EXIT=0`。
 
 **⑤ 证据** ✔：`outputs/stage-gui-applyallwindow-20261125T204356Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
+
+## 一百八十二、服务面的偏移写入口先过准入闸
+
+**① 缺口** ✔：`GET /api/oc` 公布驱动自报跨度（§一百七十七），但 `POST /api/oc/offset` **直接写穿**它——HTTP 调用者可以花一次写去学一件读面已经写着的事。CLI/pynvoc/TUI/GUI 都已设界（§一百七十四 … §一百八十一），唯独服务写入口没有。
+
+**② 规则收进 core** ✔：`offset_verdict(value_khz, min_khz, max_khz) -> OffsetVerdict`（`admitted` / `reason` / 两端 MHz）。**按两端判**，不按 |max|——不对称窗口下负端才是负偏移的界。`srv` 的 `offset_window_refusal()` 在 `audited_write` **之前**调用，答 409 并零写入；未发布跨度的传输（NVAPI/NVML）放行，**"没被告知"≠"没有跨度"**。
+
+**③ 真机输出** ✔：
+
+```
+POST value=40 → 409 "Refused: +40 MHz is outside the span the driver itself accepts
+                 (-18.75 .. +18.75 MHz); a larger offset is refused rather than clamped,
+                 so nothing was written"
+CLI 读回      → Offset MHz: 0.0 MHz   Restore kHz: 0 kHz     （拒绝确实没有写）
+POST value=8  → 200 → CLI 读回 8.0 MHz / Restore kHz: 8000   （闸没挡正常写入）
+POST value=0  → 200 → CLI 读回 0.0 MHz / Restore kHz: 0      （exact restore）
+03-srv.log    → 两条 WARN "oc.offset refused: …"
+```
+
+**④ 测试** ✔：`cargo test -p nvoc-core --lib macos_eval` 56 passed（+3）；`cargo test -p nvoc-srv --lib http` 3 passed（+3）；`cargo xtask ci` = `CI_EXIT=0`。
+
+**⑤ 边界** ✔：这是**写前准入**，不是测量——只保证发出去的值在驱动自报跨度内，不保证兑现多少（取决于时钟档）。`power`/`temp` 仍 `null`。`value=500` 先撞到更窄的跨度闸（409），预存的 ±1000 MHz 参数范围检查仍在它之前。
+
+**⑥ 证据** ✔：`outputs/stage-srv-offsetgate-20261125T204825Z/`（5 文件 + `SHA256SUMS` 全 OK）；收尾偏移 0 kHz、风扇 auto/2800 rpm、板卡 100 W（70–100）、电源 ac、srv 进程 0。
