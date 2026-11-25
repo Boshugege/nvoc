@@ -343,6 +343,19 @@ pub(super) fn format_locked_clocks(output: &Value) -> Vec<String> {
             ));
         }
     }
+    if let Some(ratcheted) = output.get("floor_ratcheted_khz").and_then(Value::as_array) {
+        let applied: Vec<String> = ratcheted
+            .iter()
+            .filter_map(Value::as_u64)
+            .map(|khz| format!("{:.3}", khz as f64 / 1000.0))
+            .collect();
+        if !applied.is_empty() {
+            lines.push(format!(
+                "floor kept at {} MHz: the driver never lowers a stored floor",
+                applied.join(", ")
+            ));
+        }
+    }
     if let Some(snapshot) = output.get("snapshot").and_then(Value::as_array) {
         let rendered: Vec<String> = snapshot
             .iter()

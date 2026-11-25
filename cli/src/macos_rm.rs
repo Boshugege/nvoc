@@ -189,10 +189,22 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         .clone()
                         .ok_or_else(|| CliError::new("missing locked-clock window"))?;
                     let report = run(&target, nvoc_core::SetMacosRmLockedClocks { request })?.output;
+                    // The driver raises the floor to the highest clock the card has
+                    // reached and never brings it back down, so a requested floor
+                    // below the stored one is accepted and simply not applied.
+                    let ratcheted = report
+                        .applied
+                        .iter()
+                        .zip(&report.requested)
+                        .filter(|(applied, requested)| applied.min_khz > requested.min_khz)
+                        .map(|(applied, _)| applied.min_khz)
+                        .collect::<Vec<_>>();
                     json!({"applied": true, "backend": "macos-rm", "mode": "locked-clocks",
                         "windows": locked_windows_json(&report.applied),
                         "requested": locked_windows_json(&report.requested),
                         "snapshot": locked_windows_json(&report.snapshot),
+                        "floor_ratcheted_khz": ratcheted,
+                        "floor_note": "the driver keeps the highest floor it has seen; a lower request is accepted and not applied",
                         "readback_verified": true, "restored_on_mismatch": true})
                 }
                 Command::SetPowerLimit | Command::ResetPowerLimit => {

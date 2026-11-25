@@ -1065,7 +1065,7 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     arity: (0, 0),
                     options: Box::leak(Box::new(["domain", "pstate", "min-mhz", "max-mhz"])),
                     formatter: Some(output::format_locked_clocks),
-                    ..CommandSpec::new("set-gpu-locked-clocks", Group::Clock, "Write the locked min/max window for one domain and vPstate as snapshot/SET/readback/rollback; --domain defaults to graphics and --pstate to 8 (macOS RM only, root)")
+                    ..CommandSpec::new("set-gpu-locked-clocks", Group::Clock, "Write the locked min/max window for one domain and vPstate as snapshot/SET/readback/rollback; --domain defaults to graphics and --pstate to 8. The driver keeps the highest floor it has seen, so --min-mhz can raise a floor but never lower one; --max-mhz moves freely (macOS RM only, root)")
                 },
             ),
             (
