@@ -160,6 +160,10 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
 /// summary as if a load had happened.
 struct LoadRun {
     under_load: Value,
+    /// Whether this window's own telemetry shows the card did work. Carried
+    /// next to the throughput so a report cannot print a comparison without
+    /// saying whether either side left idle.
+    evidence: nvoc_core::LoadEvidence,
     stressor: Value,
     post: Value,
     exit_code: Option<i32>,
@@ -219,6 +223,10 @@ fn sample_while_loaded(
     opts: &StockEvalOptions,
 ) -> Result<LoadRun, Error> {
     let started = Instant::now();
+    // The baseline for the load evidence: what the card looked like on the way
+    // in, so a clock that was already lifted is not mistaken for this window's
+    // work, and a die that was already warm is not credited to it either.
+    let baseline = run(gpu, QueryMacosRmStatus).ok().map(|s| s.output);
     let mut child = command.spawn().map_err(|e| {
         error(format!(
             "failed to start the Vulkan stressor {}: {e}",
@@ -252,8 +260,10 @@ fn sample_while_loaded(
     // its `throttle` field whether a reason was asserted and which.
     let under_load_report = serde_json::to_value(load_summary(&under_load))
         .map_err(|e| error(format!("failed to serialise the load summary: {e}")))?;
+    let evidence = nvoc_core::load_evidence(&under_load, baseline.as_ref());
 
     Ok(LoadRun {
+        evidence,
         throughput: metal_throughput(&output.stdout),
         under_load: under_load_report,
         stressor: json!({
@@ -303,6 +313,7 @@ fn run_verifier(path: Option<&PathBuf>, dry_run: bool) -> Result<Value, Error> {
 /// What the write half produced: the held load, its verifier, and the two write
 /// reports the round trip is judged on.
 struct CandidateRun {
+    evidence: nvoc_core::LoadEvidence,
     throughput: Option<LoadThroughput>,
     applied: nvoc_core::ClockOffsetWriteReport,
     restored: Option<nvoc_core::ClockOffsetWriteReport>,
@@ -384,6 +395,7 @@ fn run_candidate(
         .unwrap_or(Value::Null);
     let (load, verifier) = held?;
     Ok(CandidateRun {
+        evidence: load.evidence.clone(),
         throughput: load.throughput.clone(),
         applied,
         restored,
@@ -421,6 +433,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
     // and the load sections stay null rather than becoming an empty summary.
     let load = if opts.dry_run {
         LoadRun {
+            evidence: nvoc_core::load_evidence(&[], Some(&pre)),
             under_load: Value::Null,
             stressor: Value::Null,
             post: Value::Null,
@@ -486,14 +499,41 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                     })
                     .collect();
                 let verdicts = nvoc_core::rank_sweep(&floor, &measured);
+                // Throughput numbers only mean something if the windows were
+                // busy. When the card never left idle the ranking is a ranking
+                // of near-idle compute, so no winner is promoted and the note
+                // says why -- the numbers stay in the report.
+                let windows_loaded = load.evidence.demonstrated
+                    && baseline_repeat
+                        .as_ref()
+                        .is_none_or(|run| run.evidence.demonstrated)
+                    && runs.iter().all(|(_, run)| run.evidence.demonstrated);
                 Some(json!({
                     "schema": "nvoc/macos-sweep/1",
                     "baseline_windows": floor,
                     "candidates_measured": measured.len(),
                     "candidates_requested": runs.len(),
+                    "windows_loaded": windows_loaded,
+                    "baseline_load_evidence": load.evidence,
+                    "candidate_load_evidence": runs
+                        .iter()
+                        .map(|(request, run)| json!({
+                            "target": target_label(&request.target),
+                            "delta_khz": request.delta_khz,
+                            "evidence": run.evidence,
+                        }))
+                        .collect::<Vec<_>>(),
                     "verdicts": verdicts,
-                    "winner": verdicts.iter().find(|v| v.beats_noise),
-                    "note": nvoc_core::SWEEP_NOTE,
+                    "winner": if windows_loaded {
+                        verdicts.iter().find(|v| v.beats_noise)
+                    } else {
+                        None
+                    },
+                    "note": if windows_loaded {
+                        nvoc_core::SWEEP_NOTE
+                    } else {
+                        nvoc_core::SWEEP_IDLE_NOTE
+                    },
                 }))
             }
             None => None,
@@ -581,6 +621,12 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         "plan": plan,
         "pre": pre,
         "under_load": load.under_load,
+        "load_evidence": if opts.dry_run {
+            Value::Null
+        } else {
+            serde_json::to_value(&load.evidence)
+                .map_err(|e| error(format!("failed to serialise the load evidence: {e}")))?
+        },
         "post": load.post,
         "stressor": load.stressor,
         "under_load_throughput": load.throughput,

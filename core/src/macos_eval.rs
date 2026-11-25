@@ -183,6 +183,100 @@ pub fn stats(
     })
 }
 
+/// Whether a window that is called a load actually did anything, measured from
+/// the telemetry the same window published.
+///
+/// Measured on the test card: the Metal verifier at the optimizer's default
+/// 65536 elements runs 143 dispatches in 60 s while the driver reports the idle
+/// clock (1530 MHz), the idle power (11.4 W) and 0 percent utilisation, and the
+/// die warms by about 4 degrees. A throughput comparison across such a window
+/// compares near-idle compute, so the report has to say whether the window was
+/// demonstrably busy instead of letting "under load" mean "a binary was
+/// running".
+///
+/// The three signals are deliberately separate: on this transport the power
+/// field barely moves at all, so a rising temperature or a clock lift above the
+/// pre-window value is the evidence that survives. `demonstrated` is false both
+/// when nothing moved and when the window published nothing to judge -- the two
+/// are reported apart (`signals`), because "no telemetry" and "no work" are
+/// different problems.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LoadEvidence {
+    pub utilization_percent: Option<Stats>,
+    pub graphics_clock_mhz: Option<Stats>,
+    pub power_w: Option<Stats>,
+    pub temperature_c: Option<Stats>,
+    /// Under-window clock max minus the pre-window reading, when both exist.
+    pub clock_lift_mhz: Option<f64>,
+    /// Under-window temperature max minus the pre-window reading.
+    pub temperature_rise_c: Option<f64>,
+    /// Which of the signals moved far enough to count as work.
+    pub signals: Vec<&'static str>,
+    /// True when at least one signal cleared its (deliberately low) bar.
+    pub demonstrated: bool,
+    pub note: &'static str,
+}
+
+/// Utilisation at or above this percent counts as work.
+pub const LOAD_UTILIZATION_PERCENT: f64 = 50.0;
+/// A die that warms this much did work, whatever the utilisation field says.
+pub const LOAD_TEMPERATURE_RISE_C: f64 = 5.0;
+/// A clock this far above the pre-window value counts as the card leaving idle.
+pub const LOAD_CLOCK_LIFT_MHZ: f64 = 100.0;
+
+pub const LOAD_EVIDENCE_NOTE: &str = "A window only counts as a load when its own telemetry \
+shows it: utilisation at or above 50 percent, or a die temperature rise of at least 5 C, or a \
+clock lift of at least 100 MHz above the pre-window reading. The card measured here does not \
+move its power field under the bounded Metal verifier, so power is reported but never used as \
+the deciding signal. `demonstrated` false means the throughput numbers in this report compare \
+near-idle compute -- not that no code ran.";
+
+pub fn load_evidence(samples: &[DeviceStatus], pre: Option<&DeviceStatus>) -> LoadEvidence {
+    let utilization_percent = stats(samples, |s| s.utilization_percent.map(f64::from));
+    let graphics_clock_mhz = stats(samples, |s| s.graphics_clock_khz.map(|k| k as f64 / 1000.0));
+    let power_w = stats(samples, |s| s.power_mw.map(|mw| mw as f64 / 1000.0));
+    let temperature_c = stats(samples, |s| s.temperature_c);
+    let clock_lift_mhz = match (
+        pre.and_then(|p| p.graphics_clock_khz)
+            .map(|k| k as f64 / 1000.0),
+        graphics_clock_mhz.as_ref().map(|s| s.max),
+    ) {
+        (Some(before), Some(peak)) => Some(peak - before),
+        _ => None,
+    };
+    let temperature_rise_c = match (
+        pre.and_then(|p| p.temperature_c),
+        temperature_c.as_ref().map(|s| s.max),
+    ) {
+        (Some(before), Some(peak)) => Some(peak - before),
+        _ => None,
+    };
+    let mut signals: Vec<&'static str> = Vec::new();
+    if utilization_percent
+        .as_ref()
+        .is_some_and(|s| s.mean >= LOAD_UTILIZATION_PERCENT)
+    {
+        signals.push("utilization");
+    }
+    if temperature_rise_c.is_some_and(|d| d >= LOAD_TEMPERATURE_RISE_C) {
+        signals.push("temperature");
+    }
+    if clock_lift_mhz.is_some_and(|d| d >= LOAD_CLOCK_LIFT_MHZ) {
+        signals.push("clock");
+    }
+    LoadEvidence {
+        utilization_percent,
+        graphics_clock_mhz,
+        power_w,
+        temperature_c,
+        clock_lift_mhz,
+        temperature_rise_c,
+        demonstrated: !signals.is_empty(),
+        signals,
+        note: LOAD_EVIDENCE_NOTE,
+    }
+}
+
 /// Throttle evidence for a load: the union of the reason masks the driver
 /// published while it ran, and the names of every reason asserted at least once.
 ///
@@ -400,6 +494,12 @@ a single window. The threshold is the wider of the measured spread and half a \
 percent, because two lucky windows understate the real run-to-run noise; \
 anything inside it is reported as indistinguishable rather than promoted.";
 
+pub const SWEEP_IDLE_NOTE: &str = "No winner is promoted: at least one window in this sweep \
+did not demonstrate that the card did any work (see the load_evidence blocks -- utilisation, \
+temperature rise and clock lift all stayed put), so the throughput numbers here compare \
+near-idle compute. The measurements are kept for the record; they are not a ranking of \
+offset effects.";
+
 /// Rank candidates by their measured window, refusing to promote anything the
 /// noise floor cannot separate. Order is best-first, and a tie keeps the order
 /// the caller asked for, so a repeat run is comparable.
@@ -454,6 +554,139 @@ mod tests {
         // A field the driver did not publish stays absent per field, never 0.
         assert_eq!(summary.power_w, None);
         assert_eq!(summary.fan_rpm, None);
+    }
+
+    /// The window the Metal verifier actually produced at the optimizer's
+    /// default settings: idle clock, idle power, no utilisation, +4 C.
+    fn idle_metal_window() -> Vec<DeviceStatus> {
+        vec![
+            DeviceStatus {
+                graphics_clock_khz: Some(1_530_000),
+                power_mw: Some(11_400),
+                utilization_percent: Some(0),
+                temperature_c: Some(48.2),
+                ..Default::default()
+            },
+            DeviceStatus {
+                graphics_clock_khz: Some(1_530_000),
+                power_mw: Some(11_500),
+                utilization_percent: Some(0),
+                temperature_c: Some(49.4),
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn a_window_that_never_leaves_idle_is_not_a_load() {
+        let pre = DeviceStatus {
+            graphics_clock_khz: Some(1_530_000),
+            power_mw: Some(11_300),
+            utilization_percent: Some(0),
+            temperature_c: Some(48.3),
+            ..Default::default()
+        };
+        let evidence = load_evidence(&idle_metal_window(), Some(&pre));
+        assert!(!evidence.demonstrated);
+        assert!(evidence.signals.is_empty());
+        // The numbers are still reported: "nothing moved" is the finding, and a
+        // consumer can see what did not move.
+        assert_eq!(
+            evidence.graphics_clock_mhz.as_ref().map(|s| s.max),
+            Some(1530.0)
+        );
+        assert_eq!(evidence.power_w.as_ref().map(|s| s.max), Some(11.5));
+        // Measured pre-window 48.3 C against a 49.4 C window peak: the card is
+        // warm because it was warm before, not because this window worked it.
+        assert_eq!(evidence.temperature_rise_c, Some(49.4 - 48.3));
+        assert_eq!(evidence.clock_lift_mhz, Some(0.0));
+    }
+
+    #[test]
+    fn a_clock_that_does_not_rise_above_the_pre_window_value_is_not_a_lift() {
+        // The card did report 1875 MHz during one window, but the pre-window
+        // reading was already there: a max-min comparison would have called
+        // that load.
+        let pre = DeviceStatus {
+            graphics_clock_khz: Some(1_875_000),
+            ..Default::default()
+        };
+        let samples = vec![DeviceStatus {
+            graphics_clock_khz: Some(1_875_000),
+            temperature_c: Some(50.0),
+            ..Default::default()
+        }];
+        let evidence = load_evidence(&samples, Some(&pre));
+        assert_eq!(evidence.clock_lift_mhz, Some(0.0));
+        assert!(!evidence.demonstrated);
+    }
+
+    #[test]
+    fn each_individual_signal_can_establish_a_load() {
+        let pre = DeviceStatus {
+            graphics_clock_khz: Some(1_530_000),
+            temperature_c: Some(45.0),
+            ..Default::default()
+        };
+        let busy = vec![DeviceStatus {
+            graphics_clock_khz: Some(1_530_000),
+            utilization_percent: Some(91),
+            temperature_c: Some(46.0),
+            ..Default::default()
+        }];
+        assert_eq!(
+            load_evidence(&busy, Some(&pre)).signals,
+            vec!["utilization"]
+        );
+
+        let hot = vec![DeviceStatus {
+            graphics_clock_khz: Some(1_530_000),
+            utilization_percent: Some(0),
+            temperature_c: Some(51.0),
+            ..Default::default()
+        }];
+        let evidence = load_evidence(&hot, Some(&pre));
+        assert_eq!(evidence.signals, vec!["temperature"]);
+
+        let boosted = vec![DeviceStatus {
+            graphics_clock_khz: Some(1_950_000),
+            utilization_percent: Some(0),
+            temperature_c: Some(46.0),
+            ..Default::default()
+        }];
+        let evidence = load_evidence(&boosted, Some(&pre));
+        assert_eq!(evidence.signals, vec!["clock"]);
+        assert_eq!(evidence.clock_lift_mhz, Some(420.0));
+    }
+
+    #[test]
+    fn no_telemetry_is_reported_as_no_judgement_not_as_an_idle_window() {
+        let evidence = load_evidence(&[DeviceStatus::default()], None);
+        assert!(!evidence.demonstrated);
+        assert!(evidence.signals.is_empty());
+        assert_eq!(evidence.utilization_percent, None);
+        assert_eq!(evidence.clock_lift_mhz, None);
+        assert_eq!(evidence.temperature_rise_c, None);
+    }
+
+    #[test]
+    fn the_idle_sweep_note_keeps_the_numbers_but_refuses_the_ranking() {
+        assert!(SWEEP_IDLE_NOTE.contains("No winner is promoted"));
+        assert!(SWEEP_IDLE_NOTE.contains("not a ranking of offset effects"));
+        assert!(SWEEP_IDLE_NOTE.contains("load_evidence"));
+    }
+
+    #[test]
+    fn the_load_evidence_note_says_what_false_means() {
+        assert!(LOAD_EVIDENCE_NOTE.contains("near-idle compute"));
+        assert!(LOAD_EVIDENCE_NOTE.contains("not that no code ran"));
+        // The thresholds the note promises are the ones the code uses.
+        assert!(LOAD_EVIDENCE_NOTE.contains("50 percent"));
+        assert!(LOAD_EVIDENCE_NOTE.contains("5 C"));
+        assert!(LOAD_EVIDENCE_NOTE.contains("100 MHz"));
+        assert_eq!(LOAD_UTILIZATION_PERCENT, 50.0);
+        assert_eq!(LOAD_TEMPERATURE_RISE_C, 5.0);
+        assert_eq!(LOAD_CLOCK_LIFT_MHZ, 100.0);
     }
 
     #[test]
