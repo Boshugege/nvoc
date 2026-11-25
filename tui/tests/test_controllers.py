@@ -685,6 +685,8 @@ def test_overclock_refuses_a_power_limit_outside_the_board_window() -> None:
     assert error is not None
     assert "power limit 120 W" in error
     assert "70..100 W" in error
+    # Only the span the offending row is judged against, not the other one.
+    assert "65..87 C" not in error
     # Nothing is clamped: the driver would refuse it, so the writer must not send it.
     assert controller.limits_window_error(100, 83) is None
     assert controller.limits_window_error(70, 83) is None
@@ -701,6 +703,7 @@ def test_overclock_refuses_a_thermal_target_outside_the_acoustic_window() -> Non
     assert error is not None
     assert "thermal limit 90 C" in error
     assert "65..87 C" in error
+    assert "70..100 W" not in error
     assert controller.limits_window_error(100, 87) is None
     assert controller.limits_window_error(100, 64) is not None
 

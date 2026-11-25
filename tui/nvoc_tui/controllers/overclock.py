@@ -449,24 +449,23 @@ class OverclockController(PaneController):
         Nothing is written for either row when one row is out of span.
         """
         over: list[str] = []
+        spans: list[str] = []
         power = self.power_window_bounds()
         if power is not None and isinstance(power_limit, int):
             if not (power[0] <= power_limit <= power[1]):
                 over.append(f"power limit {power_limit} W")
+                spans.append(self.power_window_summary())
         thermal = self.thermal_window_bounds()
         if thermal is not None and isinstance(thermal_limit, int):
             if not (thermal[0] <= thermal_limit <= thermal[1]):
                 over.append(f"thermal limit {thermal_limit} C")
+                spans.append(self.thermal_window_summary())
         if not over:
             return None
-        spans = ", ".join(
-            text
-            for text in (self.power_window_summary(), self.thermal_window_summary())
-            if text
-        )
+        spans = [text for text in spans if text]
         return (
             f"Limits refused, nothing was written: {', '.join(over)} is outside what "
-            f"the driver itself accepts ({spans}). The driver rejects an out-of-window "
+            f"the driver itself accepts ({', '.join(spans)}). The driver rejects an out-of-window "
             "value rather than clamping it."
         )
 
