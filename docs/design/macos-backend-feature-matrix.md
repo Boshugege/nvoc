@@ -3472,3 +3472,15 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **③ 判死的标准，避免"没试过就说没有"** ✔：三族都**有明确缺口的具名证据**（`--curve` 的 0 限定、`refused-reads.txt` 的首行理由、VF 属 NVAPI），不是"我不记得试过"。若将来找到方法表/IDA 侧的正面形状，任何人都可以推翻本节——需要的证据类型已写在每一族后面。
 
 **④ 本轮测试全量** ✔：`nvoc-core` **226 passed**、`nvoc-srv` **73 passed**、`gui` **324 passed / 13 skipped**、`tui` **245 passed**；`cargo xtask ci` = `CI_EXIT=0`（上一轮刚跑，本轮代码未变）。
+
+## 二百〇六、resume ledger 在真机上跑通：候选写出了、验回了、账本记下了，第二遍**跳过且不写**
+
+**① 单候选实跑（受控写，一次）** ✔：`macos-eval --apply-candidate graphics=-15mhz --resume-file …`（10 s 窗口 + Metal verifier）。结果：`apply_verified=true`、`restore_verified=true`、`restored_khz=0`、`settled=true`；跑完 `get-pstate-global-freq-offset` 读回 **`Restore kHz: 0`**；账本**恰好一行**：`{"delta_khz":-15000,"outcome":"ok","target":"graphics"}`。
+
+**② 第二遍** ✔：同一条命令再跑，输出 `skipping candidate graphics -15000 kHz -- the resume ledger already records it as held, verified and restored`，报告里 `candidate: null`，账本**仍是一行**。⇒ 跳过是**真跳过**（没有第二次写），不是"又写了一次然后说一样"。
+
+**③ 一个顺手的路由事实** ✔：`--apply-candidate graphics=-25mhz` 被**挡在写之前**：`macOS additive clock target must be within -18750..18750 kHz`。这说明"拒绝越界"是在写入口生效的，不是事后回滚——与 §一百九十⑤ 的 rpm 越界拒绝同构。
+
+**④ 诚实边界** ✔：本轮证明的是**账本机制**（写后记账、跳过、不重复写）；它是"跨重启扫描"的**前提**，**不是**编排本身——自动 reboot 后再续跑仍然没有。10 s 窗口**不是**稳定性结论。
+
+**⑤ 证据** ✔：`outputs/stage-optimizer-resume-20261126T081500Z/`（`run1.json`、`run1.log`、`run2.json`、`run2.log`、`resume.jsonl`、`README.md`、`SHA256SUMS`；`shasum -c` 全 OK）。
