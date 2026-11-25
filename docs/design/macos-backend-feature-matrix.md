@@ -3995,3 +3995,20 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **⑤ 边界（不掩饰）** ✖：**`run_locked_candidate` 本身没有单元测试，也没有在真机上跑过**——它每一步都要设备。本轮被 CI 证明的只有参数解析、`settings_written` 的判据、以及 §二百三十四/二百三十五 的纯函数。真机第一次跑时最该看的两件事：`restored.storage_matches_applied` 是否为 `true`、`stored_after_khz` 是否等于 `restore_target_khz`。
 
 **⑥ 未硬件验证** ✖：测试机第 11 轮失联。
+
+## 二百三十七、前端补上"表里存了几次"：GUI 控制台与 TUI 指标行
+
+**① 缺口** ✗：服务早已把整张表发出来（§二百三十三），但 GUI 和 TUI 只印最新的那条窗口——于是"这个 boot 被吩咐过几次"只有服务接口能看见。
+
+**② 改动** ✔：
+- GUI：`parsing.summarize_locked_history(payload)` → `2 stored windows since the driver loaded (driver counter 96)`；控制台印成第二行 `driver table: …`。**只有多于一条才印**：一条的话上面那行窗口已经说完了。
+- TUI：`locked_state_text()` 在多于一条时追加 `| 2 SETs`，指标行保持一行。
+- `_on_stored_locked_state_loaded(text, history, gpu)` 多带一个参数；两行都过同一个 GPU 校验，切换 GPU 时一起丢弃。
+
+**③ 为什么不算重复渲染** ✔：**窗口是"现在锁的是什么"，计数是"这个 boot 被吩咐过什么"**（§二百二十三：表按 SET 追加、重启才清）。两件事分开说，和 §二百三十三 在服务接口上把 `locked_window` 与 `locked_history` 分成两个字段是同一个判断。
+
+**④ 测试** ✔：GUI `test_parsing.py` 2 条（多于一条 + 一条/无表都不印）、`test_overclock.py` 1 条（两行都在，且窗口行仍是最新那条）；TUI `test_metrics_format.py` 2 条（`| 2 SETs` 与单条不追加）。GUI 156 passed、TUI **250 → 251 passed**；`cargo xtask ci` → `CI_EXIT=0`。
+
+**⑤ 边界** ✖：仍是**离线**验证——真实 payload 来自 pynvoc 的 `get_gpu_locked_state`，本轮没有真机，所以"真机上这两行同时出现"待机器回来确认。
+
+**⑥ 未硬件验证** ✖：测试机第 12 轮失联。
