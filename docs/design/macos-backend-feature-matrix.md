@@ -2732,3 +2732,13 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **④ 抓到一个真缺陷并已修** ✔：升速途中一次 `get-fan-info` 的转速字段读出 **273973**，一秒后同路径读 1469，而控制记录自己写着 `max_rpm = 2800` ⇒ 不可能是转速，是驱动在风扇更新中途给出的坏采样。新增 `FanControlSettings::rpm_is_plausible()`（`max_rpm == 0` 时不下判断），`get-fan-info` 在该情形加一条 note 明说"高于该冷却器自身上限，当坏采样重读、不要当转速"；读数本身原样保留（记录就是记录），改的是**不许它冒充转速**。单元测试 `a_tach_above_the_coolers_own_maximum_is_a_bad_sample` 覆盖坏采样/正常/无标尺三种情形；`cargo test -p nvoc-core --lib macos_fan` 10/10 通过，`cargo xtask ci` = `CI_EXIT=0`。证据：`outputs/stage-fan-rpm-20261125T160903Z/`（9 个文件 + `SHA256SUMS`）。
 
 **⑤ 边界** ✗：只写 cooler 0；45 秒负载不等于稳定性；设备侧失败注入未构造（CLI 侧拒绝路径有单元测试）。
+
+## 一百五十八、优化器第 10 阶段的写半边跑通：一个候选 → 带载保持 → 验算 → exact 复位
+
+**① 为什么先补负载源** ✔：`macos-eval` 的窗口写死 `cli-stressor-cuda-rs --vulkan-only`，而这台 macOS 主机上**没有**该二进制（CUDA 后端在此不构建），整条评估在本机跑不起来。新增 `--load-source metal`：用 `stress-macos/metal_check --stress <duration> --elements 65536 --iters 20000`（上一轮实测 11/11 verified、无 device lost 的轻配置），走**同一个** spawn-采样循环；`vulkan` 仍为默认且参数路径一字未改；报告里新增 `options.load_source`，读者不必猜。
+
+**② 写半边** ✔：`--apply-candidate <domain>=<delta>` 在 stock 负载之后**只**应用一个候选，用同一时长再带载跑一轮并在带载下验算，然后**把原始偏移精确写回**——带载那一轮失败也照样复位（"把偏移留在别处"比"报告失败"更糟）。core 侧新增 `CandidateOutcome` / `candidate_outcome()`：`settled` 要求驱动的写入回读、其它字节未动、以及**复位回读到原始偏移**三者同时成立，所以"干净但没变快"仍算 settled，"快但没验过"不算。
+
+**③ 真机结果** ✔：`graphics=-25mhz` 被参数门拒绝（退出码 1，`must be within -18750..18750 kHz`，无写入）；`graphics=-15mhz` ⇒ `applied_khz -15000`、`apply_verified true`、`other_bytes_preserved true`、`restored_khz 0`、`restore_verified true`、`settled true`；两轮带载时钟都是 **1530 MHz**（n=16，min=mean=max），两轮 Metal 验算都 `passed: true`；带载进程 `elapsed 26.6 s`、`exit_code 0`。复位后逐字回到运行前：偏移 `0 kHz`、窗口 `graphics vP8 1620/1700`、风扇 `auto`/2800、板卡 `100 W`（70–100）、电源 `ac`。
+
+**④ 边界（不美化）** ✗：**带载时钟一个数都没动**（1530 → 1530）——这个窗口本身功耗受限（100 W 板卡），-15 MHz 的加法偏移本轮没有可观测量级的效果。所以本轮证明的是"候选能被应用、被驱动自己回读确认、被精确复位、整轮 round trip 干净"，**不**证明"更快/更好"；`settled` 只声明 round trip。只应用一个候选（多候选被参数门拒绝，扫参数属扫描器职责）；20 秒窗口不是稳定性认证。证据：`outputs/stage-eval-candidate-20261125T162340Z/`（10 个文件 + `SHA256SUMS`）。
