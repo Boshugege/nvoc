@@ -46,13 +46,22 @@ while [ "$boot" -le "$max_boots" ]; do
     pending=$(printf '%s\n' "$out" | sed -n 's/.*writes [0-9]* candidate(s), \([0-9]*\) still pending.*/\1/p')
     if [ -z "$pending" ]; then
         # No pending line means the boot had nothing left to write -- but that
-        # is the run's word, not proof. Count the grid and the ledger's ok lines
-        # for the same target and say which one is short.
-        expected=$(printf '%s\n' "$grid" | awk '{split($0,p,"="); split(p[2],r,":"); split(r[1],b,"[.][.]"); a=b[1]+0; z=b[2]+0; c=r[2]+0; if(c==0) exit 1; d=(z>a)?z-a:a-z; cc=(c<0)?-c:c; print int(d/cc)+1}')
-        ok=$(ssh "$host" "cd $dir && cat $ledger 2>/dev/null" | grep -c '"outcome":"ok"' || true)
-        echo "grid expects $expected candidate(s); the ledger records $ok as ok" >&2
-        if [ "$ok" -ge "$expected" ]; then
-            echo "sweep finished: the ledger covers the whole grid" >&2
+        # is the run's word, not proof, and a total count of ok lines is not
+        # proof either: another grid's rows would satisfy it. Ask, per point of
+        # *this* grid, whether the ledger has a matching ok line.
+        target=$(printf '%s\n' "$grid" | sed -n 's/^\([^=]*\)=.*/\1/p')
+        deltas=$(printf '%s\n' "$grid" | awk '{split($0,p,"="); split(p[2],r,":"); split(r[1],b,"[.][.]"); a=b[1]+0; z=b[2]+0; c=r[2]+0; if(c==0) exit 1; cc=(c<0)?-c:c; n=int(((z>a)?z-a:a-z)/cc); for(i=0;i<=n;i++) print a+i*cc*(z>a?1:-1)}')
+        ledger_text=$(ssh "$host" "cd $dir && cat $ledger 2>/dev/null" || true)
+        missing=""; total=0
+        for delta in $deltas; do
+            total=$((total + 1))
+            if ! printf '%s\n' "$ledger_text" | grep -q "\"delta_khz\":$delta,\"outcome\":\"ok\",\"target\":\"$target\""; then
+                missing="$missing $delta"
+            fi
+        done
+        echo "grid expects $total candidate(s) for $target; missing from the ledger:${missing:- none}" >&2
+        if [ -z "$missing" ]; then
+            echo "sweep finished: the ledger covers every point of this grid" >&2
             exit 0
         fi
         echo "the boot reported nothing pending but the ledger is short; stopping rather than \
@@ -78,6 +87,18 @@ claiming a finished sweep" >&2
         sleep 10
     done
     [ "$up" -eq 1 ] || { echo "$host did not come back; the ledger is the state, resume by hand" >&2; exit 1; }
+    # ssh answering is not the same as the driver being ready: measured right
+    # after a reboot the RM session fails with `esc 0xc8` and CARD_INFO
+    # 0xffffffff while the GPU services are still starting, which would look
+    # like a broken channel. Wait for a read-only command to succeed first.
+    ready=0
+    for _ in $(seq 1 60); do
+        if ssh -o ConnectTimeout=10 "$host" "cd $dir && ./target/release/nvoc-cli get-fan-info >/dev/null 2>&1"; then
+            ready=1; break
+        fi
+        sleep 10
+    done
+    [ "$ready" -eq 1 ] || { echo "$host is up but the RM channel is still not answering; the ledger is the state, resume later" >&2; exit 1; }
     boot=$((boot + 1))
 done
 echo "stopped after $max_boots boot(s); resume with the same command" >&2
