@@ -245,6 +245,28 @@ fn stored_window_mhz(window: Option<(u32, u32)>) -> Option<(u32, u32)> {
     window.map(|(min_khz, max_khz)| (min_khz / 1000, max_khz / 1000))
 }
 
+/// Project the stored-table report onto the service's history shape.
+///
+/// Whole MHz again (see [`stored_window_mhz`]). `None` when the table holds no
+/// records: an empty table is "this driver has been told nothing", which the
+/// JSON reports as null rather than as an empty list, so a caller cannot read a
+/// card that keeps no table as one that keeps an empty one.
+fn locked_history(
+    report: &nvoc_core::macos_lock::LockedStateReport,
+) -> Option<crate::controller::LockedHistory> {
+    if report.records.is_empty() {
+        return None;
+    }
+    Some(crate::controller::LockedHistory {
+        count_at_4: report.count_at_4,
+        windows: report
+            .records
+            .iter()
+            .map(|record| (record.min_khz() / 1000, record.max_khz() / 1000))
+            .collect(),
+    })
+}
+
 /// Map the RM status onto the controller's legacy core/memory/board view.
 /// There is no ThermChannel hotspot on this transport, so `hotspot_c` stays
 /// `None` and a `Hotspot` sensor selection degrades to core (as the trait
@@ -505,6 +527,15 @@ impl ControlBackend for MacosRmBackend {
         Ok(stored_window_mhz(report.stored_window()))
     }
 
+    fn read_locked_history(
+        &mut self,
+        gpu_index: usize,
+    ) -> Result<Option<crate::controller::LockedHistory>, String> {
+        self.forget_readout();
+        let report = self.run_op(gpu_index, nvoc_core::ReadMacosRmLockedState)?;
+        Ok(locked_history(&report))
+    }
+
     fn write_locked_window(
         &mut self,
         gpu_index: usize,
@@ -661,6 +692,70 @@ fn acoustic_window_c(policy: &nvoc_core::ThermalPolicySettings) -> (i32, i32, i3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_empty_stored_table_is_not_a_history() {
+        // "Keeps no table" and "keeps an empty one" must not read the same: a
+        // fresh boot stores nothing, and that is null on the wire.
+        let empty = nvoc_core::macos_lock::LockedStateReport::default();
+        assert!(locked_history(&empty).is_none());
+    }
+
+    #[test]
+    fn a_stored_table_becomes_a_history_in_order() {
+        let mut block = vec![0u8; nvoc_core::macos_lock::STATE_BYTES];
+        fn put(block: &mut [u8], offset: usize, words: [u32; 12]) {
+            for (index, word) in words.iter().enumerate() {
+                let at = offset + index * 4;
+                block[at..at + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        // +4 carries 48 per stored SET; the records start at +16.
+        block[4..8].copy_from_slice(&96u32.to_le_bytes());
+        put(
+            &mut block,
+            nvoc_core::macos_lock::STATE_RECORD_BASE,
+            [
+                0x0100_0002,
+                1,
+                1_700_000,
+                1_700_000,
+                0,
+                0,
+                16,
+                6_000_984,
+                6_000_984,
+                0,
+                0,
+                0,
+            ],
+        );
+        put(
+            &mut block,
+            nvoc_core::macos_lock::STATE_RECORD_BASE + nvoc_core::macos_lock::STATE_RECORD_BYTES,
+            [
+                0x0100_0002,
+                1,
+                1_620_000,
+                1_800_000,
+                0,
+                0,
+                16,
+                6_000_984,
+                6_000_984,
+                0,
+                0,
+                0,
+            ],
+        );
+        let report = nvoc_core::macos_lock::LockedStateReport {
+            count_at_4: Some(96),
+            records: nvoc_core::macos_lock::parse_state_records(&block),
+        };
+        let history = locked_history(&report).expect("history");
+        assert_eq!(history.count_at_4, Some(96));
+        assert_eq!(history.windows, vec![(1700, 1700), (1620, 1800)]);
+    }
 
     #[test]
     fn a_stored_window_is_reported_in_whole_mhz() {

@@ -147,6 +147,31 @@ fn audited_write_reported(
     }
 }
 
+/// The locked window as `/api/oc` publishes it: `null`, or both ends in MHz.
+fn locked_window_json(window: Option<(u32, u32)>) -> serde_json::Value {
+    match window {
+        Some((min_mhz, max_mhz)) => {
+            serde_json::json!({"min_mhz": min_mhz, "max_mhz": max_mhz})
+        }
+        None => serde_json::Value::Null,
+    }
+}
+
+/// The stored table as `/api/oc` publishes it: `null` when there is no table.
+fn locked_history_json(history: Option<&crate::controller::LockedHistory>) -> serde_json::Value {
+    let Some(history) = history else {
+        return serde_json::Value::Null;
+    };
+    serde_json::json!({
+        "count_at_4": history.count_at_4,
+        "windows": history
+            .windows
+            .iter()
+            .map(|(min_mhz, max_mhz)| serde_json::json!({"min_mhz": min_mhz, "max_mhz": max_mhz}))
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// What the driver stores after a locked-clock write, as one line for the client.
 ///
 /// `Ok(None)` and `Err` both mean "this backend cannot say", and say so: a
@@ -301,6 +326,7 @@ fn handle_api(
             // The locked window the transport can report, if any. Null is "this
             // plane publishes none", not a window of zero.
             let locked = backend.read_locked_window(index).ok().flatten();
+            let locked_history = backend.read_locked_history(index).ok().flatten();
             json_response(
                 request,
                 &serde_json::json!({
@@ -326,12 +352,12 @@ fn handle_api(
                     "temp": temp.map(|(min, cur, max)| {
                         serde_json::json!({"min_c": min, "current_c": cur, "max_c": max})
                     }),
-                    // The plane the write side of this endpoint (`/api/fan`) works
-                    // in. Null when the backend publishes none, so a caller can
-                    // tell "no fan control here" from "a fan window of zero".
-                    "locked_window": locked.map(|(min_mhz, max_mhz)| {
-                        serde_json::json!({"min_mhz": min_mhz, "max_mhz": max_mhz})
-                    }),
+                    // The window the transport says is locked now (`locked_window`)
+                    // and every window it stores (`locked_history`, oldest first).
+                    // Null (not a list, not a window of zero) when the transport
+                    // publishes none or keeps no table.
+                    "locked_window": locked_window_json(locked),
+                    "locked_history": locked_history_json(locked_history.as_ref()),
                     "fan": fan.map(|f| {
                         serde_json::json!({
                             "min_percent": f.min_percent,
@@ -1196,8 +1222,45 @@ fn locked_window_refusal(min_mhz: u32, max_mhz: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        limit_window_refusal, locked_window_refusal, offset_window_refusal, stored_window_note,
+        limit_window_refusal, locked_history_json, locked_window_json, locked_window_refusal,
+        offset_window_refusal, stored_window_note,
     };
+    use crate::controller::LockedHistory;
+
+    #[test]
+    fn the_stored_table_is_published_whole_or_as_null() {
+        assert_eq!(locked_history_json(None), serde_json::Value::Null);
+
+        let history = LockedHistory {
+            count_at_4: Some(96),
+            windows: vec![(1_700, 1_700), (1_620, 1_800)],
+        };
+        let value = locked_history_json(Some(&history));
+        assert_eq!(value["count_at_4"], serde_json::json!(96));
+        assert_eq!(
+            value["windows"],
+            serde_json::json!([
+                {"min_mhz": 1700, "max_mhz": 1700},
+                {"min_mhz": 1620, "max_mhz": 1800},
+            ])
+        );
+        // The dword is optional on the wire too: a transport that keeps a table
+        // without a counter publishes the windows and a null counter.
+        let no_counter = locked_history_json(Some(&LockedHistory {
+            count_at_4: None,
+            windows: vec![(1_620, 1_800)],
+        }));
+        assert_eq!(no_counter["count_at_4"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn a_locked_window_the_transport_publishes_is_both_ends_or_null() {
+        assert_eq!(locked_window_json(None), serde_json::Value::Null);
+        assert_eq!(
+            locked_window_json(Some((1620, 1800))),
+            serde_json::json!({"min_mhz": 1620, "max_mhz": 1800})
+        );
+    }
 
     #[test]
     fn a_post_write_note_reports_what_the_driver_stored() {

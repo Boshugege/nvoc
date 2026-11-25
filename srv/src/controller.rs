@@ -165,12 +165,34 @@ pub struct FanReading {
 /// restore/hand-back call, so no actuation method is ever invoked; the write
 /// methods still fail closed with a read-only error as a second line of
 /// defence (an HTTP write reaches the backend directly).
+/// The locked-clock table a transport stores, in whole MHz.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LockedHistory {
+    /// The dword at `+4` of the table. On the macOS RM driver it reads 48 x the
+    /// number of locked-clock SETs since the driver loaded (§二百二十三).
+    pub count_at_4: Option<u32>,
+    /// One entry per stored record, oldest first.
+    pub windows: Vec<(u32, u32)>,
+}
+
 pub trait ControlBackend: Send {
     /// The locked min/max window this transport can report, if any.
     ///
     /// `Ok(None)` means the transport publishes no such window -- it is not a
     /// window of zero, and the JSON says `null` for the same reason.
     fn read_locked_window(&mut self, _gpu_index: usize) -> Result<Option<(u32, u32)>, String> {
+        Ok(None)
+    }
+
+    /// The windows a transport stores, newest last, and the dword at `+4` when
+    /// the transport publishes one.
+    ///
+    /// Separate from [`read_locked_window`](Self::read_locked_window) on
+    /// purpose: that one answers "what is locked now", this one answers "what
+    /// has this driver been told", which is how a write that silently did
+    /// nothing becomes visible. `Ok(None)` is "this transport keeps no such
+    /// table", never an empty one.
+    fn read_locked_history(&mut self, _gpu_index: usize) -> Result<Option<LockedHistory>, String> {
         Ok(None)
     }
 

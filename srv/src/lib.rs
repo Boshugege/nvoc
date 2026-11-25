@@ -35,4 +35,4 @@ pub use config::{
     ControlMode, FreqParams, GpuSelection, LoopKind, ManualFan, PidParams, RuntimeConfig,
     SensorKind,
 };
-pub use controller::{ControlBackend, GpuControlStatus, SensorBundle};
+pub use controller::{ControlBackend, GpuControlStatus, LockedHistory, SensorBundle};
