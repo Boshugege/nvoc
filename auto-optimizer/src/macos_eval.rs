@@ -575,6 +575,10 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
     // baseline repeat, and the fold refuses to pool rounds to clear the bar.
     let repeat = if rounds_wanted > 1 && runs.len() > 1 {
         let mut per_round: Vec<Vec<nvoc_core::SweepVerdict>> = Vec::new();
+        // Each round's floor is reported next to its verdicts: when nothing is
+        // reproduced the reader needs to see the bar each round was asked to
+        // clear, not just that it failed.
+        let mut per_round_floors: Vec<nvoc_core::NoiseFloor> = Vec::new();
         for (index, round) in round_runs.iter().enumerate() {
             let repeat_run = round_repeats.get(index).and_then(|run| run.as_ref());
             let mut windows: Vec<nvoc_core::LoadThroughput> = Vec::new();
@@ -598,6 +602,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             if measured.is_empty() {
                 continue;
             }
+            per_round_floors.push(floor.clone());
             per_round.push(nvoc_core::rank_sweep(&floor, &measured));
         }
         let verdicts = nvoc_core::reproduce_sweeps(&per_round);
@@ -606,6 +611,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             "schema": "nvoc/macos-repeat/1",
             "rounds_requested": rounds_wanted,
             "rounds_measured": per_round.len(),
+            "round_floors": per_round_floors,
             "verdicts": verdicts,
             "winner": winner,
             "note": nvoc_core::REPEAT_NOTE,
