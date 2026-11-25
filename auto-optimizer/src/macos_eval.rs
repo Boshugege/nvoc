@@ -784,6 +784,25 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                     "timed_out": start.timed_out,
                 }))
                 .collect::<Vec<_>>(),
+            "resolution": {
+                "noise_threshold_percent": threshold,
+                "baseline_clock_mhz": round_repeats
+                    .iter()
+                    .find_map(|run| run.as_ref().and_then(|run| run.clock.as_ref()))
+                    .map(|clock| clock.median_mhz),
+                "one_step_percent": round_repeats
+                    .iter()
+                    .find_map(|run| run.as_ref().and_then(|run| run.clock.as_ref()))
+                    .and_then(|clock| nvoc_core::step_percent(clock.median_mhz, 15.0)),
+                "warning": nvoc_core::resolution_warning(
+                    threshold,
+                    round_repeats
+                        .iter()
+                        .find_map(|run| run.as_ref().and_then(|run| run.clock.as_ref()))
+                        .map(|clock| clock.median_mhz),
+                    15.0,
+                ),
+            },
             "round_clocks": round_clocks,
             "clock_checks": clock_checks,
             "verdicts": verdicts,

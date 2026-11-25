@@ -511,6 +511,39 @@ fn gap_as_null<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok
     }
 }
 
+/// What one clock step is worth as a percentage, for comparing a measurement's
+/// resolution against the thing it is supposed to resolve.
+pub fn step_percent(clock_mhz: f64, step_mhz: f64) -> Option<f64> {
+    if clock_mhz <= 0.0 || step_mhz <= 0.0 {
+        return None;
+    }
+    Some(step_mhz / clock_mhz * 100.0)
+}
+
+/// Whether a measurement can resolve the effect it is measuring at all.
+///
+/// The noise threshold has to be smaller than one clock step, or the experiment
+/// is asked to detect a change smaller than its own resolution and a "no gain"
+/// answer means nothing. This host learned that the expensive way: a light load
+/// gave 0.17-0.26 percent of noise against a 0.775 percent effect and reported
+/// "no gain" for three rounds.
+pub fn resolution_warning(
+    threshold_percent: f64,
+    clock_mhz: Option<f64>,
+    step_mhz: f64,
+) -> Option<String> {
+    let clock = clock_mhz?;
+    let step = step_percent(clock, step_mhz)?;
+    if threshold_percent >= step {
+        return Some(format!(
+            "the baseline noise ({threshold_percent:.3} percent) is at or above one {step_mhz:.1} \
+             MHz clock step at {clock:.1} MHz ({step:.3} percent): a round that reports no gain \
+             here cannot be read as the offset having no effect"
+        ));
+    }
+    None
+}
+
 /// Whether a fold result is allowed to be promoted as a winner.
 ///
 /// Repetition alone answers "did the throughput number come back"; it does not
@@ -1023,6 +1056,32 @@ mod tests {
         let text = serde_json::to_string(fifteen).unwrap();
         assert!(text.contains("\"percent_per_round\":[null,0.68]"), "{text}");
         assert!(!text.contains("NaN"), "{text}");
+    }
+
+    #[test]
+    fn one_step_is_three_quarters_of_a_percent_at_boost_clock() {
+        let percent = step_percent(1935.0, 15.0).expect("numbers");
+        assert!((percent - 0.7752).abs() < 0.001, "{percent}");
+    }
+
+    #[test]
+    fn a_noise_floor_above_one_step_cannot_resolve_the_offset() {
+        let warning = resolution_warning(1.2, Some(1935.0), 15.0).expect("a warning");
+        assert!(
+            warning.contains("cannot be read as the offset having no effect"),
+            "{warning}"
+        );
+        assert!(warning.contains("0.775"), "{warning}");
+    }
+
+    #[test]
+    fn a_noise_floor_below_one_step_is_readable() {
+        assert_eq!(resolution_warning(0.5, Some(1935.0), 15.0), None);
+    }
+
+    #[test]
+    fn no_clock_means_no_resolution_claim() {
+        assert_eq!(resolution_warning(5.0, None, 15.0), None);
     }
 
     #[test]

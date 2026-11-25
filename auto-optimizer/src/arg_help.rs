@@ -144,8 +144,12 @@ fn macos_eval_command() -> Command {
                 .value_name("N")
                 .num_args(1)
                 .value_parser(clap::value_parser!(u64))
-                .default_value("65536")
-                .help("Metal load: elements per dispatch (ignored by --load-source vulkan)"),
+                .default_value("4194304")
+                .help(
+                    "Metal load: elements per dispatch (ignored by --load-source vulkan). The \
+                     default is large enough that a clock step shows up as a throughput step; a \
+                     65536-element grid reports noise on the order of the whole offset window",
+                ),
         )
         .arg(
             Arg::new("stress-iters")
@@ -153,7 +157,7 @@ fn macos_eval_command() -> Command {
                 .value_name("N")
                 .num_args(1)
                 .value_parser(clap::value_parser!(u64))
-                .default_value("20000")
+                .default_value("500")
                 .help("Metal load: iterations per thread (ignored by --load-source vulkan)"),
         )
         .arg(
