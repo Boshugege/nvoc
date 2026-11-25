@@ -4,6 +4,7 @@ from textual.app import ComposeResult
 from textual.containers import Grid, Horizontal, Vertical
 from textual.widgets import Button, Label, Select, TabPane
 
+from ..platform import api_default, api_options, fan_policy_default, fan_policy_options
 from ..widgets import ShortcutInput, UnitToggle, mnemonic_text
 
 
@@ -16,8 +17,11 @@ def compose_overclock() -> ComposeResult:
                     with Horizontal(classes="row"):
                         yield Label("API")
                         yield Select(
-                            options=[("NVAPI", "nvapi"), ("NVML", "nvml")],
-                            value="nvapi",
+                            # macOS has one transport (the native RM backend);
+                            # see nvoc_tui.platform for why NVAPI/NVML are not
+                            # offered there instead of failing at write time.
+                            options=api_options(),
+                            value=api_default(),
                             classes="nvapi-nvml-select",
                             id="oc-api",
                             allow_blank=False,
@@ -192,8 +196,8 @@ def compose_overclock() -> ComposeResult:
                         with Horizontal(classes="row"):
                             yield Label("API")
                             yield Select(
-                                options=[("NVAPI", "nvapi"), ("NVML", "nvml")],
-                                value="nvapi",
+                                options=api_options(),
+                                value=api_default(),
                                 classes="nvapi-nvml-select",
                                 id="power-api",
                                 allow_blank=False,
@@ -321,8 +325,8 @@ def compose_overclock() -> ComposeResult:
                         with Horizontal(classes="row"):
                             yield Label("API")
                             yield Select(
-                                options=[("NVAPI", "nvapi"), ("NVML", "nvml")],
-                                value="nvapi",
+                                options=api_options(),
+                                value=api_default(),
                                 classes="nvapi-nvml-select",
                                 id="fan-api",
                                 allow_blank=False,
@@ -338,11 +342,11 @@ def compose_overclock() -> ComposeResult:
                             # at discovery time — manual % lands on `manual`
                             # there.
                             yield Select(
-                                options=[
-                                    ("contin.", "continuous"),
-                                    ("curve", "curve"),
-                                ],
-                                value="continuous",
+                                # macOS: manual (pin the percent) and auto
+                                # (firmware control). The software continuous
+                                # policy and the curve table do not exist.
+                                options=fan_policy_options(),
+                                value=fan_policy_default(),
                                 id="fan-policy",
                                 allow_blank=False,
                                 compact=True,

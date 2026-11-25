@@ -5,6 +5,15 @@ import threading
 
 from textual.widgets import Button, Input, Label, Select
 
+from ..platform import (
+    MACOS_BACKEND,
+    MACOS_FAN_POLICY_REASON,
+    fan_curve_available,
+    fan_policy_default,
+    fan_policy_options,
+    macos_duty_seed,
+    macos_fan_request,
+)
 from .base import PaneController
 
 
@@ -1554,6 +1563,69 @@ class OverclockController(PaneController):
             target=worker, daemon=True, name="nvoc-tui-fan-surface"
         ).start()
 
+    def _fan_backend(self) -> str:
+        """The transport the fan pane is addressed to."""
+        try:
+            return str(self.app.query_one("#fan-api", Select).value or "nvapi")
+        except Exception:
+            return "nvapi"
+
+    def _adapt_macos_fan_pane(self, gpu: str, data: dict, count: int) -> None:
+        """Shape the fan pane for the native RM transport.
+
+        Everything here mirrors a measured capability: cooler0 percent and
+        firmware auto exist, the curve table and the software continuous policy
+        do not, and the duty the pane should show is the one the driver holds
+        (``target_percent``), not an rpm-derived guess.
+        """
+        if count < 1:
+            self._fanless_gpus.add(gpu)
+            self._set_fan_pane_disabled(True)
+            self.app.write_log(
+                "Fan pane disabled: the RM fan report carries no cooler for this GPU."
+            )
+            return
+        self._fanless_gpus.discard(gpu)
+        self._fanned_gpus.add(gpu)
+        self._set_fan_pane_disabled(False)
+        try:
+            select = self.app.query_one("#fan-id", Select)
+            select.set_options(
+                [("All", "all")] + [(f"Fan {i}", str(i)) for i in range(1, count + 1)]
+            )
+            select.value = "all"
+        except Exception:
+            pass
+        try:
+            policy = self.app.query_one("#fan-policy", Select)
+            policy.set_options(fan_policy_options(True))
+            if policy.value not in {value for _, value in fan_policy_options(True)}:
+                policy.value = fan_policy_default(True)
+        except Exception:
+            pass
+        duty = macos_duty_seed(data)
+        if duty is not None:
+            try:
+                self.set_input("#fan-level", str(duty))
+            except Exception:
+                pass
+        try:
+            curve_tab = self.app.query_one("#fan-curve-editor")
+            # Explicit True: this adapter only runs on the RM transport, which
+            # is macOS-only, so the host probe is not what decides here.
+            curve_tab.display = fan_curve_available(True)
+        except Exception:
+            pass
+        rpm = data.get("max_rpm")
+        mode = data.get("mode")
+        self.app.write_log(
+            "Fan surface (native RM): "
+            f"{count} cooler(s), driver duty {duty if duty is not None else 'unknown'}%, "
+            f"mode {mode if mode else 'unknown'}"
+            + (f", cooler max {rpm} rpm" if isinstance(rpm, int) else "")
+            + f". {MACOS_FAN_POLICY_REASON}."
+        )
+
     def _set_fan_pane_disabled(self, disabled: bool) -> None:
         """Grey out (or restore) the whole Fan pane.
 
@@ -1583,6 +1655,14 @@ class OverclockController(PaneController):
         try:
             count = data.get("count")
             count = count if isinstance(count, int) else 0
+            if self._fan_backend() == MACOS_BACKEND:
+                # The RM fan report is the whole surface here: one cooler, a
+                # duty the driver holds and the firmware's rpm. The curve
+                # editor and the software continuous policy have nothing to
+                # talk to, so they are closed out rather than left enabled
+                # with an option that would fail at apply time.
+                self._adapt_macos_fan_pane(gpu, data, count)
+                return
             current = data.get("current_percent")
             current = current if isinstance(current, int) else None
             if count >= 1:
@@ -2105,12 +2185,23 @@ class OverclockController(PaneController):
         policy: str,
         level: int,
     ) -> str:
+        request = "auto" if reset else policy
+        if backend == MACOS_BACKEND:
+            # The RM backend takes manual (pin the percent) or auto (firmware
+            # control) and nothing else. Mapping happens here, in one place,
+            # so a "curve" request is refused with the reason instead of being
+            # quietly applied as a fixed duty.
+            request = macos_fan_request(request)
         if reset:
             native.set_fan(gpu, backend, fan_id, "auto", 0)
             return "Successfully reset fan control."
-        else:
-            native.set_fan(gpu, backend, fan_id, policy, level)
-            return f"Successfully applied fan {fan_id} {policy} level {level}%."
+        native.set_fan(gpu, backend, fan_id, request, level)
+        if request != policy:
+            return (
+                f"Successfully applied fan {fan_id} {request} level {level}% "
+                f"(requested {policy}; {MACOS_FAN_POLICY_REASON})."
+            )
+        return f"Successfully applied fan {fan_id} {request} level {level}%."
 
     def handle_button(self, button_id: str) -> bool:
         # MHz/mV unit toggles (one per offset row — GUI V/F Offsets parity).
