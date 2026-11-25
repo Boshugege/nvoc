@@ -705,6 +705,28 @@ uint32_t nvoc_macos_rm_session_locked_clocks(nvoc_rm_session *s, uint32_t write,
     return status ? failure(error, cap, write ? "locked-clocks SET" : "locked-clocks GET", status) : 0;
 }
 
+/* The read that belongs to the locked-clock write: 0x2080d041's twin is
+ * 0x20809040, whose GET size is 4808 rather than the 648 the write takes. It
+ * answers the format word and the number of windows that are locked right now,
+ * which is the only observed way to see a stored lock rather than the driver's
+ * normalisation of a request (that is what 0x20809014 gives). */
+uint32_t nvoc_macos_rm_session_locked_state(nvoc_rm_session *s, uint32_t *count,
+                                            char *error, size_t cap)
+{
+    static unsigned char block[NVOC_RM_LOCK_STATE_BYTES];
+    uint32_t status;
+    if (!s || !count)
+        return failure(error, cap, "locked-state ABI arguments", UINT32_MAX);
+    memset(block, 0, sizeof block);
+    block[0] = 1u; /* FORMAT_WORD; a zeroed block is format 0 and selects nothing */
+    status = nvx_rm_control(s->ctl, s->client, s->subdevice, 0x20809040u, block,
+                            (uint32_t) sizeof block);
+    if (status)
+        return failure(error, cap, "locked-state GET", status);
+    memcpy(count, block + 4, 4);
+    return 0;
+}
+
 /* Board-policy power contract: exact Linux610 NVML requests, never an arbitrary id. */
 uint32_t nvoc_macos_rm_session_power(nvoc_rm_session *s, uint32_t kind,
     void *block, size_t size, char *error, size_t cap)

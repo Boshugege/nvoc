@@ -207,8 +207,15 @@ uint32_t nvoc_macos_rm_session_clock_offset(nvoc_rm_session *session, uint32_t i
  * 0x2080d041 write) and guards root. SET echoes the snapped values back into
  * the same buffer, which is what the readback compares against. */
 #define NVOC_RM_LOCK_BLOCK_BYTES 648
+/* The GET whose twin is the locked-clock write: 0x20809040, 4808 bytes. Its
+ * answer is a format word, a count of the windows that are locked right now,
+ * and then the entries; only the count is parsed, because the entry layout has
+ * never been observed with a non-zero count. */
+#define NVOC_RM_LOCK_STATE_BYTES 4808
 uint32_t nvoc_macos_rm_session_locked_clocks(nvoc_rm_session *session, uint32_t write,
     void *block, size_t size, char *error, size_t cap);
+uint32_t nvoc_macos_rm_session_locked_state(nvoc_rm_session *session, uint32_t *count,
+    char *error, size_t cap);
 
 /* Clock-domain enumeration: fills 4-byte mask, 32 kHz words, 32 statuses
  * (260 bytes) from 0x20809001 mode 0 plus one 0x20809006 version-1 read per

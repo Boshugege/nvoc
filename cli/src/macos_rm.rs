@@ -215,6 +215,11 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         "requested": locked_windows_json(&report.requested),
                         "snapshot": locked_windows_json(&report.snapshot),
                         "floor_ratcheted_khz": ratcheted,
+                        // Read from the write's GET twin (0x20809040) while the
+                        // write is in place: how many windows the driver holds,
+                        // which the normalisation read cannot tell us.
+                        "stored_window_count": report.stored_window_count,
+                        "stored_window_note": "0x20809040's count; null means the twin read did not happen, not that nothing is locked",
                         "floor_note": "the driver keeps the highest floor it has seen; a lower request is accepted and not applied",
                         "readback_verified": true, "restored_on_mismatch": true})
                 }

@@ -2093,6 +2093,9 @@ impl Device {
                 )));
             }
             session.write_locked_clocks(request)?;
+            // While the write is in place, ask the twin what is stored. This is
+            // the piece the normalisation read cannot answer.
+            let stored_window_count = session.read_locked_state_count().ok();
             let applied = session.read_locked_clocks(request)?;
             if let Some((want, got)) = macos_lock::first_stable_difference(&expected, &applied) {
                 let rollback: Result<(), String> = (|| {
@@ -2125,6 +2128,7 @@ impl Device {
                 requested: request.to_vec(),
                 snapshot: expected,
                 applied,
+                stored_window_count,
             })
         })();
         let closed = session.close();
@@ -2917,6 +2921,13 @@ unsafe extern "C" {
         error: *mut u8,
         cap: usize,
     ) -> u32;
+    fn nvoc_macos_rm_session_locked_state(
+        handle: *mut SessionOpaque,
+        count: *mut u32,
+        error: *mut u8,
+        cap: usize,
+    ) -> u32;
+
     fn nvoc_macos_rm_session_locked_clocks(
         handle: *mut SessionOpaque,
         write: u32,
@@ -4675,6 +4686,41 @@ impl MacosRmSession {
             )));
         }
         Ok(())
+    }
+
+    /// How many locked windows the twin read (`0x20809040`) reports right now.
+    ///
+    /// This is the only observed way to see a stored lock: `0x20809014` answers
+    /// how the driver would normalise a request, not what it holds.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    pub fn read_locked_state_count(&mut self) -> Result<u32, Error> {
+        let _guard = lock_transport()?;
+        let mut count: u32 = 0;
+        let mut error = [0u8; 256];
+        // SAFETY: the session is live, the count outlives the call, and the
+        // transport is serialized.
+        let status = unsafe {
+            nvoc_macos_rm_session_locked_state(
+                self.handle,
+                &mut count,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        if status != 0 {
+            return Err(Error::Custom(format!(
+                "macOS RM locked-state GET: {} (0x{status:08x})",
+                text(&error)
+            )));
+        }
+        Ok(count)
+    }
+
+    #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+    pub fn read_locked_state_count(&mut self) -> Result<u32, Error> {
+        Err(Error::Custom(
+            "macOS RM backend requires x86_64 macOS with the NullMoth driver".into(),
+        ))
     }
 
     /// Asks the driver to normalise a window and returns what it would take.

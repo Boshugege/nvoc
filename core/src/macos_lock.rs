@@ -26,6 +26,10 @@ use std::fmt;
 
 /// Whole control block. The driver rejects any other size.
 pub const BYTES: usize = 648;
+
+/// The GET that owns the locked-clock write as its twin: `0x20809040`, whose
+/// answer is a format word and a count of the windows locked right now.
+pub const STATE_BYTES: usize = 4808;
 /// Format word `+0`, count `+4`, first entry `+8`.
 pub const HEADER_BYTES: usize = 8;
 /// One entry stride.
@@ -120,6 +124,34 @@ pub struct LockedClockWriteReport {
     pub requested: Vec<LockWindow>,
     pub snapshot: Vec<LockWindow>,
     pub applied: Vec<LockWindow>,
+    /// How many windows the twin read (`0x20809040`) reports as locked while the
+    /// write is in place. `None` when that read did not happen: a missing count
+    /// is not a count of zero.
+    pub stored_window_count: Option<u32>,
+}
+
+/// Read the window count out of a `0x20809040` block.
+///
+/// Only the count is parsed: the entry layout has never been seen with a
+/// non-zero count, and guessing it would be exactly the kind of invented
+/// structure this backend refuses elsewhere.
+pub fn parse_state_count(block: &[u8]) -> Result<u32, String> {
+    if block.len() < 8 {
+        return Err(format!("locked-state block is {} bytes", block.len()));
+    }
+    let word = |offset: usize| {
+        u32::from_le_bytes([
+            block[offset],
+            block[offset + 1],
+            block[offset + 2],
+            block[offset + 3],
+        ])
+    };
+    let format = word(0);
+    if format != FORMAT_WORD {
+        return Err(format!("locked-state format word 0x{format:x}"));
+    }
+    Ok(word(4))
 }
 
 /// Why a request could not be laid out in the block.
@@ -600,5 +632,34 @@ mod tests {
         assert_eq!(domain_name(DOMAIN_BIT_64), "bit64");
         assert_eq!(domain_name(0x80), "0x80");
         assert!(graphics(1, 2).to_string().contains("graphics"));
+    }
+}
+
+#[cfg(test)]
+mod state_count_tests {
+    use super::*;
+
+    fn block_with(format: u32, count: u32) -> Vec<u8> {
+        let mut block = vec![0u8; STATE_BYTES];
+        block[0..4].copy_from_slice(&format.to_le_bytes());
+        block[4..8].copy_from_slice(&count.to_le_bytes());
+        block
+    }
+
+    #[test]
+    fn a_format_word_and_count_are_read_back() {
+        assert_eq!(parse_state_count(&block_with(FORMAT_WORD, 0)).unwrap(), 0);
+        assert_eq!(parse_state_count(&block_with(FORMAT_WORD, 2)).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_zeroed_block_is_refused_rather_than_read_as_no_locks() {
+        let err = parse_state_count(&block_with(0, 0)).unwrap_err();
+        assert!(err.contains("format word"), "{err}");
+    }
+
+    #[test]
+    fn a_short_block_is_refused() {
+        assert!(parse_state_count(&[1u8, 0, 0, 0]).is_err());
     }
 }
