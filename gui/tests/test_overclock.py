@@ -972,6 +972,54 @@ class _BackendWithVftable(FakeBackend):
         return self._vftable
 
 
+class _BackendWithLockedState(FakeBackend):
+    """FakeBackend + the stored locked-clock table read."""
+
+    def __init__(self, payload) -> None:
+        super().__init__(None)
+        self._payload = payload
+        self.locked_calls: list[str] = []
+
+    def get_gpu_locked_state(self, gpu: str):
+        self.locked_calls.append(gpu)
+        return self._payload
+
+
+def test_update_limits_reports_the_stored_locked_window_once() -> None:
+    tab, app = make_tab()
+    backend = _BackendWithLockedState({
+        "count_at_4": 48,
+        "records": [
+            {"offset": 16, "min_khz": 1_620_000, "max_khz": 1_800_000},
+        ],
+    })
+    app.backend = backend
+    tab._query_stored_locked_state()
+    tab._query_stored_locked_state()
+    # One read per GPU, not one per refresh: the stored table is not a telemetry
+    # sample, and polling it would be an escape per tick for a value that only
+    # changes when something writes.
+    assert backend.locked_calls == ["GPU0"]
+    assert any(
+        "driver stores stored window 1620.0-1800.0 MHz" in message
+        for message in app.console.messages
+    ), app.console.messages
+
+
+def test_an_unreadable_stored_table_prints_nothing() -> None:
+    tab, app = make_tab()
+    app.backend = _BackendWithLockedState(None)
+    tab._query_stored_locked_state()
+    assert not any("driver stores" in message for message in app.console.messages)
+
+
+def test_a_backend_without_the_read_is_skipped() -> None:
+    tab, app = make_tab()
+    app.backend = FakeBackend(None)
+    tab._query_stored_locked_state()
+    assert not any("driver stores" in message for message in app.console.messages)
+
+
 def make_toggle_tab(
     entries: dict | None = None,
 ) -> tuple[OverclockTab, FakeApp, FakeBackend]:

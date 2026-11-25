@@ -9,6 +9,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from src.parsing import summarize_locked_state
 from src.platform import api_label_default, api_labels, is_macos, macos_duty_seed
 from src.tabs.dashboard.sections.fan import FanControlPane
 from src.widgets.lightweight_controls import (
@@ -1154,6 +1155,48 @@ class OverclockTab:
 
         self.app.run_background("clk-domain-caps", worker)
 
+    def _query_stored_locked_state(self) -> None:
+        """Read the locked-clock table the driver stores (macOS RM 0x20809040).
+
+        Read-only and off the render path: one plain session read per GPU, not a
+        write, and not the normalisation query ``get-gpu-locked-clocks`` runs.
+        A backend without the binding (another vendor, an older pynvoc) is
+        skipped silently -- silence is not "no lock", it is "this transport does
+        not say", and the console only ever prints a window that was read.
+        """
+        backend = getattr(self.app, "backend", None)
+        read = getattr(backend, "get_gpu_locked_state", None)
+        if read is None:
+            return
+        gpu = self.app.selected_gpu_target()
+        if gpu is None or getattr(self, "_stored_locked_state_gpu", None) == gpu:
+            return
+        self._stored_locked_state_gpu = gpu
+
+        def worker() -> None:
+            try:
+                payload = read(gpu)
+            except Exception:
+                payload = None
+            text = summarize_locked_state(payload)
+            try:
+                # The gpu rides along: a switch landing mid-flight must not
+                # report the old card's window against the new selection.
+                self.frame.after(
+                    0, lambda: self._on_stored_locked_state_loaded(text, gpu)
+                )
+            except Exception:
+                pass
+
+        self.app.run_background("locked-state", worker)
+
+    def _on_stored_locked_state_loaded(self, text: Optional[str], gpu: str) -> None:
+        if text is None:
+            return
+        if gpu != self.app.selected_gpu_target():
+            return
+        self._log_oc_message(f"driver stores {text}\n")
+
     def _fetch_fabric_relations(self, gpu: str) -> Optional[dict]:
         """Read the driver's master → slave relation from the private V/F
         table (``fabric_relations`` block). Best-effort: an older pynvoc
@@ -1577,6 +1620,9 @@ class OverclockTab:
             return
 
         self._absorb_offset_window(limits)
+        # Once per GPU: what the driver kept, in the console, so a window set by
+        # an earlier session is visible without writing to find out.
+        self._query_stored_locked_state()
         power_plane = macos_power_plane(limits)
         if power_plane is not None:
             self._power_plane = power_plane
