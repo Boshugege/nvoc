@@ -179,6 +179,17 @@ pub trait ControlBackend: Send {
     /// a method per legacy entry point.
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 
+    /// Shortest tick this transport can actually serve, in milliseconds.
+    ///
+    /// Zero (the default) means "whatever the config asks for". A transport
+    /// whose reads open a fresh device session every call owes the loop a
+    /// floor: a tick that costs longer than the interval never yields the
+    /// backend, and every HTTP request queues behind it (measured on the RM
+    /// transport — see `RECOMMENDED_INTERVAL_MS`).
+    fn min_interval_ms(&self) -> u64 {
+        0
+    }
+
     fn read_temps(&mut self, gpu_index: usize) -> Result<SensorBundle, String>;
     fn read_fan(&mut self, gpu_index: usize) -> Option<FanReading>;
     /// Live board power draw (W), best effort — the `freq_power` loop sensor.

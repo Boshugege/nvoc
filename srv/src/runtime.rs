@@ -162,6 +162,13 @@ fn spawn_watchdog(
         .expect("spawn watchdog thread")
 }
 
+/// The tick to actually use: the transport's floor, or the configured
+/// interval when that is longer. A tick that costs more than its interval
+/// never releases the backend lock, and every HTTP request waits behind it.
+fn effective_interval_ms(configured_ms: u64, floor_ms: u64) -> u64 {
+    configured_ms.max(floor_ms)
+}
+
 /// Blocking control loop. Returns when shutdown is signalled (SCM stop,
 /// Ctrl-C, `/shutdown`) or discovery fails; fans are restored to driver
 /// control on every exit path that reaches the loop.
@@ -170,6 +177,7 @@ pub fn run_control_loop(handles: LoopHandles) -> Result<(), String> {
     let discovered = discovered_backend.gpu_count();
     let backend_kind = discovered_backend.backend_kind();
     let write_capable = discovered_backend.supports_writes();
+    let backend_floor_ms = discovered_backend.min_interval_ms();
     *lock(&handles.backend) = Some(discovered_backend);
     *lock(&handles.history) = crate::history::History::new(discovered);
     let backend = handles.backend.clone();
@@ -198,6 +206,15 @@ pub fn run_control_loop(handles: LoopHandles) -> Result<(), String> {
         cfg0.mode,
         cfg0.interval_ms
     );
+    if backend_floor_ms > cfg0.interval_ms {
+        warn!(
+            "{backend_kind} reads cost more than {} ms per tick on this transport \
+             (floor {backend_floor_ms} ms is the measured cost of one readout); ticking at \
+             {backend_floor_ms} ms instead of {} ms, because a tick longer than its interval \
+             never yields the backend and every HTTP request would queue behind it",
+            cfg0.interval_ms, cfg0.interval_ms
+        );
+    }
     *lock(&handles.heartbeat) = Instant::now();
     spawn_watchdog(
         backend.clone(),
@@ -218,7 +235,13 @@ pub fn run_control_loop(handles: LoopHandles) -> Result<(), String> {
     let mut last_recovery: Option<Instant> = None;
 
     loop {
-        let interval = Duration::from_millis(lock(&config).interval_ms);
+        // The transport's own floor, or the configured interval if it is
+        // longer: a tick that cannot fit in its interval starves the HTTP
+        // plane, which needs the same lock.
+        let interval: Duration = Duration::from_millis(effective_interval_ms(
+            lock(&config).interval_ms,
+            backend_floor_ms,
+        ));
         let deadline = Instant::now() + interval;
         let mut stop = false;
 
@@ -384,5 +407,25 @@ fn handle_cmd(cmd: ServiceCmd, backend: &Mutex<Option<Box<dyn ControlBackend>>>)
     match nvapi.set_oc_global(gpu_index, delta_khz) {
         Ok(()) => info!("GPU {gpu_index}: OC delta {delta_khz} kHz applied"),
         Err(e) => error!("{e}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::effective_interval_ms;
+
+    #[test]
+    fn a_transport_floor_raises_a_too_short_tick() {
+        // The measured RM transport cannot finish a tick in 1 s; the loop must
+        // tick at the floor instead of queueing the next tick behind the last.
+        assert_eq!(effective_interval_ms(1000, 8000), 8000);
+    }
+
+    #[test]
+    fn a_longer_configured_interval_is_left_alone() {
+        // The floor is a floor, not a cap: an operator who asks for 30 s gets
+        // 30 s, and a transport with no floor (0) gets exactly what it asked.
+        assert_eq!(effective_interval_ms(30_000, 8000), 30_000);
+        assert_eq!(effective_interval_ms(1000, 0), 1000);
     }
 }

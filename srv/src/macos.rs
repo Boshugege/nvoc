@@ -65,6 +65,19 @@ struct MacosGpu {
     name: String,
 }
 
+/// Shortest tick this transport can serve, measured rather than guessed.
+///
+/// Every read here opens a fresh RM session and each open waits for the
+/// driver's polled sections to advance (`INITIAL_FRESH_BUDGET`), so the calls
+/// are not free: on the validation card `get-settings` takes 3.7–4.7 s and
+/// `get-status` 0.65–0.96 s. One tick reads status, settings and a monitor
+/// sample — 6–7 s of driver time. A 1 s tick therefore never yielded the
+/// backend, and `sample` caught the HTTP thread queued behind the control
+/// loop's lock (`outputs/stage-srv-limits-20261125T211610Z/02-sample.txt`).
+/// 8 s is that cost with room for a slow open, so the loop finishes a tick and
+/// releases the lock before starting the next one.
+pub const RECOMMENDED_INTERVAL_MS: u64 = 8000;
+
 /// Read-only [`ControlBackend`] backed by the NullMoth RM session.
 pub struct MacosRmBackend {
     gpus: Vec<MacosGpu>,
@@ -200,6 +213,10 @@ fn monitor_from_status(status: &DeviceStatus) -> MonitorSample {
 impl ControlBackend for MacosRmBackend {
     fn gpu_count(&self) -> usize {
         self.gpus.len()
+    }
+
+    fn min_interval_ms(&self) -> u64 {
+        RECOMMENDED_INTERVAL_MS
     }
 
     fn name(&self, index: usize) -> Cow<'_, str> {
@@ -681,5 +698,18 @@ mod tests {
             },
         };
         assert_eq!(acoustic_window_c(&policy), (65, 83, 87));
+    }
+
+    #[test]
+    fn the_transport_declares_an_interval_floor_it_can_actually_meet() {
+        // The floor exists because one tick costs more than a second on this
+        // transport. It must stay above the measured single-read cost, or the
+        // loop goes back to holding the lock across intervals and starving
+        // every HTTP request behind it.
+        const MEASURED_SETTINGS_MS: u64 = 4700;
+        const MEASURED_STATUS_MS: u64 = 960;
+        const _: () = assert!(RECOMMENDED_INTERVAL_MS > MEASURED_SETTINGS_MS + MEASURED_STATUS_MS);
+        // And it is a floor, not a cap: a longer configured interval wins.
+        const _: () = assert!(RECOMMENDED_INTERVAL_MS >= 4 * MEASURED_STATUS_MS);
     }
 }
