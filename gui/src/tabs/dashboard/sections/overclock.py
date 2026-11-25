@@ -9,7 +9,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from src.platform import macos_duty_seed
+from src.platform import api_label_default, api_labels, is_macos, macos_duty_seed
 from src.tabs.dashboard.sections.fan import FanControlPane
 from src.widgets.lightweight_controls import (
     ct_button_font,
@@ -37,6 +37,49 @@ _FONT_HEADER = ("Segoe UI", 13, "bold")
 # Unit toggle (MHz/mV): slightly smaller than body so the thin border reads
 # as a chip around the unit, not a button competing with the ✓ apply.
 _FONT_UNIT = ("Segoe UI", 10)
+
+#: How a power-backend string reads in a status line.
+_POWER_BACKEND_LABEL = {"macos-rm": "RM", "nvml": "NVML", "nvapi": "NVAPI"}
+
+
+def macos_power_plane(limits: Dict[str, Any]) -> Optional[Tuple[str, int, int, int]]:
+    """The macOS board power policy as a slider plane, or None.
+
+    The driver publishes the board policy as ``power_limit_min/-max/-current``
+    in **watts** — the same block ``POST /api/oc/power`` writes. NVAPI's
+    ``power_limit_*`` keys are percentages, so this plane must be chosen by
+    transport, never by which key happens to be present: reading the same three
+    keys as percent is how a 100 W card comes to offer a 100 % slider.
+
+    One end missing, or ``min > max``, means no plane at all — a half-read span
+    would bound the wrong direction.
+    """
+    lo = limits.get("power_limit_min")
+    hi = limits.get("power_limit_max")
+    if not isinstance(lo, int) or not isinstance(hi, int) or lo > hi:
+        return None
+    current = limits.get("power_limit_current")
+    if not isinstance(current, int):
+        current = hi
+    return ("W", lo, hi, max(lo, min(hi, current)))
+
+
+def macos_thermal_plane(limits: Dict[str, Any]) -> Optional[Tuple[int, int, int]]:
+    """The macOS acoustic target policy as a (min, max, current) plane, or None.
+
+    ``acoustic_target_min_c`` / ``-max_c`` / ``-current_c`` is the block the
+    thermal write sets. The separate ``gpu_max_temperature_c`` entry is a
+    different policy and is deliberately not mixed in here: 65..87 is a noise
+    target window, not the card's thermal wall.
+    """
+    lo = limits.get("acoustic_target_min_c")
+    hi = limits.get("acoustic_target_max_c")
+    if not isinstance(lo, int) or not isinstance(hi, int) or lo > hi:
+        return None
+    current = limits.get("acoustic_target_current_c")
+    if not isinstance(current, int):
+        current = hi
+    return (lo, hi, max(lo, min(hi, current)))
 
 
 def _pstate_sort_key(label: str):
@@ -167,6 +210,9 @@ class OverclockTab:
         # Mutable defaults – updated by update_limits() when real GPU info arrives
         self._power_default = self._DEFAULTS["power_limit_default"]
         self._thermal_default = self._DEFAULTS["thermal_limit_default"]
+        # The windows the driver has published so far (None until it does).
+        self._power_plane: Optional[Tuple[str, int, int, int]] = None
+        self._thermal_plane: Optional[Tuple[int, int, int]] = None
 
         d = self._DEFAULTS
 
@@ -501,10 +547,12 @@ class OverclockTab:
             fg=_TEXT_FG,
         )
         self.limit_title_label.pack(side="left")
-        self.power_api_var = ctk.StringVar(value="NVAPI")
+        # One transport on macOS: offering NVAPI/NVML there would be two
+        # choices whose only outcome is a guaranteed failure at apply time.
+        self.power_api_var = ctk.StringVar(value=api_label_default())
         self.power_api_selector = ctk.CTkOptionMenu(
             limit_header,
-            values=["NVAPI", "NVML"],
+            values=api_labels(),
             variable=self.power_api_var,
             width=84,
             anchor="center",
@@ -1529,6 +1577,12 @@ class OverclockTab:
             return
 
         self._absorb_offset_window(limits)
+        power_plane = macos_power_plane(limits)
+        if power_plane is not None:
+            self._power_plane = power_plane
+        thermal_plane = macos_thermal_plane(limits)
+        if thermal_plane is not None:
+            self._thermal_plane = thermal_plane
 
         # Store current states of control widgets that may be disabled by check_capabilities
         plimit_entry_state = self._safe_get_state(self.plimit_entry)
@@ -1576,7 +1630,41 @@ class OverclockTab:
             return
 
         power_backend = self._selected_power_backend()
-        if power_backend == "nvml":
+        if power_backend == "macos-rm":
+            # Watts from the board policy, degrees from the acoustic policy:
+            # both are the blocks the writes below address.
+            power_plane = self._power_plane
+            if power_plane is not None:
+                unit, min_w, max_w, current_w = power_plane
+                self.plimit_unit_var.set(unit)
+                self._power_default = current_w
+                self._reconfigure_slider(
+                    self.plimit_slider,
+                    self.plimit_var,
+                    min_w,
+                    max_w,
+                    current_w,
+                    step=1,
+                )
+            thermal_plane = self._thermal_plane
+            if thermal_plane is not None:
+                min_c, max_c, current_c = thermal_plane
+                self._thermal_default = current_c
+                self._reconfigure_slider(
+                    self.tlimit_slider,
+                    self.tlimit_var,
+                    min_c,
+                    max_c,
+                    current_c,
+                    step=1,
+                )
+            self.app.console.mirror(
+                f"plimit slider now "
+                f"{self.plimit_slider.cget('from_')}..{self.plimit_slider.cget('to')}"
+                f"@{self.plimit_slider.get()} (macos-rm, keys: "
+                f"{sorted(k for k in limits if 'power' in k or 'acoustic' in k)})"
+            )
+        elif power_backend == "nvml":
             self.plimit_unit_var.set("W")
             if (
                 "power_limit_nvml_min_w" in limits
@@ -2224,9 +2312,16 @@ class OverclockTab:
                 self._safe_set_state(widget, state)
 
     def _selected_power_backend(self) -> str:
-        """Return the selected backend for power-limit commands only."""
+        """Return the selected backend for power-limit commands only.
+
+        The string is what pynvoc takes, so macOS must hand it ``macos-rm``:
+        ``nvapi`` there is a channel that does not exist, and the watttaking RM
+        setter would never be reached.
+        """
         if self._mobile_mode:
             return "nvapi"
+        if is_macos():
+            return "macos-rm"
         selected = self.power_api_var.get().strip().upper()
         return "nvml" if selected == "NVML" else "nvapi"
 
@@ -2878,6 +2973,64 @@ class OverclockTab:
     def _log_oc_message(self, message: str) -> None:
         """Say something in the console the way every other refusal does."""
         self.app.console.append(f"[GUI] {message}\n")
+
+    def _limit_planes(
+        self,
+    ) -> Tuple[Optional[Tuple[str, int, int, int]], Optional[Tuple[int, int, int]]]:
+        """The last power and thermal planes the driver published.
+
+        Stored when they arrive and kept until a newer publication replaces
+        them: a refresh that carries no policy block says nothing about the
+        window, and dropping it would make the next apply unguarded.
+        """
+        return (
+            getattr(self, "_power_plane", None),
+            getattr(self, "_thermal_plane", None),
+        )
+
+    def _tlimit_value(self) -> Optional[int]:
+        """The thermal entry's value, or None when it does not hold a number."""
+        try:
+            raw = self.tlimit_var.get().strip()
+        except Exception:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    def _limit_plane_refusal(
+        self, backend: str, power_w: Optional[int], thermal_c: Optional[int]
+    ) -> Optional[str]:
+        """Refuse a limit the driver's own window cannot hold, before writing.
+
+        Only the macOS transport publishes these windows, so elsewhere this is
+        a no-op and the write proceeds exactly as it always did. Nothing is
+        clamped: the driver rejects an out-of-window value, so sending it would
+        spend a write to learn what the window already said.
+        """
+        if backend != "macos-rm":
+            return None
+        power_plane, thermal_plane = self._limit_planes()
+        over: list[str] = []
+        spans: list[str] = []
+        if power_plane is not None and isinstance(power_w, int):
+            _, min_w, max_w, _ = power_plane
+            if not (min_w <= power_w <= max_w):
+                over.append(f"power limit {power_w} W")
+                spans.append(f"driver span {min_w}..{max_w} W")
+        if thermal_plane is not None and isinstance(thermal_c, int):
+            min_c, max_c, _ = thermal_plane
+            if not (min_c <= thermal_c <= max_c):
+                over.append(f"thermal limit {thermal_c} C")
+                spans.append(f"driver span {min_c}..{max_c} C")
+        if not over:
+            return None
+        return (
+            f"Limits refused, nothing was written: {', '.join(over)} is outside what "
+            f"the driver itself accepts ({', '.join(spans)}). The driver rejects an "
+            "out-of-window value rather than clamping it."
+        )
 
     def _offset_window_summary(self) -> str:
         window = getattr(self, "_offset_window", None)
@@ -3593,16 +3746,29 @@ class OverclockTab:
                 )
                 return
             backend = self._selected_power_backend()
+            refusal = self._limit_plane_refusal(backend, int(plimit), None)
+            if refusal is not None:
+                self._log_oc_message(refusal)
+                return
             self.app.run_native_action(
                 "apply power limit",
                 lambda native, gpu=gpu, backend=backend, plimit=int(plimit): (
                     native.set_power_limit(gpu, backend, plimit)
-                    or f"Successfully applied {backend.upper()} power limit."
+                    or (
+                        "Successfully applied "
+                        f"{_POWER_BACKEND_LABEL.get(backend, backend.upper())} "
+                        "power limit."
+                    )
                 ),
             )
 
     def _apply_tlimit_only(self):
         tlimit = self.tlimit_var.get().strip()
+        if tlimit and self._selected_power_backend() == "macos-rm":
+            refusal = self._limit_plane_refusal("macos-rm", None, self._tlimit_value())
+            if refusal is not None:
+                self._log_oc_message(refusal)
+                return
         if tlimit:
             gpu = self.app.selected_gpu_target()
             if self._mobile_mode:
@@ -4260,6 +4426,15 @@ class OverclockTab:
             plimit = self.plimit_var.get().strip()
             if plimit:
                 backend = self._selected_power_backend()
+                # Both limits address driver-published windows, so an
+                # out-of-window value is refused here, before the chain runs:
+                # a half-applied set is worse than none.
+                refusal = self._limit_plane_refusal(
+                    backend, int(plimit), self._tlimit_value()
+                )
+                if refusal is not None:
+                    self._log_oc_message(refusal)
+                    return
                 actions.append((
                     "apply power limit",
                     lambda native, gpu=gpu, backend=backend, plimit=int(plimit): (

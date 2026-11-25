@@ -14,7 +14,11 @@ class FanControlPane:
 fan_control_stub.FanControlPane = FanControlPane
 sys.modules.setdefault("src.tabs.dashboard.sections.fan", fan_control_stub)
 
-from src.tabs.dashboard.sections.overclock import OverclockTab  # noqa: E402
+from src.tabs.dashboard.sections.overclock import (  # noqa: E402
+    OverclockTab,
+    macos_power_plane,
+    macos_thermal_plane,
+)
 
 
 class FakeVar:
@@ -54,6 +58,12 @@ class FakeNative:
         # Full override of the payload's entries (pynvoc shape) for tests that
         # need more than bit3 — the startup anchor reads all four fabric bits.
         self.domain_entries: list[dict] | None = None
+
+    def set_power_limit(self, gpu: str, backend: str, value: int) -> None:
+        self.calls.append(("set_power_limit", gpu, backend, value))
+
+    def set_thermal_limit(self, gpu: str, value: int) -> None:
+        self.calls.append(("set_thermal_limit", gpu, value))
 
     def set_clock_offset(
         self, gpu: str, backend: str, domain: str, offset: int, pstate: str
@@ -2491,3 +2501,147 @@ def test_fan_surface_verdict_flips_between_gpus() -> None:
         "GPU1", {"count": 1, "current_percent": 35}, {"count": 1, "coolers": []}
     )
     assert ("set_legacy_nvapi", False) in fan.calls
+
+
+# ── macOS limit windows: the board policy (W) and the acoustic policy (C) ──
+POWER_KEYS = {"power_limit_min": 70, "power_limit_max": 100, "power_limit_current": 100}
+THERMAL_KEYS = {
+    "acoustic_target_min_c": 65,
+    "acoustic_target_max_c": 87,
+    "acoustic_target_current_c": 83,
+}
+
+
+def test_macos_power_plane_reads_watts_from_the_board_policy() -> None:
+    assert macos_power_plane(POWER_KEYS) == ("W", 70, 100, 100)
+
+
+def test_macos_power_plane_refuses_a_half_or_inverted_span() -> None:
+    # One end only, or min > max, is not a window: bounding a slider on it
+    # would either bound the wrong direction or refuse every value.
+    assert macos_power_plane({"power_limit_min": 70}) is None
+    assert macos_power_plane({"power_limit_max": 100}) is None
+    assert macos_power_plane({"power_limit_min": 120, "power_limit_max": 70}) is None
+    # Non-integer ends are not a window either (a percent payload never is).
+    assert (
+        macos_power_plane({"power_limit_min": 50.0, "power_limit_max": 150.0}) is None
+    )
+
+
+def test_macos_thermal_plane_reads_the_acoustic_policy_not_the_thermal_wall() -> None:
+    plane = macos_thermal_plane({**THERMAL_KEYS, "gpu_max_temperature_c": 88})
+    assert plane == (65, 87, 83)
+    assert macos_thermal_plane({"acoustic_target_min_c": 65}) is None
+
+
+def make_limits_tab(planes: bool = True):
+    tab, app = make_tab()
+    tab.plimit_var = FakeVar("100")
+    tab.tlimit_var = FakeVar("83")
+    tab.plimit_slider = FakeSlider("normal")
+    tab.tlimit_slider = FakeSlider("normal")
+    tab.plimit_unit_var = FakeVar("%")
+    tab._mobile_mode = False
+    tab._power_plane = ("W", 70, 100, 100) if planes else None
+    tab._thermal_plane = (65, 87, 83) if planes else None
+    return tab, app
+
+
+def test_limit_refusal_names_every_out_of_window_row(monkeypatch) -> None:
+    monkeypatch.setattr("src.tabs.dashboard.sections.overclock.is_macos", lambda: True)
+    tab, app = make_limits_tab()
+    assert tab._selected_power_backend() == "macos-rm"
+
+    assert tab._limit_plane_refusal("macos-rm", 100, 83) is None
+    assert tab._limit_plane_refusal("macos-rm", 70, 65) is None
+
+    error = tab._limit_plane_refusal("macos-rm", 120, 95)
+    assert error is not None
+    assert "power limit 120 W" in error
+    assert "thermal limit 95 C" in error
+    assert "70..100 W" in error and "65..87 C" in error
+
+    # A refusal for one row quotes only the span that row is judged against.
+    power_only = tab._limit_plane_refusal("macos-rm", 69, 83)
+    assert power_only is not None
+    assert "70..100 W" in power_only and "65..87 C" not in power_only
+
+
+def test_limit_refusal_is_a_no_op_off_the_rm_transport() -> None:
+    tab, _app = make_limits_tab()
+    # NVAPI percent and NVML watts have their own guards; this one is
+    # transport-specific and must not touch them.
+    assert tab._limit_plane_refusal("nvapi", 150, 95) is None
+    assert tab._limit_plane_refusal("nvml", 150, 95) is None
+
+
+def test_limit_refusal_does_nothing_without_a_published_window() -> None:
+    tab, _app = make_limits_tab(planes=False)
+    assert tab._limit_plane_refusal("macos-rm", 500, 200) is None
+
+
+def test_apply_power_limit_refuses_before_the_write(monkeypatch) -> None:
+    monkeypatch.setattr("src.tabs.dashboard.sections.overclock.is_macos", lambda: True)
+    tab, app = make_limits_tab()
+    tab.plimit_var = FakeVar("120")
+
+    tab._apply_plimit_only()
+
+    assert app.actions == []
+    assert app.native.calls == []
+    assert any("power limit 120 W" in message for message in app.console.messages)
+
+
+def test_apply_power_limit_sends_macos_rm_and_watts(monkeypatch) -> None:
+    monkeypatch.setattr("src.tabs.dashboard.sections.overclock.is_macos", lambda: True)
+    tab, app = make_limits_tab()
+    tab.plimit_var = FakeVar("70")
+
+    tab._apply_plimit_only()
+
+    assert app.native.calls == [("set_power_limit", "GPU0", "macos-rm", 70)]
+    # The status line names a transport a reader recognises, not "MACOS-RM".
+    assert app.action_outputs == ["Successfully applied RM power limit."]
+
+
+def test_apply_thermal_limit_refuses_a_target_outside_the_acoustic_window(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("src.tabs.dashboard.sections.overclock.is_macos", lambda: True)
+    tab, app = make_limits_tab()
+    tab.tlimit_var = FakeVar("95")
+
+    tab._apply_tlimit_only()
+
+    assert app.actions == []
+    assert any("thermal limit 95 C" in message for message in app.console.messages)
+
+
+def test_apply_limits_refuses_an_out_of_window_limit_before_the_write(
+    monkeypatch,
+) -> None:
+    """The limits section applies power and thermal in one chain; a bad value
+    stops it before any write, rather than half-applying the pair."""
+    monkeypatch.setattr("src.tabs.dashboard.sections.overclock.is_macos", lambda: True)
+    tab, app = make_limits_tab()
+    tab.plimit_var = FakeVar("120")
+
+    tab._apply_limits()
+
+    assert app.actions == []
+    assert app.native.calls == []
+    assert any("power limit 120 W" in message for message in app.console.messages)
+
+
+def test_apply_limits_runs_the_chain_inside_the_windows(monkeypatch) -> None:
+    monkeypatch.setattr("src.tabs.dashboard.sections.overclock.is_macos", lambda: True)
+    tab, app = make_limits_tab()
+    tab.plimit_var = FakeVar("70")
+    tab.tlimit_var = FakeVar("87")
+    tab.vboost_slider = FakeSlider("disabled")
+    tab.vboost_var = FakeVar("0")
+
+    tab._apply_limits()
+
+    assert "apply power limit" in app.actions
+    assert "apply thermal limit" in app.actions
