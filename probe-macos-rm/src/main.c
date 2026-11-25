@@ -253,6 +253,10 @@ int main(int argc, char **argv)
     NvU32 raw_cmd = 0;
     unsigned raw_size = 0;
     const char *raw_seed = NULL;
+    int raw_write = 0;
+    NvU32 raw_wcmd = 0;
+    unsigned raw_wsize = 0;
+    const char *raw_wseed = NULL;
     int clklevel_read = 0, clkdom_read = 0, clkctl_read = 0, clkctl_hex = 0;
     int clkctl_offsweep = 0, clkvf_read = 0;
     int clkdoc_read = 0;
@@ -289,6 +293,15 @@ int main(int argc, char **argv)
              * raw_size of them. A short or long file is refused rather than
              * padded, so a seed cannot silently mean something else. */
             if (i + 1 < argc && argv[i + 1][0] != '-') raw_seed = argv[++i];
+        }
+        else if (!strcmp(argv[i], "--raw-write") && i + 2 < argc) {
+            raw_write = 1;
+            raw_wcmd = (NvU32)strtoul(argv[++i], NULL, 0);
+            raw_wsize = (unsigned)strtoul(argv[++i], NULL, 0);
+            /* Mandatory seed: whitespace-separated hex bytes, exactly
+             * raw_wsize of them, so the payload is the operator's, byte for
+             * byte, and never a partially filled buffer. */
+            if (i + 1 < argc && argv[i + 1][0] != '-') raw_wseed = argv[++i];
         }
         else if (!strcmp(argv[i], "--rated-tdp-read")) rated_tdp_read = 1;
         else if (!strcmp(argv[i], "--anchor-read")) anchor_read = 1;
@@ -438,6 +451,11 @@ int main(int argc, char **argv)
             fprintf(stderr, "unknown stage '%c'\n", *p);
             return 2;
         }
+    }
+
+    if (raw_write) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_raw_write(&g_ctx, raw_wcmd, raw_wsize, raw_wseed) != 0) rc = 1;
     }
 
     if (raw_read) {

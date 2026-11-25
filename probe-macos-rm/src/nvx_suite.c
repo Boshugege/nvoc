@@ -777,6 +777,74 @@ int nvx_stage2_raw_read(nvx_ctx *c, NvU32 cmd, unsigned size,
     return 0;
 }
 
+/* One explicit SET (--raw-write ID SIZE SEEDFILE).
+ *
+ * The body has to be supplied in full: the seed file is mandatory here, unlike
+ * --raw-read, so a write can never be "whatever the buffer happened to hold".
+ * The buffer is zeroed first and then read from the file, so a short or long
+ * file is refused instead of being padded or truncated.  The write is sent
+ * once; nothing is retried at another size, and a repaired body is never
+ * invented.  The caller takes the snapshot read before and reads the result
+ * back after -- this function only reports what the driver answered. */
+int nvx_stage2_raw_write(nvx_ctx *c, NvU32 cmd, unsigned size,
+                         const char *seed_path)
+{
+    static uint8_t buf[64 * 1024];
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.raw", "raw-write", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    if (size == 0 || size > sizeof buf) {
+        nvx_emit(c, "V2.raw", "raw-write", 0, NVX_V_SKIP,
+                 "paramSize %u is outside 1..%zu", size, sizeof buf);
+        return -1;
+    }
+    if (!seed_path) {
+        nvx_emit(c, "V2.raw", "raw-write", 0, NVX_V_SKIP,
+                 "a write needs an exact-size seed file");
+        return -1;
+    }
+    memset(buf, 0, size);
+    {
+        FILE *f = fopen(seed_path, "r");
+        unsigned n = 0, v;
+        if (!f) {
+            nvx_emit(c, "V2.raw", "raw-write", 0, NVX_V_SKIP,
+                     "cannot open seed file %s", seed_path);
+            return -1;
+        }
+        while (n < size && fscanf(f, "%x", &v) == 1) buf[n++] = (uint8_t)v;
+        int extra = (n == size) && fscanf(f, "%x", &v) == 1;
+        fclose(f);
+        if (n != size || extra) {
+            nvx_emit(c, "V2.raw", "raw-write", 0, NVX_V_SKIP,
+                     "seed file has %s byte count, expected exactly %u",
+                     extra ? "more than the" : "the wrong", size);
+            return -1;
+        }
+    }
+    NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice, cmd, buf, size);
+    if (st != 0) {
+        nvx_emit(c, "V2.raw", "raw-write", st, NVX_V_REJECTED,
+                 "cmd 0x%08x at paramSize %u -> 0x%08x (%s)", cmd, size, st,
+                 nvx_status_name(st));
+        return 0;
+    }
+    nvx_emit(c, "V2.raw", "raw-write", st, NVX_V_OK,
+             "cmd 0x%08x at paramSize %u accepted", cmd, size);
+    /* Echo the dwords that were sent, so the report shows the payload that the
+     * driver accepted rather than only its status. */
+    for (unsigned off = 0; off < size; off += 16) {
+        char line[80];
+        int n = snprintf(line, sizeof line, "  +0x%04x ", off);
+        for (unsigned k = 0; k < 16 && off + k < size && n > 0 &&
+                             (size_t)n < sizeof line; ++k)
+            n += snprintf(line + n, sizeof line - n, "%02x ", buf[off + k]);
+        nvx_emit(c, "V2.raw", "raw-write-bytes", st, NVX_V_SKIP, "%s", line);
+    }
+    return 0;
+}
+
 int nvx_stage2_tierb_read(nvx_ctx *c)
 {
     if (!c->hSubdevice) {

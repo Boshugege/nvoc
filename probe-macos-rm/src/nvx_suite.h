@@ -68,6 +68,13 @@ int nvx_stage2_tierb_read(nvx_ctx *c);
  * printed with its status and never retried at another size. */
 int nvx_stage2_raw_read(nvx_ctx *c, NvU32 cmd, unsigned size,
                         const char *seed_path);
+/* One explicit SET (--raw-write ID SIZE SEEDFILE) of a block whose bytes the
+ * operator supplied in full.  The seed is mandatory and must be exactly `size`
+ * bytes, so a write can never be "whatever the buffer happened to hold".  It is
+ * sent once and never retried at another size or with a repaired body; the
+ * caller takes the snapshot read beforehand and reads the result back after. */
+int nvx_stage2_raw_write(nvx_ctx *c, NvU32 cmd, unsigned size,
+                         const char *seed_path);
 /* Explicit, read-only RATED_TDP GET probe: the one public perf-side read pair
  * (NV2080_CTRL_CMD_PERF_RATED_TDP_GET_CONTROL). Never sends its SET twin. */
 int nvx_stage2_anchor_read(nvx_ctx *c);
