@@ -3525,3 +3525,17 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **⑤ 边界** ✔：证明的是**跨 boot 续跑**（账本 + 跳过 + 计数完成），不是自动编排（reboot 仍由人发起）；每次写仍是完整 apply/hold/verify/restore 事务；每个窗口 10 s，**不是稳定性结论**。
 
 **⑥ 证据** ✔：`outputs/stage-optimizer-crossboot-20261126T084500Z/`（`ledger.jsonl`、`uptime.txt`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百一十、跑 `--reboot` 路径抓到两个真问题：覆盖判定数错了对象，以及"ssh 能连"不等于"驱动就绪"
+
+**① 第一次跑 `--reboot`** ✔：boot 1 写了 `graphics=-3750`，报 1 个 pending，脚本自己重启；boot 2 ssh 立刻能连，但 RM 直接失败：`nvx: esc 0xc8 (72 bytes) -> kr 0xe00002d8`、`macOS RM: CARD_INFO: 0xffffffff (NV_STATUS_UNKNOWN)`。**这不是候选失败，是驱动还没起来。**
+
+**② 因此修脚本（结论来自证据，不是猜）** ✔：重启之后不只等 ssh，还要等一条**只读**命令成功（`nvoc-cli get-fan-info`）才开始下一个 sweep boot。装上这个门之后，续跑成功写出剩下的 `graphics=3750`，偏移读回 **`Restore kHz: 0`**，每个 boot 各只有一次写。
+
+**③ 同时修掉一个我上一轮引入的判定错误** ✔：原来是"数账本里 `ok` 行总数 ≥ grid 点数"，**这是错的**——别的 grid 的行也会把数凑满（本轮就被我自己的 0..7500 网格凑过 4 行）。现在改成**逐点核对**：用 awk 展开本 grid 的每个 delta，逐条比对 `"delta_khz":N,"outcome":"ok","target":"T"`，缺哪个就报哪个。修好后输出 `grid expects 3 candidate(s) for graphics; missing from the ledger: none`。
+
+**④ 一个应当记住的产品事实** ✔：`esc 0xc8` + `CARD_INFO 0xffffffff` 在**刚开机**时是正常现象（GPU 服务仍在启动），不该被读成通道坏了。自动化必须等就绪，人也一样。
+
+**⑤ 边界** ✔：本轮共 2 次受控写（每 boot 一次），都是完整事务；`--reboot` 是真的重启了测试机；10 s 窗口不是稳定性结论。
+
+**⑥ 证据** ✔：`outputs/stage-optimizer-rebootgate-20261126T090000Z/`（`ledger.jsonl`、`uptime.txt`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
