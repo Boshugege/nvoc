@@ -127,6 +127,82 @@ back. `apply_verified` is the driver's own read-back of the value it stored and 
 candidate whose restore never ran is reported as unsettled rather than assumed \
 good.";
 
+/// What one locked-window candidate did, as an entry publishes it.
+///
+/// Separate from [`CandidateOutcome`] because the locked-clock channel proves
+/// something the offset channel cannot state in the same shape: the driver
+/// keeps the windows it was given in its own table, so a candidate can be asked
+/// whether the table holds the window that was applied, and whether it holds
+/// the one that was put back. That is a second, independent witness -- the
+/// readback inside each step only compares the driver's answer with its own
+/// normalisation of the same request.
+///
+/// There is no separate `apply_verified` field: `set_locked_clocks` returns a
+/// report only when its readback matched, and returns an error after restoring
+/// the snapshot when it did not, so a report that exists *is* a verified apply.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LockedCandidateOutcome {
+    /// The window the candidate asked for, kHz.
+    pub requested_min_khz: u32,
+    pub requested_max_khz: u32,
+    /// The window the driver held before the candidate, kHz.
+    pub original_min_khz: u32,
+    pub original_max_khz: u32,
+    /// The newest window the driver's own table held while the candidate was in
+    /// place, kHz. `None` when that table could not be read or held nothing.
+    pub stored_window_khz: Option<(u32, u32)>,
+    /// Whether the newest stored record carried the applied window. `None` is
+    /// "no table to ask", never "asked and agreed".
+    pub storage_matches_applied: Option<bool>,
+    /// The window the restore read back, or `None` when no restore ran.
+    pub restored_window_khz: Option<(u32, u32)>,
+    pub restore_verified: bool,
+    pub settled: bool,
+    pub note: &'static str,
+}
+
+pub const LOCKED_CANDIDATE_NOTE: &str = "One locked window was applied and put back. \
+`storage_matches_applied` is an independent witness: the driver's stored table \
+(0x20809040) is read while the candidate is in place, so `false` means the driver \
+said it applied a window it did not store -- something the step's own readback \
+cannot show. `settled` requires the applied window to equal the request, the \
+restore to verify, and the restore to have read back the original window. A \
+candidate whose stored table could not be read keeps `storage_matches_applied: \
+null`: the missing witness is named, not assumed good, and it does not by itself \
+make the round trip unsettled.";
+
+/// Reduce the apply and restore reports into a locked-candidate outcome.
+pub fn locked_candidate_outcome(
+    applied: &crate::macos_lock::LockedClockWriteReport,
+    restored: Option<&crate::macos_lock::LockedClockWriteReport>,
+) -> LockedCandidateOutcome {
+    let window = |report: &crate::macos_lock::LockedClockWriteReport| {
+        report.applied.first().map(|w| (w.min_khz, w.max_khz))
+    };
+    let requested = applied.requested.first().map(|w| (w.min_khz, w.max_khz));
+    let original = applied.snapshot.first().map(|w| (w.min_khz, w.max_khz));
+    let restored_window = restored.and_then(window);
+    let restore_verified = restored.is_some_and(|r| window(r) == original);
+    LockedCandidateOutcome {
+        requested_min_khz: requested.map_or(0, |w| w.0),
+        requested_max_khz: requested.map_or(0, |w| w.1),
+        original_min_khz: original.map_or(0, |w| w.0),
+        original_max_khz: original.map_or(0, |w| w.1),
+        stored_window_khz: applied
+            .twin_records
+            .last()
+            .map(|record| (record.min_khz(), record.max_khz())),
+        storage_matches_applied: applied.storage_matches_applied,
+        restored_window_khz: restored_window,
+        restore_verified,
+        settled: requested.is_some()
+            && window(applied) == requested
+            && restore_verified
+            && restored_window == original,
+        note: LOCKED_CANDIDATE_NOTE,
+    }
+}
+
 /// Reduce the two write reports into the published document. A restore report
 /// that is missing, unverified, or that read back a different offset than the
 /// original leaves `settled` false: the record is not known to be where it
@@ -1555,6 +1631,121 @@ mod tests {
         );
         assert_eq!(summary["temperature_c"]["n"], json!(1));
         assert_eq!(summary["fan_rpm"], Value::Null);
+    }
+
+    fn locked_report(
+        requested: (u32, u32),
+        snapshot: (u32, u32),
+        applied: (u32, u32),
+        stored: Option<(u32, u32)>,
+    ) -> crate::macos_lock::LockedClockWriteReport {
+        let window = |(min, max): (u32, u32)| crate::LockWindow::new(0, 1, min, max);
+        let records = stored
+            .map(|(min, max)| crate::macos_lock::StateRecord {
+                offset: crate::macos_lock::STATE_RECORD_BASE,
+                words: [0x0100_0002, 1, min, max, 0, 0, 16, 0, 0, 0, 0, 0],
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        crate::macos_lock::LockedClockWriteReport {
+            requested: vec![window(requested)],
+            snapshot: vec![window(snapshot)],
+            applied: vec![window(applied)],
+            twin_block_head: None,
+            twin_records: records,
+            storage_matches_applied: stored.map(|(min, max)| (min, max) == applied),
+        }
+    }
+
+    #[test]
+    fn a_locked_round_trip_that_came_back_is_settled() {
+        let applied = locked_report(
+            (1_620_000, 1_800_000),
+            (1_700_000, 1_700_000),
+            (1_620_000, 1_800_000),
+            Some((1_620_000, 1_800_000)),
+        );
+        let restored = locked_report(
+            (1_700_000, 1_700_000),
+            (1_620_000, 1_800_000),
+            (1_700_000, 1_700_000),
+            Some((1_700_000, 1_700_000)),
+        );
+        let outcome = locked_candidate_outcome(&applied, Some(&restored));
+        assert_eq!(outcome.stored_window_khz, Some((1_620_000, 1_800_000)));
+        assert_eq!(outcome.storage_matches_applied, Some(true));
+        assert_eq!(outcome.restored_window_khz, Some((1_700_000, 1_700_000)));
+        assert!(outcome.restore_verified && outcome.settled);
+    }
+
+    #[test]
+    fn a_driver_that_stored_something_else_is_reported_even_when_the_round_trip_was_clean() {
+        // The readback inside the step only compares the driver with its own
+        // normalisation; this field is the independent witness and must survive
+        // a clean restore.
+        let applied = locked_report(
+            (1_620_000, 1_800_000),
+            (1_700_000, 1_700_000),
+            (1_620_000, 1_800_000),
+            Some((1_700_000, 1_700_000)),
+        );
+        let restored = locked_report(
+            (1_700_000, 1_700_000),
+            (1_620_000, 1_800_000),
+            (1_700_000, 1_700_000),
+            Some((1_700_000, 1_700_000)),
+        );
+        let outcome = locked_candidate_outcome(&applied, Some(&restored));
+        assert_eq!(outcome.storage_matches_applied, Some(false));
+        assert!(outcome.settled, "a clean round trip stays settled");
+    }
+
+    #[test]
+    fn a_missing_restore_or_a_moved_one_is_not_settled() {
+        let applied = locked_report(
+            (1_620_000, 1_800_000),
+            (1_700_000, 1_700_000),
+            (1_620_000, 1_800_000),
+            None,
+        );
+        // No restore at all: the window is still the candidate's.
+        let none = locked_candidate_outcome(&applied, None);
+        assert!(none.restored_window_khz.is_none());
+        assert!(!none.settled);
+        // Restore that landed somewhere other than the original.
+        let moved = locked_report(
+            (1_700_000, 1_700_000),
+            (1_620_000, 1_800_000),
+            (1_650_000, 1_700_000),
+            None,
+        );
+        let outcome = locked_candidate_outcome(&applied, Some(&moved));
+        assert!(!outcome.restore_verified);
+        assert!(!outcome.settled);
+        // No stored table to ask: named as null, not assumed good, and the
+        // round trip itself is still what decides `settled`.
+        assert!(none.storage_matches_applied.is_none());
+    }
+
+    #[test]
+    fn an_apply_that_did_not_land_on_the_request_is_not_settled() {
+        let applied = locked_report(
+            (1_620_000, 1_800_000),
+            (1_700_000, 1_700_000),
+            (1_650_000, 1_700_000),
+            Some((1_650_000, 1_700_000)),
+        );
+        let restored = locked_report(
+            (1_700_000, 1_700_000),
+            (1_650_000, 1_700_000),
+            (1_700_000, 1_700_000),
+            Some((1_700_000, 1_700_000)),
+        );
+        let outcome = locked_candidate_outcome(&applied, Some(&restored));
+        assert!(
+            !outcome.settled,
+            "the applied window is not the requested one"
+        );
     }
 
     fn report(
