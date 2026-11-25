@@ -3631,3 +3631,23 @@ No such file or directory (os error 2)
 **④ 没覆盖的** ✗：门禁的 Python 部分（ruff / pytest）与 pynvoc 扩展构建在本机跑不了。
 
 **⑤ 证据** ✔：`outputs/stage12-macos-recheck-20261126T101500Z/`（`xtask-ci.log`、`workspace-tests.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百一十六、门禁的 Python 部分终于在这台机器上跑了：TUI 全绿，GUI 有 14 项**从没在 macOS 上跑过**，pynvoc 那 1 项是旧构建
+
+**① 用 checkout 自带 `.venv` 跑（Python 3.12.15 / ruff 0.16.10 / pytest 9.1.1，无需装 uv）** ✔：
+- `ruff format --check`：195 files already formatted，**exit 0**
+- `ruff check`：All checks passed，**exit 0**
+- `pytest tui/tests`：**245 passed**
+
+**② GUI：14 failed / 310 passed / 13 skipped** ✗，但**不是新回归**：每一条失败都是同一形状——
+`FanSettings(backend='macos-rm', policy='manual', …)` 对不上 `backend='nvapi-cooler', policy='continuous'`，
+策略集合期望 `['continuous','manual']` 而 macOS 传输给的是 `['manual','rpm','auto', …]`。
+宿主机上它们绿，是因为宿主机上风扇后端确实是 `nvapi-cooler`。**这套测试从没在它描述的平台上跑过**——这是本轮最值钱的一句。
+
+**③ pynvoc：1 failed / 60 passed / 10 skipped** ✗，但**是旧构建**：`test_all_exports_present` 要 `get_gpu_locked_clocks`，Rust 侧确实导出了（`nvoc-python/src/lib.rs` 有注册），是该 `.venv` 里装的扩展早于它。
+
+**④ 没有为了让它们变绿去改任何东西** ✔：改测试去迁就现状，等于把"从没验证过"变成"看起来验证过"。
+
+**⑤ 下一步（明确）** ✖：在那台机器上重建 pynvoc 扩展；把 GUI 风扇相关测试改成**声明自己假设哪种传输**，而不是假设宿主机的那种。
+
+**⑥ 证据** ✔：`outputs/stage12-macos-python-20261126T103000Z/`（`python-steps.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
