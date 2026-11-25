@@ -3262,3 +3262,19 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **⑥ 一次测量翻车（已写进 README）** ✔：某轮 `/api/oc` 仍是 9.6 s，因为上一轮的 srv 还占着端口、新进程 bind 失败，探针量的是旧二进制。测之前先确认端口上是谁。
 
 **⑦ 剩余** ○：每次读仍要开一次会话；**会话复用（长期持有的句柄）没做**，这是下一阶段；1 s 缓存意味着别的进程写的值最多晚 1 s 反映。
+
+## 一百九十、panic 取证复核（§一百五十一 的结论站得住），以及风扇 rpm 目标的越界拒绝
+
+**① 复核方式** ✔：直接读报告原件，不看旧笔记。`nvram -p` 的 20 个键里**没有** `aapl,panic-info`；`.contents.panic` 指向 panic B；`Retired/` 里 0 份 panic。所以证据只有这两个文件与 15 份 WindowServer 崩溃报告。
+
+**② 复现 §一百五十一 的判定** ✔：panic A（05:56:32）是 `IOWatchdog::shutdownCheckWatchdog`，panic string 明写 `shutdown in progress, vfs shutdown not yet started`，栈里只有 watchdog + AppleSMC；panic B（06:56:04）是 `watchdogd` 的 `userspacePanic`，因为 WindowServer 120 s 没 checkin。**两份都没有 NVIDIA kext 帧**。
+
+**③ 新增的一层证据** ✔：panic B 之前的 15 份 `WindowServer-2026-11-25-06*.ips`（06:43:08→06:48:11，约每 15 s 一份）**15/15 都停在同一个断言**——`CoreDisplay::Assert ← DisplayPipe::RunFullDisplayPipe ← RunGPUDisplayPipe ← DisplayPipe::Commit ← Display::Present`，即显示管线提交失败，不是 RM 消息通道。随后 06:47–06:49 三份 `userspace_watchdog_timeout.spin`，06:56 看门狗落锤。`kmutil showloaded` 显示 `com.nullmoth.NVRM/NVRMFB/NVAccel/NVRMAGDC` 四个 kext 在跑。
+
+**④ 措辞更正** ✗→✔：不再写"把 GSP 推到 latch 后整机 panic"。能说的是：那个 boot 的探针与显示栈被拖停在时间上高度重合（§一百五十一 ③ 已给出 06:16–06:49），关机挂死与显示管线断言都在驱动邻域，但**报告本身没有指到哪一行代码**，要指到得有 kext 的符号。纪律（先只读、一 boot 一条未知 id、写前快照写后 exact restore）照旧，因为它是成本最低的保守选择，不因为归因改口而放松。
+
+**⑤ 风扇 rpm 目标的越界拒绝** ✔：控制块公布自己的 rpm 跨度（本机 `max_rpm 2800`），而 `FanControlTarget::Rpm` 以前把超跨度请求**就近压到满占空比**（6000 rpm → 100 %），静默改写用户意图。现在与功率/温度窗口同规矩：**拒绝并点名跨度**，块不变、零写入。真机：`6000 rpm → refused (0 .. 2800 rpm)` 且风扇仍 `auto`；`1400 rpm → manual / 50.0 %`，`Readback Verified: yes`；`reset-fan-speed → auto`，验回。
+
+**⑥ 诚实边界** ✔：1400 rpm 那次 `rpm` 当场读到 0（tach 与 duty 是两路，风扇降速途中读 0 属可能），不把 duty 当转速结论；panic 根因代码未定位；证据目录 `outputs/stage-panic-forensics-20261125T214332Z/`（25 份哈希全 OK）。
+
+**⑦ 测试** ✔：`cargo test -p nvoc-core --lib macos_fan` 10 passed（改 1 条：越界由"夹取"变"拒绝并点名跨度 + 块不变"）；`cargo xtask ci` = `CI_EXIT=0`。
