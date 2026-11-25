@@ -111,6 +111,18 @@ impl MacosRmBackend {
             .map_err(|e| format!("GPU {index}: macOS RM status: {e}"))
     }
 
+    /// One coherent, read-only settings projection for `index`.
+    ///
+    /// This is the same `QueryMacosRmSettings` the CLI and pynvoc read, so the
+    /// OC page cannot publish a window the other two consumers do not see.
+    fn settings(&self, index: usize) -> Result<nvoc_core::DeviceSettings, String> {
+        let gpu = self.gpu(index)?;
+        let target = nvoc_core::GpuTarget::macos_rm_only(gpu.device.id(), index, &gpu.device);
+        nvoc_core::run(&target, nvoc_core::QueryMacosRmSettings)
+            .map(|report| report.output)
+            .map_err(|e| format!("GPU {index}: macOS RM settings: {e}"))
+    }
+
     /// Additive clock offset in kHz, one domain at a time.
     ///
     /// The MHz entry points convert first, so both the OC page and any
@@ -302,24 +314,34 @@ impl ControlBackend for MacosRmBackend {
 
     fn read_offset_mhz(
         &mut self,
-        _gpu_index: usize,
-        _domain: OffsetDomain,
+        gpu_index: usize,
+        domain: OffsetDomain,
         _backend: OffsetBackend,
     ) -> Result<i32, String> {
-        // The offset itself *is* readable -- `nvoc_core::macos_rm` parses it out
-        // of the 776-byte clock document and exposes it as `clock_offsets` -- but
-        // this slot asks for one domain by name, and the document identifies
-        // domains by a bit only one of which (0x10, memory) is currently
-        // nameable. Mapping the rest here would encode an unverified
-        // assumption, so this returns a reason that says exactly that instead of
-        // claiming no offset read exists.
-        Err(
-            "clock offset for one named domain is not selected yet: the offset is readable \
-             (nvoc_core::macos_rm::DeviceSettings::clock_offsets, from the 0x20809061 clock \
-             document) but the document's domain bits are not all mapped to OffsetDomain names, \
-             so no per-domain number is asserted"
-                .to_string(),
-        )
+        // The offset is readable, and which record is which *can* be named: the
+        // clock document publishes a frequency per record, and a record is named
+        // only when that frequency equals the live clock of that public domain
+        // (`DeviceSettings::clock_offset_view`). So the OC page gets the number
+        // the driver holds, with the comparison behind its name attached, and a
+        // domain whose record this read did not corroborate is refused rather
+        // than reported as some other domain's offset.
+        let name = match domain {
+            OffsetDomain::Core => "graphics",
+            OffsetDomain::Mem => "memory",
+        };
+        let settings = self.settings(gpu_index)?;
+        let view = settings.clock_offset_view(name).map_err(|e| {
+            format!("{name} offset not named in this read, so none is asserted: {e}")
+        })?;
+        Ok(view.offset_khz)
+    }
+
+    fn read_offset_window_mhz(&mut self, gpu_index: usize) -> Option<(f32, f32)> {
+        let limits = self.settings(gpu_index).ok()?.clock_offset_limits_khz?;
+        Some((
+            limits.min_khz as f32 / 1000.0,
+            limits.max_khz as f32 / 1000.0,
+        ))
     }
 
     fn read_power_limit_w(&mut self, _gpu_index: usize) -> Result<Option<(u32, u32, u32)>, String> {

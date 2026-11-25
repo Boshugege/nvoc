@@ -204,6 +204,13 @@ pub trait ControlBackend: Send {
         domain: OffsetDomain,
         backend: OffsetBackend,
     ) -> Result<i32, String>;
+    /// The offset span the driver itself publishes (min, max) in MHz, for the OC
+    /// page's slider bounds. `None` = this transport does not publish one, which
+    /// the caller must not read as a span of zero. Defaulted so a backend that
+    /// has no such record does not have to spell that out again.
+    fn read_offset_window_mhz(&mut self, _gpu_index: usize) -> Option<(f32, f32)> {
+        None
+    }
     /// Power-limit window (min, current, max) in watts, for slider bounds.
     fn read_power_limit_w(&mut self, gpu_index: usize) -> Result<Option<(u32, u32, u32)>, String>;
     /// Temperature-wall window (min, current, max) in °C, best effort.

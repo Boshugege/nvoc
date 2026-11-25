@@ -249,11 +249,27 @@ fn handle_api(
                 .ok();
             let power = backend.read_power_limit_w(index).ok().flatten();
             let temp = backend.read_temp_limit_c(index).ok().flatten();
+            let window = backend.read_offset_window_mhz(index);
+            let clock = backend.read_core_clock_mhz(index);
             json_response(
                 request,
                 &serde_json::json!({
                     "core_offset_mhz": core_off,
                     "mem_offset_mhz": mem_off,
+                    // The span the driver itself accepts, and what it is worth at
+                    // the clock the card is running now. Both null when the read
+                    // did not happen: a missing window is not a window of zero.
+                    "offset_window": window.map(|(min_mhz, max_mhz)| {
+                        serde_json::json!({
+                            "min_mhz": min_mhz,
+                            "max_mhz": max_mhz,
+                            "potential": nvoc_core::offset_potential(
+                                (min_mhz * 1000.0).round() as i32,
+                                (max_mhz * 1000.0).round() as i32,
+                                clock.map(|mhz| (mhz * 1000.0).round().max(0.0) as u32),
+                            ),
+                        })
+                    }),
                     "power": power.map(|(min, cur, max)| {
                         serde_json::json!({"min_w": min, "current_w": cur, "max_w": max})
                     }),
