@@ -2098,12 +2098,14 @@ impl Device {
             // Head of the twin's answer while the write is in place. Held raw: the
             // stride and the meaning of the fields after the format word are not
             // established, and guessing a layout is how a backend starts lying.
+            let mut twin_records = Vec::new();
             let twin_block_head = session.read_locked_state_block().ok().map(|block| {
                 let words = block
                     .chunks_exact(4)
                     .take(macos_lock::STATE_HEAD_WORDS)
                     .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
                     .collect::<Vec<_>>();
+                twin_records = macos_lock::parse_state_records(&block);
                 (words, macos_lock::parse_state_count(&block).ok())
             });
             let applied = session.read_locked_clocks(request)?;
@@ -2139,6 +2141,7 @@ impl Device {
                 snapshot: expected,
                 applied,
                 twin_block_head,
+                twin_records,
             })
         })();
         let closed = session.close();

@@ -227,9 +227,25 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                             json!({
                                 "words": words,
                                 "count_at_4": count,
-                                "note": "raw head of 0x20809040's answer while the write is in place; neither the fields nor a stride are established",
+                                "note": "raw head of 0x20809040's answer while the write is in place",
                             })
                         }),
+                        // What that answer stores. The stride and the window
+                        // fields were measured on this card (§二百二十一): 48
+                        // bytes from +16, each record holding the window the
+                        // write asked for. It is the driver's state, so it sits
+                        // next to the readback rather than replacing it.
+                        "twin_records": report.twin_records.iter().map(|record| {
+                            json!({
+                                "offset": record.offset,
+                                "type": record.type_word(),
+                                "count": record.count(),
+                                "min_khz": record.min_khz(),
+                                "max_khz": record.max_khz(),
+                                "memory_khz": record.memory_khz(),
+                                "words": record.words,
+                            })
+                        }).collect::<Vec<_>>(),
                         "floor_note": "the driver keeps the highest floor it has seen; a lower request is accepted and not applied",
                         "readback_verified": true, "restored_on_mismatch": true})
                 }

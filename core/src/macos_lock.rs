@@ -131,12 +131,105 @@ pub struct LockedClockWriteReport {
     /// The head of the twin read's answer (`0x20809040`) while the write is in
     /// place, plus the offset-4 dword that `parse_state_count` reads.
     ///
-    /// Raw on purpose. With nothing locked the whole 4808-byte block is zero
-    /// apart from the format word, so the layout of anything after offset 8 has
-    /// never been seen; offset 4 answered 48 for an in-place 1620..1700 MHz write
-    /// and 0 for zero and probe-shaped reads, and 48 is not a plausible window
-    /// count. Neither the field nor the stride is published as understood.
+    /// Raw on purpose. `parse_state_records` reads the records out of the full
+    /// block and this keeps the first dwords for anyone who needs to see what
+    /// the parse was based on. Offset 4 counts locked-clock SETs since the
+    /// driver loaded, times 48: a fresh boot reads 0, the first write 48, the
+    /// second 96 (§二百二十三). It is not the record count.
     pub twin_block_head: Option<(Vec<u32>, Option<u32>)>,
+    /// The records those dwords spell out, when the answer had any. The layout
+    /// is measured (§二百二十一): 48-byte records from `+16`, each carrying the
+    /// window that write asked for. This is the driver's stored state, not a
+    /// readback of the request, which is why it is reported next to it and not
+    /// instead of it.
+    pub twin_records: Vec<StateRecord>,
+}
+
+/// Bytes one record of the `0x20809040` answer occupies, and where the first
+/// one starts.
+///
+/// Measured, not assumed: a read-only dump with two writes in place showed
+/// `01000002, 1, min, max, 0, 0, 16, mem, mem, 0, x, y` at `+16` and at `+64`,
+/// then zero out to the end of the 4808-byte block.
+pub const STATE_RECORD_BYTES: usize = 48;
+/// Byte offset of the first record in that answer.
+pub const STATE_RECORD_BASE: usize = 16;
+/// Dwords kept per record.
+pub const STATE_RECORD_WORDS: usize = 12;
+
+/// One record of the `0x20809040` answer, kept as its twelve raw dwords.
+///
+/// The accessors below name only what the dumps actually showed; the two
+/// trailing dwords differ between records and look like stamps, so they stay
+/// raw instead of being given a meaning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct StateRecord {
+    /// Byte offset of this record inside the block.
+    pub offset: usize,
+    /// The record's twelve dwords, little-endian as they arrive.
+    pub words: [u32; STATE_RECORD_WORDS],
+}
+
+impl StateRecord {
+    /// `+0`: `0x01000002` in every record seen so far.
+    pub fn type_word(&self) -> u32 {
+        self.words[0]
+    }
+
+    /// `+4`: 1 in every record seen so far.
+    pub fn count(&self) -> u32 {
+        self.words[1]
+    }
+
+    /// `+8`: low end of the window this record carries.
+    pub fn min_khz(&self) -> u32 {
+        self.words[2]
+    }
+
+    /// `+12`: high end of the same window.
+    pub fn max_khz(&self) -> u32 {
+        self.words[3]
+    }
+
+    /// `+28`/`+32`: the memory clock, when the two dwords agree and are not
+    /// zero. `None` otherwise, because a disagreement is not a reading.
+    pub fn memory_khz(&self) -> Option<u32> {
+        match (self.words[7], self.words[8]) {
+            (0, _) | (_, 0) => None,
+            (low, high) if low == high => Some(low),
+            _ => None,
+        }
+    }
+}
+
+/// Walk the records out of a `0x20809040` answer.
+///
+/// Stops at the first slot whose type word is zero: that is what the dumps show
+/// after the last record, and continuing past it would invent records out of
+/// padding. A block shorter than one record yields nothing.
+pub fn parse_state_records(block: &[u8]) -> Vec<StateRecord> {
+    let word = |offset: usize| {
+        u32::from_le_bytes([
+            block[offset],
+            block[offset + 1],
+            block[offset + 2],
+            block[offset + 3],
+        ])
+    };
+    let mut records = Vec::new();
+    let mut offset = STATE_RECORD_BASE;
+    while offset + STATE_RECORD_BYTES <= block.len() {
+        if word(offset) == 0 {
+            break;
+        }
+        let mut words = [0u32; STATE_RECORD_WORDS];
+        for (index, slot) in words.iter_mut().enumerate() {
+            *slot = word(offset + index * 4);
+        }
+        records.push(StateRecord { offset, words });
+        offset += STATE_RECORD_BYTES;
+    }
+    records
 }
 
 /// Read the window count out of a `0x20809040` block.
@@ -665,6 +758,72 @@ mod state_count_tests {
     fn a_zeroed_block_is_refused_rather_than_read_as_no_locks() {
         let err = parse_state_count(&block_with(0, 0)).unwrap_err();
         assert!(err.contains("format word"), "{err}");
+    }
+
+    fn block_with_records(records: &[[u32; 12]]) -> alloc_vec {
+        let mut block = alloc_vec::from(vec![0u8; STATE_BYTES]);
+        for (index, record) in records.iter().enumerate() {
+            let base = STATE_RECORD_BASE + index * STATE_RECORD_BYTES;
+            for (slot, word) in record.iter().enumerate() {
+                block[base + slot * 4..base + slot * 4 + 4].copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        block
+    }
+
+    type alloc_vec = Vec<u8>;
+
+    fn record(min: u32, max: u32) -> [u32; 12] {
+        [
+            0x0100_0002,
+            1,
+            min,
+            max,
+            0,
+            0,
+            16,
+            6_000_984,
+            6_000_984,
+            0,
+            0,
+            0,
+        ]
+    }
+
+    #[test]
+    fn the_records_of_a_two_window_answer_are_read_back_in_order() {
+        let block =
+            block_with_records(&[record(1_700_000, 1_700_000), record(1_800_000, 1_800_000)]);
+        let records = parse_state_records(&block);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].offset, STATE_RECORD_BASE);
+        assert_eq!(records[0].min_khz(), 1_700_000);
+        assert_eq!(records[0].max_khz(), 1_700_000);
+        assert_eq!(records[0].memory_khz(), Some(6_000_984));
+        assert_eq!(records[1].offset, STATE_RECORD_BASE + STATE_RECORD_BYTES);
+        assert_eq!(records[1].max_khz(), 1_800_000);
+    }
+
+    #[test]
+    fn an_answer_with_nothing_stored_has_no_records() {
+        assert!(parse_state_records(&vec![0u8; STATE_BYTES]).is_empty());
+        // Short of one record: nothing to read, nothing invented.
+        assert!(parse_state_records(&vec![0xffu8; STATE_RECORD_BASE + 8]).is_empty());
+    }
+
+    #[test]
+    fn a_record_with_disagreeing_memory_dwords_reports_no_memory_clock() {
+        let mut one = record(1_700_000, 1_700_000);
+        one[8] = 6_000_985;
+        let records = parse_state_records(&block_with_records(&[one]));
+        assert_eq!(records[0].memory_khz(), None);
+        let mut zeroed = record(1_700_000, 1_700_000);
+        zeroed[7] = 0;
+        zeroed[8] = 0;
+        assert_eq!(
+            parse_state_records(&block_with_records(&[zeroed]))[0].memory_khz(),
+            None
+        );
     }
 
     #[test]
