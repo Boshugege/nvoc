@@ -3935,3 +3935,26 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **⑤ 意义** ✖→✔：这是本轮少数**能被本地测试证明**的 macOS 路径——块布局来自真机 dump（§二百二十一），解析与投影现在在 CI 里跑；但**块本身来自真机、本次没有真机**，所以"服务在真机上发出的 JSON"仍是待验证项。
 
 **⑥ 未硬件验证** ✖：测试机第 8 轮失联。
+
+## 二百三十四、锁定窗口候选的"事务结论"：`locked_candidate_outcome`（离线可测）
+
+**① 缺口** ✗：偏移通道早就有纯函数 `candidate_outcome` 把"应用－回读－还原"两份报告折成一个结论；**锁定窗口通道一份都没有**。于是"这回候选干净吗"这件事，只有人能看 JSON 说出来。
+
+**② 新增** ✔：`core::macos_eval::locked_candidate_outcome(applied, restored)` → `LockedCandidateOutcome`：
+| 字段 | 含义 |
+| --- | --- |
+| `requested_*` / `original_*` / `restored_window_khz` | 请求、快照、还原三处的窗口（kHz） |
+| `stored_window_khz` | 候选在位时驱动自己表里最新的一条（来自 §二百二十四 的 `twin_records`） |
+| `storage_matches_applied` | 独立见证：**`false` = 驱动说它应用了、但没存下来**。这是步骤内回读**看不到**的事 |
+| `settled` | 应用窗口 == 请求、还原窗口 == 原窗口、且还原读回成功 |
+
+**③ 两条刻意的判断** ✔：
+- **没有 `apply_verified` 字段**：`set_locked_clocks` 只在回读匹配时返回报告、不匹配就先还原再报错 ⇒ **报告存在本身即已验证**。加一个恒为 true 的字段只会让人以为它是独立证据。
+- **`storage_matches_applied == false` 不推翻 `settled`**：`settled` 说的是"往返干净"，而"驱动没存"是另一件事。两件事分开报，比压成一个布尔好。
+- **表读不到 → `null`**（不是 `true`）：缺见证就写"缺见证"，且它本身不让往返变成不干净。
+
+**④ 测试** ✔：四条——干净往返 `settled`；**往返干净但存的是别的窗口** → `storage_matches_applied: Some(false)` 且仍 `settled`；无还原／还原落偏 → 不 `settled`；应用没落在请求上 → 不 `settled`。`nvoc-core` lib **235 → 239 passed**；`cargo xtask ci` → `CI_EXIT=0`。
+
+**⑤ 意义与边界** ✖→✔：这是阶段 10 闭环在锁定窗口通道上的**纯函数底座**，全部离线可测；但**还没有任何优化器分支调用它**，也没有真机产生的两份报告喂给它——那份数据要等机器回来。
+
+**⑥ 未硬件验证** ✖：测试机第 9 轮失联。
