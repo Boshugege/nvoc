@@ -60,7 +60,12 @@ fn macos_eval_command() -> Command {
              holds now, whether the step stays inside the window the driver \
              reported, and which of those facts is missing when it cannot say. \
              A step is never applied, and `settings_write` reports whether this \
-             backend would write at all.",
+             backend would write at all.\n\n\
+             --apply-candidate is the write half: one candidate on one clock domain, held \
+             for the same bounded load, verified, then restored to the exact original \
+             offset and read back. The report's `candidate` section carries the driver's \
+             own apply/restore read-backs and `settled` says whether the round trip was \
+             clean -- not that the candidate is fast or stable.",
         )
         .arg(
             Arg::new("duration")
@@ -113,6 +118,19 @@ fn macos_eval_command() -> Command {
                      --plan graphics=+8mhz or --plan bit:0x1=-2000; repeatable. \
                      TARGET is a public domain or bit:<n>; DELTA is signed kHz, \
                      optionally suffixed khz/mhz",
+                ),
+        )
+        .arg(
+            Arg::new("apply-candidate")
+                .long("apply-candidate")
+                .value_name("TARGET=DELTA")
+                .num_args(1)
+                .help(
+                    "Apply ONE offset candidate after the stock load, hold it for the same \
+                     bounded load, verify, then put the original offset back exactly, e.g. \
+                     --apply-candidate graphics=-25mhz. TARGET must be a public domain this \
+                     backend can address (graphics or memory); DELTA is signed kHz, \
+                     optionally suffixed khz/mhz. Refused together with --dry-run",
                 ),
         )
         .arg(

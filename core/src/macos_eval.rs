@@ -95,6 +95,66 @@ pub fn plan_document(settings: &DeviceSettings, requests: &[PlanRequest]) -> Pla
     }
 }
 
+/// What one applied-then-put-back candidate did, as every entry publishes it.
+///
+/// The write half of the closed loop has exactly one thing to prove that a
+/// read-only plan cannot: that a candidate went in, was read back, and came
+/// back out identically. So `settled` is about the *round trip*, not about
+/// speed -- a candidate that was put back exactly is settled even if the clocks
+/// never moved, and one whose restore disagrees with the original is not
+/// settled however fast it ran.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CandidateOutcome {
+    pub domain: &'static str,
+    pub requested_khz: i32,
+    pub original_khz: i32,
+    pub applied_khz: i32,
+    pub apply_verified: bool,
+    pub other_bytes_preserved: bool,
+    /// The offset the restore actually read back, or `null` when no restore was
+    /// attempted (the run was cancelled before it, for instance).
+    pub restored_khz: Option<i32>,
+    pub restore_verified: bool,
+    pub settled: bool,
+    pub note: &'static str,
+}
+
+pub const CANDIDATE_NOTE: &str = "One candidate offset was applied to one clock domain and put \
+back. `apply_verified` is the driver's own read-back of the value it stored and \
+`other_bytes_preserved` says the rest of the 2108-byte record was untouched; \
+`settled` additionally requires a restore that read back the original offset. \
+`settled` says the round trip was clean -- it is not a stability claim, and a \
+candidate whose restore never ran is reported as unsettled rather than assumed \
+good.";
+
+/// Reduce the two write reports into the published document. A restore report
+/// that is missing, unverified, or that read back a different offset than the
+/// original leaves `settled` false: the record is not known to be where it
+/// started.
+pub fn candidate_outcome(
+    requested_khz: i32,
+    applied: &crate::ClockOffsetWriteReport,
+    restored: Option<&crate::ClockOffsetWriteReport>,
+) -> CandidateOutcome {
+    let restored_khz = restored.map(|r| r.applied_khz);
+    let restore_verified = restored.is_some_and(|r| r.readback_verified);
+    CandidateOutcome {
+        domain: applied.domain,
+        requested_khz,
+        original_khz: applied.original_khz,
+        applied_khz: applied.applied_khz,
+        apply_verified: applied.readback_verified,
+        other_bytes_preserved: applied.other_bytes_preserved,
+        restored_khz,
+        restore_verified,
+        settled: applied.readback_verified
+            && applied.other_bytes_preserved
+            && restore_verified
+            && restored_khz == Some(applied.original_khz),
+        note: CANDIDATE_NOTE,
+    }
+}
+
 /// min/mean/max/n over one telemetry field.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Stats {
@@ -417,5 +477,97 @@ mod tests {
         );
         assert_eq!(summary["temperature_c"]["n"], json!(1));
         assert_eq!(summary["fan_rpm"], Value::Null);
+    }
+
+    fn report(
+        domain: &'static str,
+        original: i32,
+        applied: i32,
+        verified: bool,
+    ) -> crate::ClockOffsetWriteReport {
+        crate::ClockOffsetWriteReport {
+            domain,
+            original_khz: original,
+            applied_khz: applied,
+            readback_verified: verified,
+            other_bytes_preserved: true,
+        }
+    }
+
+    #[test]
+    fn a_candidate_is_settled_only_when_the_restore_read_back_the_original() {
+        let applied = report("graphics", -100_000, -25_000, true);
+        let restored = report("graphics", -25_000, -100_000, true);
+        let outcome = candidate_outcome(-25_000, &applied, Some(&restored));
+        assert_eq!(outcome.original_khz, -100_000);
+        assert_eq!(outcome.applied_khz, -25_000);
+        assert_eq!(outcome.restored_khz, Some(-100_000));
+        assert!(outcome.apply_verified && outcome.restore_verified);
+        assert!(outcome.settled);
+    }
+
+    #[test]
+    fn a_restore_that_lands_elsewhere_or_never_runs_is_not_settled() {
+        let applied = report("graphics", -100_000, -25_000, true);
+        // Put back to the wrong offset: the record is not known to be where it
+        // started, so the round trip did not settle even though both writes were
+        // acknowledged.
+        let wrong = report("graphics", -25_000, 0, true);
+        let outcome = candidate_outcome(-25_000, &applied, Some(&wrong));
+        assert!(outcome.restore_verified);
+        assert_eq!(outcome.restored_khz, Some(0));
+        assert!(!outcome.settled);
+        // No restore at all (cancelled before it ran) is unsettled, not assumed
+        // good, and it does not claim a restored value it never read.
+        let none = candidate_outcome(-25_000, &applied, None);
+        assert_eq!(none.restored_khz, None);
+        assert!(!none.restore_verified);
+        assert!(!none.settled);
+    }
+
+    #[test]
+    fn an_unverified_apply_keeps_the_round_trip_unsettled() {
+        let applied = report("memory", 0, -50_000, false);
+        let restored = report("memory", -50_000, 0, true);
+        let outcome = candidate_outcome(-50_000, &applied, Some(&restored));
+        assert!(!outcome.apply_verified);
+        assert!(outcome.restore_verified);
+        assert!(!outcome.settled);
+        let mut vandalised = report("memory", 0, -50_000, true);
+        vandalised.other_bytes_preserved = false;
+        let outcome = candidate_outcome(-50_000, &vandalised, Some(&restored));
+        assert!(outcome.apply_verified);
+        assert!(!outcome.other_bytes_preserved);
+        assert!(!outcome.settled);
+    }
+
+    #[test]
+    fn the_candidate_document_publishes_the_round_trip_not_a_verdict_on_speed() {
+        let applied = report("graphics", 0, -25_000, true);
+        let restored = report("graphics", -25_000, 0, true);
+        let value = serde_json::to_value(candidate_outcome(-25_000, &applied, Some(&restored)))
+            .expect("serialise");
+        assert_eq!(
+            value
+                .as_object()
+                .expect("object")
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec![
+                "applied_khz",
+                "apply_verified",
+                "domain",
+                "note",
+                "original_khz",
+                "other_bytes_preserved",
+                "requested_khz",
+                "restore_verified",
+                "restored_khz",
+                "settled",
+            ]
+        );
+        assert_eq!(value["settled"], json!(true));
+        assert_eq!(value["domain"], json!("graphics"));
     }
 }

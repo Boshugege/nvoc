@@ -21,8 +21,9 @@
 
 use clap::ArgMatches;
 use nvoc_core::{
-    DeviceStatus, Error, GpuTarget, PlanRequest, QueryMacosRmInfo, QueryMacosRmSettings,
-    QueryMacosRmStatus, fps_tail, load_summary, parse_plan_requests, plan_document, run,
+    ClockDomain, DeviceStatus, Error, GpuTarget, OffsetStepTarget, PlanRequest, QueryMacosRmInfo,
+    QueryMacosRmSettings, QueryMacosRmStatus, SetMacosRmClockOffset, candidate_outcome, fps_tail,
+    load_summary, parse_plan_requests, plan_document, run,
 };
 use serde_json::{Value, json};
 use std::io::Write;
@@ -54,6 +55,9 @@ pub struct StockEvalOptions {
     /// Preflight and plan only: no load, no verifier, no writes.
     pub dry_run: bool,
     pub plan: Vec<PlanRequest>,
+    /// The one candidate to apply, hold and put back; `None` keeps the run
+    /// read-only.
+    pub candidate: Option<PlanRequest>,
 }
 
 fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
@@ -91,6 +95,23 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         .get_many::<String>("plan")
         .map(|values| values.cloned().collect())
         .unwrap_or_default();
+    let candidate_values: Vec<String> = matches
+        .get_many::<String>("apply-candidate")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default();
+    let mut candidate = parse_plan_requests(&candidate_values)?.into_iter();
+    let candidate = candidate.next();
+    if candidate.is_some() && candidate_values.len() > 1 {
+        return Err(error(
+            "macos-eval applies at most one candidate per run; a sweep belongs in the scanner",
+        ));
+    }
+    let dry_run = matches.get_flag("dry-run");
+    if candidate.is_some() && dry_run {
+        return Err(error(
+            "--apply-candidate writes an offset and cannot be combined with --dry-run;              use --plan to evaluate the same candidate without writing it",
+        ));
+    }
     Ok(StockEvalOptions {
         duration,
         interval,
@@ -98,8 +119,9 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         metal_check,
         out,
         vulkan,
-        dry_run: matches.get_flag("dry-run"),
+        dry_run,
         plan: parse_plan_requests(&plan_values)?,
+        candidate,
     })
 }
 
@@ -217,6 +239,91 @@ fn run_verifier(path: Option<&PathBuf>, dry_run: bool) -> Result<Value, Error> {
     })
 }
 
+/// What the write half produced: the held load, its verifier, and the two write
+/// reports the round trip is judged on.
+struct CandidateRun {
+    applied: nvoc_core::ClockOffsetWriteReport,
+    restored: Option<nvoc_core::ClockOffsetWriteReport>,
+    under_load: Value,
+    stressor: Value,
+    post: Value,
+    verifier: Value,
+    exit_code: Option<i32>,
+    post_restore_settings: Value,
+}
+
+/// The candidate's target as the offset write addresses it. Only the domains
+/// this backend has a validated record for are accepted: naming one it cannot
+/// write would turn a refusal into a silently different domain.
+fn clock_domain_for(target: &OffsetStepTarget) -> Result<ClockDomain, Error> {
+    match target {
+        OffsetStepTarget::Domain(name) if name == "graphics" => Ok(ClockDomain::Graphics),
+        OffsetStepTarget::Domain(name) if name == "memory" => Ok(ClockDomain::Memory),
+        OffsetStepTarget::Domain(name) => Err(error(format!(
+            "the macOS offset write serves graphics and memory; {name} has no validated record on this backend"
+        ))),
+        OffsetStepTarget::DomainBit(_) => Err(error(
+            "the macOS offset write is addressed by public domain name, not by device bit",
+        )),
+    }
+}
+
+/// Apply one candidate, hold it for the same bounded load, verify under it, then
+/// put the original offset back -- and put it back even when the hold failed,
+/// because a run that leaves the clock offset somewhere else is worse than a run
+/// that reports a failure.
+fn run_candidate(
+    gpu: &GpuTarget<'_>,
+    opts: &StockEvalOptions,
+    request: &PlanRequest,
+) -> Result<CandidateRun, Error> {
+    let domain = clock_domain_for(&request.target)?;
+    let never = || false;
+    let applied = run(
+        gpu,
+        SetMacosRmClockOffset {
+            domain,
+            khz: request.delta_khz,
+            cancelled: &never,
+        },
+    )?
+    .output;
+    // Everything between the apply and the restore is fallible, so the restore
+    // is attempted either way and its own failure is reported as its absence.
+    let held = (|| {
+        let load = run_bounded_load(gpu, opts)?;
+        let verifier = run_verifier(opts.metal_check.as_ref(), false)?;
+        Ok::<_, Error>((load, verifier))
+    })();
+    let restored = run(
+        gpu,
+        SetMacosRmClockOffset {
+            domain,
+            khz: applied.original_khz,
+            cancelled: &never,
+        },
+    )
+    .map(|out| out.output)
+    .ok();
+    let post_restore_settings = run(gpu, QueryMacosRmSettings)
+        .and_then(|out| {
+            serde_json::to_value(&out.output)
+                .map_err(|e| error(format!("failed to serialise the restored settings: {e}")))
+        })
+        .unwrap_or(Value::Null);
+    let (load, verifier) = held?;
+    Ok(CandidateRun {
+        applied,
+        restored,
+        under_load: load.under_load,
+        stressor: load.stressor,
+        post: load.post,
+        verifier,
+        exit_code: load.exit_code,
+        post_restore_settings,
+    })
+}
+
 pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result<(), Error> {
     if !cfg!(target_os = "macos") {
         return Err(error(
@@ -251,6 +358,12 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         run_bounded_load(gpu, &opts)?
     };
     let verifier = run_verifier(opts.metal_check.as_ref(), opts.dry_run)?;
+    // The write half, when asked for: one candidate applied after the stock
+    // measurement, held for its own bounded load, verified under load, restored.
+    let candidate = match &opts.candidate {
+        Some(request) => Some(run_candidate(gpu, &opts, request)?),
+        None => None,
+    };
     // A `--plan` request is evaluated against the snapshot read above, whether
     // or not a load follows it: the plan is about the state, not the load. In a
     // dry run the section is always present, so an empty request list reads as
@@ -288,20 +401,43 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             "dry_run": opts.dry_run,
             "plan_requests": opts.plan.len(),
         },
-        "settings_written": false,
-        "write_gate": "read-only: no candidate applied. The write path exists \
+        "settings_written": candidate
+            .as_ref()
+            .is_some_and(|run| run.applied.readback_verified && run.restored.is_some()),
+        "write_gate": match &candidate {
+            Some(run) => if run.restored.is_some() {
+                "write: one candidate offset was applied to one clock domain through \
+                 its own 2108-byte record, held for a bounded load, and restored to the \
+                 original offset with the driver's read-back on both writes. The record \
+                 was never rebuilt by hand -- see the candidate section for the two \
+                 reports and whether the round trip settled."
+            } else {
+                "write attempted, restore NOT read back: the applied offset is not known \
+                 to be back where it started. Re-read the offset before trusting the board."
+            },
+            None => "read-only: no candidate applied. The write path exists \
             (0x2080d01c, the same 2108-byte block as the readable 0x2080901b) with \
-            pre-record, read-back and restore implemented; a write waits on \
-            authorisation, a healthy post-reboot session, and the field identity \
-            only the write itself can give. The measured window is reported in \
-            settings (see get-settings notes), and a --plan request is evaluated \
-            against that same snapshot without writing anything.",
+            pre-record, read-back and restore implemented, and --apply-candidate \
+            drives it; without that flag nothing is written. The measured window is \
+            reported in settings (see get-settings notes), and a --plan request is \
+            evaluated against that same snapshot without writing anything.",
+        },
         "plan": plan,
         "pre": pre,
         "under_load": load.under_load,
         "post": load.post,
         "stressor": load.stressor,
         "verifier": verifier,
+        "candidate": candidate.as_ref().map(|run| candidate_outcome(
+            opts.candidate.as_ref().map_or(0, |request| request.delta_khz),
+            &run.applied,
+            run.restored.as_ref(),
+        )),
+        "candidate_under_load": candidate.as_ref().map(|run| &run.under_load),
+        "candidate_stressor": candidate.as_ref().map(|run| &run.stressor),
+        "candidate_verifier": candidate.as_ref().map(|run| &run.verifier),
+        "candidate_post": candidate.as_ref().map(|run| &run.post),
+        "candidate_restored_settings": candidate.as_ref().map(|run| &run.post_restore_settings),
         "settings": settings,
     });
 
@@ -319,6 +455,12 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         return Err(error(format!(
             "the Vulkan stressor exited with {:?}",
             load.exit_code
+        )));
+    }
+    if let Some(run) = &candidate.filter(|run| run.exit_code != Some(0)) {
+        return Err(error(format!(
+            "the Vulkan stressor exited with {:?} while the candidate was held",
+            run.exit_code
         )));
     }
     Ok(())
