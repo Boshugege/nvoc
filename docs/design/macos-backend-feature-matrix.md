@@ -3851,3 +3851,17 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **④ 测试** ✔：`format_locked_state` 两条（MHz 渲染含 `6000.984`／空表打印 `no stored window`）；`validate(GetGpuLockedState)` 一条；`nvoc-cli` 106 passed；`cargo xtask ci` → `CI_EXIT=0`。
 
 **⑤ 未硬件验证** ✖：测试机仍未回来（`No route to host`，子网重扫仍是同样 7 台非目标机），本轮改动**只有编译、单测与 CI**。开机后第一批实测：`get-gpu-locked-state` 空表 → 写一次 → 再读（应出现一条记录，`+4` = 48）；以及 `GET /api/oc` 的 `locked_window` 不再为 `null`。
+
+## 二百二十九、"存下来的窗口"进到 GUI 后端；服务的 kHz→MHz 映射补了单测
+
+**① 服务侧** ✔：原先 `read_locked_window` 里内联的 `khz / 1000` 提成纯函数 `stored_window_mhz()` 并加单测，明确**除法是截断、取的是窗口的下界**（`1 620 500 kHz → 1620 MHz`，`1 799 999 → 1799`），不会被四舍五入报成超出窗口的值；`None` 穿透为 `None`。
+
+**② GUI 侧** ✔：
+- `NativeBackend.get_gpu_locked_state(gpu)`：跑 pynvoc 的新绑定，失败先 `_force_wake` 再试一次，仍失败返回 `None`（与既有 best-effort 读同一套写法）。**`None` 不等于空表**，调用方不能把它读成"没锁"。
+- `parsing.summarize_locked_state(payload)`：把最新一条记录折成一行（`stored window 1620.0-1800.0 MHz, memory 6001.0 MHz`）。**空表、无 payload、字段缺一半都返回 `None`**：GUI 分不清"卡上没存"和"问不到"，两者都不报数字，更不报 `0 MHz`。
+
+**③ 测试** ✔：`test_parsing.py` 两条（取最新记录并渲染内存时钟／`None`/空表/缺字段一律不报）；`nvoc-srv` macOS 单测 14 passed（含新增的映射用例）；`cargo xtask ci` → `CI_EXIT=0`（中途抓到 `gui/src/parsing.py` 未过 `ruff format`，已格式化）。
+
+**④ 未做** ✖：GUI 界面上**还没有**显示这一行（只做到后端与纯函数），TUI 同样未接。这是本轮**刻意停在的边界**：先让"能读到、能解析"这两层有测试，界面接线留到能上机验证的一轮。
+
+**⑤ 未硬件验证** ✖：测试机仍失联（第 4 轮），全部改动只有编译/单测/CI 证据。
