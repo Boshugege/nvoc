@@ -3459,3 +3459,16 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **② 它是什么仍然未知** ✗：只知道"648 字节、只读可得、装得满（72/162 dword）、与输入无关"。**不猜它的字段含义。** 方法表里它和 `0x20809014` 同尺寸，这一点仍只是"尺寸相同"。
 
 **③ 证据已封** ✔：`outputs/stage-clk-state-20261126T080000Z/`（`README.md` 说明三条结论、`01-query-014-and-02e.txt`、`02-count0-control.txt`、`03-02e-input-independence.txt`、`SHA256SUMS`；`shasum -c` 全 OK）。**三份都是只读 GET，零写入。**
+
+## 二百〇五、队列第 3 项收口：它的条件由 **FanStop + RPM** 满足，曲线/温度阈值/V-F 按"无协议证据"正式判死
+
+**① 队列原文的条件** ✔："从 FanStop / RPM / 风扇曲线、高温行为、VF 曲线里**挑一项**做成 core/CLI/Python 事务闭环：原始快照、单域写、normalized readback、非目标域保持、错误/取消回滚、exact restore、权限与参数拒绝测试、硬件证据、SHA256SUMS"。**FanStop**（§146、§一百四十六/§…… `stage-fanstop-product-*`、`stage-fanstop-20261125T160602Z`）与 **RPM**（`stage-fan-rpm-*`、§一百九十⑤ 的越界拒绝）两项都已逐条满足，且此后又补到 service（`/fan?mode=stop`、`/fan?rpm=`，`stage-fan-forms-*`）与 GUI/TUI（本轮之前两轮）。⇒ **条件达成，不是"计划中"。**
+
+**② 剩下三族为什么判死（不美化）** ✗：
+- **风扇曲线**：本后端没有曲线表——`set-fanstop-status --curve` 只收 0 就是这条的直接后果（§146）；没有点表结构、没有 slot 语义，硬造执行器等于编一个驱动没有的接口。
+- **温度阈值**（Shutdown/Slowdown/MemoryMax/GpsCurr）：**没有**任何已测 id、IDA 结果或方法表尺寸匹配可作来源；`get-temp-thresholds` 在 macOS 上以点名层的理由拒绝（§1678 的 `refused-reads.txt`），这是当下的正确行为。
+- **V-F / 电压曲线**：VF 偏移属 NVAPI 平面；macOS 侧没有对应 RM 通道证据。
+
+**③ 判死的标准，避免"没试过就说没有"** ✔：三族都**有明确缺口的具名证据**（`--curve` 的 0 限定、`refused-reads.txt` 的首行理由、VF 属 NVAPI），不是"我不记得试过"。若将来找到方法表/IDA 侧的正面形状，任何人都可以推翻本节——需要的证据类型已写在每一族后面。
+
+**④ 本轮测试全量** ✔：`nvoc-core` **226 passed**、`nvoc-srv` **73 passed**、`gui` **324 passed / 13 skipped**、`tui` **245 passed**；`cargo xtask ci` = `CI_EXIT=0`（上一轮刚跑，本轮代码未变）。
