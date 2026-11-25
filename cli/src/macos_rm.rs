@@ -218,8 +218,12 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                         // Read from the write's GET twin (0x20809040) while the
                         // write is in place: how many windows the driver holds,
                         // which the normalisation read cannot tell us.
-                        "stored_window_count": report.stored_window_count,
-                        "stored_window_note": "0x20809040's count; null means the twin read did not happen, not that nothing is locked",
+                        // The write's GET twin (0x20809040) while the write is in
+                        // place. The field is published raw: a zero background
+                        // and a probe-shaped request both answer 0 there, while
+                        // this write answered 48, so it is not established to be
+                        // a count of locked windows and must not be read as one.
+                        "twin_word_at_4": report.twin_word_at_4,
                         "floor_note": "the driver keeps the highest floor it has seen; a lower request is accepted and not applied",
                         "readback_verified": true, "restored_on_mismatch": true})
                 }

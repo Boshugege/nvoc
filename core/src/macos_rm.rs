@@ -2095,7 +2095,7 @@ impl Device {
             session.write_locked_clocks(request)?;
             // While the write is in place, ask the twin what is stored. This is
             // the piece the normalisation read cannot answer.
-            let stored_window_count = session.read_locked_state_count().ok();
+            let twin_word_at_4 = session.read_locked_state_count().ok();
             let applied = session.read_locked_clocks(request)?;
             if let Some((want, got)) = macos_lock::first_stable_difference(&expected, &applied) {
                 let rollback: Result<(), String> = (|| {
@@ -2128,7 +2128,7 @@ impl Device {
                 requested: request.to_vec(),
                 snapshot: expected,
                 applied,
-                stored_window_count,
+                twin_word_at_4,
             })
         })();
         let closed = session.close();

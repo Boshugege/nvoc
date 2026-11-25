@@ -124,10 +124,15 @@ pub struct LockedClockWriteReport {
     pub requested: Vec<LockWindow>,
     pub snapshot: Vec<LockWindow>,
     pub applied: Vec<LockWindow>,
-    /// How many windows the twin read (`0x20809040`) reports as locked while the
-    /// write is in place. `None` when that read did not happen: a missing count
-    /// is not a count of zero.
-    pub stored_window_count: Option<u32>,
+    /// The dword the twin read (`0x20809040`) leaves at offset 4 while the write
+    /// is in place. `None` when that read did not happen.
+    ///
+    /// It is **not** known to be a count of locked windows: a zero background
+    /// answers 0, a probe-shaped 100..200 MHz request answers 0, and this
+    /// product's in-place 1620..1700 MHz write answered **48**, which is not a
+    /// plausible number of locked windows. It is published as a raw field with
+    /// no interpretation.
+    pub twin_word_at_4: Option<u32>,
 }
 
 /// Read the window count out of a `0x20809040` block.
@@ -649,7 +654,7 @@ mod state_count_tests {
     #[test]
     fn a_format_word_and_count_are_read_back() {
         assert_eq!(parse_state_count(&block_with(FORMAT_WORD, 0)).unwrap(), 0);
-        assert_eq!(parse_state_count(&block_with(FORMAT_WORD, 2)).unwrap(), 2);
+        assert_eq!(parse_state_count(&block_with(FORMAT_WORD, 48)).unwrap(), 48);
     }
 
     #[test]
