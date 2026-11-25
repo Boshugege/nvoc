@@ -68,7 +68,13 @@ fn macos_eval_command() -> Command {
              clean -- not that the candidate is fast or stable. Repeat the flag two or \
              three times for a sweep: the baseline window is measured twice, the spread \
              between those two windows is the noise floor, and a candidate inside it is \
-             reported as indistinguishable instead of being promoted.",
+             reported as indistinguishable instead of being promoted.\n\n\
+             --apply-locked-window MIN:MAX is the same round trip on the locked-clock \
+             channel: one window in through the validated 648-byte block, held for the \
+             same load, verified, then the window the driver already stored written back \
+             and the table read again. It is refused before the write channel opens when \
+             there is nothing to put back (this driver cannot reset a locked window) and \
+             when the stored window is already the one asked for.",
         )
         .arg(
             Arg::new("duration")
@@ -235,6 +241,23 @@ fn macos_eval_command() -> Command {
                      --apply-candidate graphics=-25mhz. TARGET must be a public domain this \
                      backend can address (graphics or memory); DELTA is signed kHz, \
                      optionally suffixed khz/mhz. Refused together with --dry-run",
+                ),
+        )
+        .arg(
+            Arg::new("apply-locked-window")
+                .long("apply-locked-window")
+                .value_name("MIN:MAX")
+                .num_args(1)
+                .help(
+                    "Apply one locked-clock window (MHz, MIN:MAX on the graphics domain at the \
+                     default vPstate), hold it for the same bounded load, verify, then write the \
+                     window the driver already stored back and read the table again, e.g. \
+                     --apply-locked-window 1620:1800. Refused before any write when the driver \
+                     stores no window to put back (the reset entry does not work against this \
+                     driver, so a reboot would be the only way out) and when the stored window is \
+                     already the one asked for (a repeated identical write still appends a \
+                     record and would prove nothing). Refused with --dry-run and alongside \
+                     --apply-candidate: one write channel per run",
                 ),
         )
         .arg(

@@ -65,7 +65,7 @@ pub use macos_eval::{
     OffsetVerdict, PLAN_NOTE, PlanDocument, PlanRequest, REPEAT_NOTE, ReproducedVerdict,
     SWEEP_IDLE_NOTE, SWEEP_NOTE, Stats, SweepVerdict, THROUGHPUT_NOTE, ThrottleSummary,
     ThroughputDelta, candidate_outcome, clock_agreement, clock_delta_percent, clock_window,
-    cooldown_expired, fps_tail, limit_verdict, load_evidence, load_summary,
+    cooldown_expired, fps_tail, limit_verdict, load_evidence, load_summary, locked_candidate_guard,
     locked_candidate_outcome, metal_throughput, needs_cooldown, noise_floor, offset_potential,
     offset_verdict, parse_plan_requests, plan_document, promotion_gate, rank_sweep,
     reproduce_sweeps, resolution_warning, stats, step_percent, throttle_summary, throughput_delta,

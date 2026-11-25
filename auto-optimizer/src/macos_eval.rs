@@ -22,9 +22,9 @@
 use clap::ArgMatches;
 use nvoc_core::{
     ClockDomain, DeviceStatus, Error, GpuTarget, LoadThroughput, OffsetStepTarget, PlanRequest,
-    QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus, SetMacosRmClockOffset,
-    candidate_outcome, fps_tail, load_summary, metal_throughput, parse_plan_requests,
-    plan_document, run, throughput_delta,
+    QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus, ReadMacosRmLockedState,
+    SetMacosRmClockOffset, SetMacosRmLockedClocks, candidate_outcome, fps_tail, load_summary,
+    metal_throughput, parse_plan_requests, plan_document, run, throughput_delta,
 };
 use serde_json::{Value, json};
 
@@ -92,6 +92,9 @@ pub struct StockEvalOptions {
     /// unknown write per boot, so a sweep is a sequence of boots, not a loop.
     /// Zero means "no sweep cap" and is only sensible for a hand-written list.
     pub sweep_max_per_boot: usize,
+    /// One locked-clock window candidate, in kHz, on the graphics domain at the
+    /// default vPstate. `None` keeps the locked channel untouched.
+    pub locked_window_khz: Option<(u32, u32)>,
 }
 
 fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
@@ -150,6 +153,20 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
              apply/measure/restore transaction and more than that is a scanner's job"
         )));
     }
+    let locked_windows: Vec<String> = matches
+        .get_many::<String>("apply-locked-window")
+        .map(|values| values.cloned().collect())
+        .unwrap_or_default();
+    let locked_window_khz = match locked_windows.as_slice() {
+        [] => None,
+        [spec] => Some(parse_locked_window(spec)?),
+        _ => {
+            return Err(error(
+                "--apply-locked-window takes one window per run: one apply/hold/restore \
+                 transaction, and a sweep of windows belongs in a sequence of boots",
+            ));
+        }
+    };
     let sweep_max_per_boot = matches
         .get_one::<u32>("sweep-max-per-boot")
         .copied()
@@ -163,6 +180,21 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         return Err(error(
             "--apply-candidate writes an offset and cannot be combined with --dry-run;              use --plan to evaluate the same candidate without writing it",
         ));
+    }
+    if locked_window_khz.is_some() {
+        if dry_run {
+            return Err(error(
+                "--apply-locked-window writes a window and cannot be combined with --dry-run; \
+                 the stored table it would have to put back is what --plan reports without \
+                 writing anything",
+            ));
+        }
+        if !candidates.is_empty() {
+            return Err(error(
+                "--apply-locked-window and --apply-candidate are two write channels; run them in \
+                 separate boots so one round trip's restore is not holding while another writes",
+            ));
+        }
     }
     let metal_load = matches
         .get_one::<String>("load-source")
@@ -204,7 +236,41 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         candidates,
         resume_file,
         sweep_max_per_boot,
+        locked_window_khz,
     })
+}
+
+/// Parse `MIN:MAX` (MHz) into the kHz pair the control block carries.
+///
+/// Both bounds are mandatory: the driver validates the pair and refuses a zero
+/// bound with `0xd`, so a default here would be a window nobody asked for.
+fn parse_locked_window(spec: &str) -> Result<(u32, u32), Error> {
+    let (min_text, max_text) = spec.split_once(':').ok_or_else(|| {
+        error(format!(
+            "--apply-locked-window expects MIN:MAX in MHz, got '{spec}'"
+        ))
+    })?;
+    let bound = |text: &str, name: &str| -> Result<u32, Error> {
+        let mhz: u32 = text.trim().parse().map_err(|_| {
+            error(format!(
+                "--apply-locked-window {name} is not an integer number of MHz: '{text}'"
+            ))
+        })?;
+        if mhz == 0 {
+            return Err(error(
+                "--apply-locked-window bounds must be above zero: the driver refuses a zero \
+                 bound with 0xd rather than reading it as 'no limit'",
+            ));
+        }
+        Ok(mhz.saturating_mul(1000))
+    };
+    let (min_khz, max_khz) = (bound(min_text, "MIN")?, bound(max_text, "MAX")?);
+    if min_khz > max_khz {
+        return Err(error(format!(
+            "--apply-locked-window has MIN above MAX ({min_khz} > {max_khz} kHz)"
+        )));
+    }
+    Ok((min_khz, max_khz))
 }
 
 /// The clocks a window's own samples reported.
@@ -530,6 +596,89 @@ fn run_candidate(
     })
 }
 
+/// One locked-window round trip, held and measured like an offset candidate.
+struct LockedCandidateRun {
+    /// The window the driver already stored, which is what the round trip has
+    /// to put back. Settled by the guard before any write.
+    restore_target_khz: (u32, u32),
+    applied: nvoc_core::macos_lock::LockedClockWriteReport,
+    restored: Option<nvoc_core::macos_lock::LockedClockWriteReport>,
+    /// The newest window the table holds after the restore, read separately: the
+    /// restore's own report is the driver's answer to the write, not a read of
+    /// its table.
+    stored_after_khz: Option<(u32, u32)>,
+    under_load: Value,
+    stressor: Value,
+    verifier: Value,
+    exit_code: Option<i32>,
+    post: Value,
+    post_restore_settings: Value,
+}
+
+/// Apply one locked window, hold it for the bounded load, verify, then write the
+/// stored window back.
+///
+/// The guard runs first: a candidate with no stored window behind it has no way
+/// back except a reboot, and one equal to the stored window would append a
+/// record without changing anything, so both are refused before the write
+/// channel is opened at all.
+fn run_locked_candidate(
+    gpu: &GpuTarget<'_>,
+    opts: &StockEvalOptions,
+    window_khz: (u32, u32),
+) -> Result<LockedCandidateRun, Error> {
+    let stored = run(gpu, ReadMacosRmLockedState)?.output.stored_window();
+    let restore_target_khz =
+        nvoc_core::locked_candidate_guard(stored, window_khz).map_err(error)?;
+    let window = |(min_khz, max_khz): (u32, u32)| {
+        nvoc_core::LockWindow::new(8, nvoc_core::macos_lock::DOMAIN_GRAPHICS, min_khz, max_khz)
+    };
+    let applied = run(
+        gpu,
+        SetMacosRmLockedClocks {
+            request: vec![window(window_khz)],
+        },
+    )?
+    .output;
+    let held = (|| {
+        let load = run_bounded_load(gpu, opts)?;
+        let verifier = run_verifier(opts.metal_check.as_ref(), false)?;
+        Ok::<_, Error>((load, verifier))
+    })();
+    // The restore is attempted whether or not the hold went well, and a restore
+    // that does not happen is reported as its absence rather than assumed.
+    let restored = run(
+        gpu,
+        SetMacosRmLockedClocks {
+            request: vec![window(restore_target_khz)],
+        },
+    )
+    .map(|out| out.output)
+    .ok();
+    let stored_after_khz = run(gpu, ReadMacosRmLockedState)
+        .ok()
+        .and_then(|out| out.output.stored_window());
+    let post_restore_settings = run(gpu, QueryMacosRmSettings)
+        .and_then(|out| {
+            serde_json::to_value(&out.output)
+                .map_err(|e| error(format!("failed to serialise the restored settings: {e}")))
+        })
+        .unwrap_or(Value::Null);
+    let (load, verifier) = held?;
+    Ok(LockedCandidateRun {
+        restore_target_khz,
+        applied,
+        restored,
+        stored_after_khz,
+        under_load: load.under_load,
+        stressor: load.stressor,
+        verifier,
+        exit_code: load.exit_code,
+        post: load.post,
+        post_restore_settings,
+    })
+}
+
 /// One finished candidate, as the resume ledger records it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeEntry {
@@ -812,6 +961,13 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         round_repeats.push(repeat);
         round_runs.push(this_round);
     }
+    // The locked channel is a round trip of its own: one window in, held, and
+    // the stored one written back. It never shares a boot with an offset
+    // candidate (refused at parse time), so it runs after the offset rounds.
+    let locked_candidate = match opts.locked_window_khz {
+        Some(window_khz) => Some(run_locked_candidate(gpu, &opts, window_khz)?),
+        None => None,
+    };
     let runs: Vec<(PlanRequest, CandidateRun)> = round_runs.first().cloned().unwrap_or_default();
     let candidate = runs.first().map(|(_, run)| run);
     let baseline_repeat = round_repeats.first().and_then(|r| r.as_ref());
@@ -1103,6 +1259,8 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         },
         "mode": if opts.dry_run {
             "dry-run"
+        } else if locked_candidate.is_some() {
+            "locked-candidate"
         } else if runs.len() > 1 {
             "sweep"
         } else if runs.len() == 1 {
@@ -1110,14 +1268,33 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         } else {
             "stock-load"
         },
-        "settings_written": round_runs
-            .iter()
-            .flatten()
-            .all(|(_, run)| run.applied.readback_verified && run.restored.is_some())
-            && round_runs.iter().flatten().next().is_some(),
+        // True only when a write happened *and* every write was put back. The
+        // locked channel counts too: its restore is the only way out of a
+        // window on this backend.
+        "settings_written": match &locked_candidate {
+            Some(run) => run.restored.is_some(),
+            None => {
+                round_runs
+                    .iter()
+                    .flatten()
+                    .all(|(_, run)| run.applied.readback_verified && run.restored.is_some())
+                    && round_runs.iter().flatten().next().is_some()
+            }
+        },
         "sweep": sweep,
         "repeat": repeat,
-        "write_gate": match &candidate {
+        "write_gate": if let Some(run) = &locked_candidate {
+            if run.restored.is_some() {
+                "write: one locked window was applied through the validated 648-byte block, held \
+                 for a bounded load, and the window the driver already stored was written back \
+                 and the table read again. See the locked_candidate section: `settled` is about \
+                 the round trip, `storage_matches_applied` is what the driver's own table said \
+                 while the candidate was in place."
+            } else {
+                "write attempted, restore NOT read back: the locked window is not known to be \
+                 back where it started. Re-read the table before trusting the board."
+            }
+        } else { match &candidate {
             Some(run) => if run.restored.is_some() {
                 "write: one candidate offset was applied to one clock domain through \
                  its own 2108-byte record, held for a bounded load, and restored to the \
@@ -1134,7 +1311,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             drives it; without that flag nothing is written. The measured window is \
             reported in settings (see get-settings notes), and a --plan request is \
             evaluated against that same snapshot without writing anything.",
-        },
+        } },
         "plan": plan,
         "pre": pre,
         "under_load": load.under_load,
@@ -1156,6 +1333,32 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             _ => None,
         },
         "verifier": verifier,
+        // The locked-window round trip, when one was asked for. It is reported
+        // beside the offset candidate rather than folded into it: the two write
+        // channels carry different records and different witnesses.
+        "locked_candidate": locked_candidate.as_ref().map(|run| {
+            let outcome = nvoc_core::locked_candidate_outcome(&run.applied, run.restored.as_ref());
+            json!({
+                "outcome": outcome,
+                "restore_target_khz": {
+                    "min_khz": run.restore_target_khz.0,
+                    "max_khz": run.restore_target_khz.1,
+                },
+                // Read after the restore: the newest window the driver's own
+                // table holds now, which is the only witness that the window
+                // came back (the restore's report answers the write, not a read).
+                "stored_after_khz": run.stored_after_khz.map(|(min_khz, max_khz)| json!({
+                    "min_khz": min_khz,
+                    "max_khz": max_khz,
+                })),
+                "under_load": run.under_load,
+                "stressor": run.stressor,
+                "verifier": run.verifier,
+                "post": run.post,
+                "exit_code": run.exit_code,
+                "restored_settings": run.post_restore_settings,
+            })
+        }),
         "candidate": candidate.as_ref().map(|run| candidate_outcome(
             runs.first().map_or(0, |(request, _)| request.delta_khz),
             &run.applied,
@@ -1248,6 +1451,45 @@ mod resume_tests {
         assert!(parse_resume_ledger("").is_empty());
         assert!(parse_resume_ledger("\n  \n").is_empty());
         assert!(!resume_skips(&[], "graphics", 0));
+    }
+}
+
+#[cfg(test)]
+mod locked_window_arg_tests {
+    use super::*;
+
+    #[test]
+    fn a_window_is_read_in_mhz_and_kept_in_khz() {
+        assert_eq!(
+            parse_locked_window("1620:1800").unwrap(),
+            (1_620_000, 1_800_000)
+        );
+        // A single-value window is legal: the driver accepts min == max.
+        assert_eq!(
+            parse_locked_window("1700:1700").unwrap(),
+            (1_700_000, 1_700_000)
+        );
+    }
+
+    #[test]
+    fn a_zero_bound_is_refused_rather_than_read_as_no_limit() {
+        let err = parse_locked_window("0:1800").unwrap_err().to_string();
+        assert!(err.contains("above zero"), "{err}");
+        assert!(err.contains("0xd"), "{err}");
+    }
+
+    #[test]
+    fn a_reversed_window_is_refused() {
+        let err = parse_locked_window("1800:1620").unwrap_err().to_string();
+        assert!(err.contains("MIN above MAX"), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_window_names_what_it_wanted() {
+        let err = parse_locked_window("1620").unwrap_err().to_string();
+        assert!(err.contains("MIN:MAX"), "{err}");
+        let err = parse_locked_window("1620:fast").unwrap_err().to_string();
+        assert!(err.contains("not an integer"), "{err}");
     }
 }
 
