@@ -65,6 +65,10 @@ pub struct StockEvalOptions {
     pub metal_load: bool,
     pub stress_elements: u64,
     pub stress_iters: u64,
+    /// Elements per dispatch the load window verifies. Full verification makes
+    /// the CPU the bottleneck (see the option's help), so the load samples it;
+    /// the correctness window keeps verifying every element.
+    pub stress_verify_sample: u64,
     pub plan: Vec<PlanRequest>,
     /// One candidate applies a write half and puts it back; two or three make a
     /// sweep, which additionally repeats the baseline window so the run can
@@ -150,6 +154,9 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         stress_iters: *matches
             .get_one::<u64>("stress-iters")
             .ok_or_else(|| error("missing --stress-iters"))?,
+        stress_verify_sample: *matches
+            .get_one::<u64>("stress-verify-sample")
+            .ok_or_else(|| error("missing --stress-verify-sample"))?,
         plan: parse_plan_requests(&plan_values)?,
         candidates,
     })
@@ -188,6 +195,8 @@ fn run_bounded_load(gpu: &GpuTarget<'_>, opts: &StockEvalOptions) -> Result<Load
             .arg(opts.stress_elements.to_string())
             .arg("--iters")
             .arg(opts.stress_iters.to_string())
+            .arg("--verify-sample")
+            .arg(opts.stress_verify_sample.to_string())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         return sample_while_loaded(command, gpu, opts);
@@ -584,6 +593,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             },
             "stress_elements": opts.stress_elements,
             "stress_iters": opts.stress_iters,
+            "stress_verify_sample": opts.stress_verify_sample,
             "plan_requests": opts.plan.len(),
         },
         "mode": if opts.dry_run {

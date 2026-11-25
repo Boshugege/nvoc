@@ -157,6 +157,23 @@ fn macos_eval_command() -> Command {
                 .help("Metal load: iterations per thread (ignored by --load-source vulkan)"),
         )
         .arg(
+            Arg::new("stress-verify-sample")
+                .long("stress-verify-sample")
+                .value_name("N")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u64))
+                .default_value("256")
+                .help(
+                    "Metal load: verify at most N evenly spread elements per dispatch \
+                     (0 = every element). Full verification recomputes the hash on the CPU \
+                     for each checked element, which makes the CPU the bottleneck and leaves \
+                     the GPU idle -- measured on the test card: full verification ran 143 \
+                     dispatches in 60 s with the clock at its idle 1530 MHz, while sampling \
+                     256 ran 668 dispatches in 20 s at 1950 MHz. The correctness window \
+                     (`--metal-check` run as the verifier) still verifies every element",
+                ),
+        )
+        .arg(
             Arg::new("apply-candidate")
                 .long("apply-candidate")
                 .value_name("TARGET=DELTA")

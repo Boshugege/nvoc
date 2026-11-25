@@ -398,7 +398,9 @@ pub const THROUGHPUT_NOTE: &str = "Throughput is the verifier's own dispatched-a
 count divided by its own elapsed time. A delta between two windows is reported as a \
 comparison, not as a verdict: the windows are separate short runs on a power-limited \
 card, so a difference inside the run-to-run spread is noise, and matching numbers on a \
-power-capped window do not mean a candidate had no effect.";
+power-capped window do not mean a candidate had no effect. A window whose \
+verified_full_buffer is false checked a sample of each dispatch, not the whole buffer: \
+that window measures load, and the separate verifier run is what proves correctness.";
 
 /// The two windows on one number, or `None` when there is nothing to divide by.
 #[derive(Debug, Clone, PartialEq, Serialize)]
