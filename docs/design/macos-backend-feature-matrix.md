@@ -3022,3 +3022,23 @@ potential: window -18.75..18.75 MHz at clock 1530.0 MHz -> -1.225 % .. 1.225 %
 **④ 仍然空着的（不美化）** ✗：`/api/oc` 的 `power`/`temp` 仍为 `null`（板卡 min/max 与温度墙窗口在本驱动读不到）；OC 表单的温度滑条在 macOS 上仍应只读。
 
 **⑤ 证据** ✔：`outputs/stage-srv-oc-readback-20261125T202411Z/`（4 文件）与 `outputs/stage-srv-oc-readback-20261125T202800Z/`（4 文件），各有 `SHA256SUMS`；服务实例每次只活约 6 秒，收尾确认无残留进程；风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
+
+## 一百七十八、Python 侧也拿到窗口与它的价值
+
+**① 缺口** ✗→✔：pynvoc 的 settings 文档此前只有 `clock_offset_min_khz/-max_khz/records`，Python 调用者无法把"18750 kHz"和"这卡跑多快"对上。现在文档里有 `clock_offset_window`：`{min_khz, max_khz, records, potential}`，`potential` 与 CLI/`/api/oc` 是**同一个 core 函数**（`offset_potential`），三处不会漂。
+
+**② 真机验证** ✔（`pynvoc.query_settings("0x0100", "macos-rm")`，扩展按仓库自己的命令重建）：
+
+```json
+"clock_offset_window": {"min_khz": -18750, "max_khz": 18750, "records": 3,
+  "potential": {"clock_mhz": 1530.0, "max_percent": 1.2254901960784315,
+                "min_percent": -1.2254901960784315, "window_max_mhz": 18.75, ...}}
+```
+
+分母是**同一次快照**的 graphics clock；状态读失败不会让 settings 读失败（百分数变 `null`，不是崩）。
+
+**③ 未读到时给原因** ✔：没有窗口时不出现 `clock_offset_window`，而出现 `clock_offset_window_unavailable`（原因取自偏移通道 note 原文）。新单测 `macos_rm_settings_report_an_unread_window_as_a_reason` 断言这一点；既有用例增加窗口断言（`clock_mhz 6000.984` ⇒ `max_percent ≈ 0.3125`）。`cargo test -p pynvoc --no-default-features` ⇒ **21 passed**。
+
+**④ 我自己的坑（留档）** ✔：第一次跑空是选卡参数错——`query_settings` 的第一参数要求字符串标识（`"0x0100"` 或 `"0"`），传 int 报 `'int' object is not an instance of 'str'`，传 PCI 地址报 `no GPU selected`；另外 `maturin develop` 需要 `~/.local/bin` 与 `~/.cargo/bin` 都在 PATH 里、且 `-m nvoc-python/Cargo.toml`（workspace 根的 `pyproject.toml` 没有 `build-system`，直接跑会报 `missing field build-system`）。
+
+**⑤ 证据** ✔：`outputs/stage-pynvoc-offsetwindow-20261125T203444Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
