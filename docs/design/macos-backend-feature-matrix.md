@@ -3562,3 +3562,21 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **⑤ 尚未建立** ✗：`count>0` 的答案长什么样——本轮没有任何窗口被留在锁上，所以看不到非空样本。这是下一件事（需要一次"应用后不立刻回滚"的观察窗口，或用 9040 参与 SET 事务的验证）。
 
 **⑥ 边界** ✔：两条都是只读 GET；本 boot 只有一个未知 id（`0x20809040`），分两种形状读。证据 `outputs/stage-lock-twin-20261126T091500Z/`（`twin.txt`、`twin2.txt`、`ledger.jsonl`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百一十二、把孪生读装进写事务：拿到一个数（48），但它**不是**锁窗口数——所以只发原始字段
+
+**① 代码改动** ✔：`0x20809040 @4808` 现在在 SET 事务里读一次（`session.write_locked_clocks` 之后、归一化回读之前），结果放进写报告。解析只取 offset 0 的 format 字与 offset 4 的 dword，**entry 布局不解析**（没人见过 count>0 的真实样本）。
+
+**② 实测** ✔：`set-gpu-locked-clocks --min-mhz 1620 --max-mhz 1700` 在写生效的瞬间，`0x20809040` 的 offset 4 是 **48**。
+
+**③ 但这个 48 不是"锁了几个窗口"** ✗：同一条 id 在
+- 零背景时是 **0**，
+- probe 形状（100..200 MHz，format 1 / count 1 / vP8 / graphics）时也是 **0**，
+
+48 对"锁窗口数"完全不像。所以本轮**把字段改名成 `twin_word_at_4` 并按原始值发布**，注释写明"未确立含义，不得当作计数读"。我在同一轮里先写了 `stored_window_count` 这个会误导的名字，发现 48 之后立刻改掉——**能自证错的命名，比解释它为什么合理更重要**。
+
+**④ 仍未建立** ✗：offset 4 的语义（是表长度？domain 数？还是别的），以及 count>0 的真实 entry 布局。下一步要看 4808 字节里 offset 8 之后有没有稳定结构，并且**不能靠猜**。
+
+**⑤ 边界** ✔：写仍是完整事务（快照→SET→归一化回读→孪生读→回滚），偏移读回 `Restore kHz: 0`；twin 读失败时字段是 `null`，**不是 0**。
+
+**⑥ 测试与证据** ✔：`nvoc-core` 229 passed（新增 3 条：format+count 解析、零块被拒而不是读成"没有锁"、短块被拒）；整个 `cargo xtask ci` = `CI_EXIT=0`。证据 `outputs/stage-lock-twin-intx-20261126T093000Z/`（`set-in-place.json`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
