@@ -2635,8 +2635,13 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
          * vPstate 8, the graphics domain bit, and the window the CLI was asked
          * for (100 MHz .. 200 MHz).  If the driver normalises anything, this is
          * the shape that shows it. */
-        { "lock-query count0 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 0u,
-          lock_request_count0, 2u },
+        /* The GSP family map pairs every 648-byte CLK GET with a SET twin:
+         * 0x20809014 <-> 0x2080d015, 0x2080902e <-> 0x2080d02f, and -- the one
+         * the product actually writes -- 0x2080d041 <-> 0x20809040, whose GET
+         * size is 4808, not 648.  So the read that corresponds to the write is
+         * this family, and 0x20809014 is a different one.  Read-only, one
+         * unknown id this boot. */
+        { "lock-twin 0x20809040 @4808", 0x20809040u, 4808u, ~0u, 0u, 0u },
         { "lock-query vP8 100/200 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 0u,
           lock_request, 6u },
         { "lock-query vP8 100/200 0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u,
