@@ -187,7 +187,18 @@ mod control {
                         "fan control record publishes no cooler max rpm (read {max_rpm}); an rpm target has no scale"
                     )));
                 }
-                let value = value.min(max_rpm);
+                // Refuse rather than clamp: the cooler publishes the span it
+                // turns through, and a request past it is a request the driver
+                // cannot honour (its duty fraction tops out at full scale). Same
+                // rule as the power and thermal windows, so a user never has to
+                // guess whether a number was taken as given or quietly bent.
+                if value > max_rpm {
+                    return Err(Error::Custom(format!(
+                        "{value} rpm is outside the span this cooler publishes (0 .. {max_rpm} rpm), \
+                         and the driver takes a duty fraction rather than an rpm, so the request was \
+                         refused instead of rounded down to full scale"
+                    )));
+                }
                 wanted[36..40].copy_from_slice(&1u32.to_le_bytes());
                 // Round to nearest and clamp at full scale: the driver only takes
                 // a Q16 duty fraction, so the request cannot land below or above it.
@@ -418,16 +429,22 @@ mod control {
             wanted[36..40].copy_from_slice(&1u32.to_le_bytes());
             wanted[40..44].copy_from_slice(&32768u32.to_le_bytes());
             assert_eq!(io.b, wanted);
-            // Above the ceiling clamps to full scale instead of overflowing 100 percent.
-            apply(
+            // Above the ceiling is refused, naming the span the cooler publishes,
+            // and the block is untouched: the previous target stays in force.
+            let before_refusal = io.b;
+            let err = apply(
                 &mut io,
                 &info,
                 &status,
                 FanControlTarget::Rpm(6000),
                 &|| false,
             )
-            .unwrap();
-            assert_eq!(u32::from_le_bytes(io.b[40..44].try_into().unwrap()), 65536);
+            .unwrap_err()
+            .to_string();
+            assert!(err.contains("6000 rpm"), "{err}");
+            assert!(err.contains("0 .. 2800 rpm"), "{err}");
+            assert!(err.contains("refused instead of rounded down"), "{err}");
+            assert_eq!(io.b, before_refusal);
             apply(&mut io, &info, &status, FanControlTarget::Auto, &|| false).unwrap();
             assert_eq!(io.b, before);
         }
