@@ -2742,3 +2742,18 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **③ 真机结果** ✔：`graphics=-25mhz` 被参数门拒绝（退出码 1，`must be within -18750..18750 kHz`，无写入）；`graphics=-15mhz` ⇒ `applied_khz -15000`、`apply_verified true`、`other_bytes_preserved true`、`restored_khz 0`、`restore_verified true`、`settled true`；两轮带载时钟都是 **1530 MHz**（n=16，min=mean=max），两轮 Metal 验算都 `passed: true`；带载进程 `elapsed 26.6 s`、`exit_code 0`。复位后逐字回到运行前：偏移 `0 kHz`、窗口 `graphics vP8 1620/1700`、风扇 `auto`/2800、板卡 `100 W`（70–100）、电源 `ac`。
 
 **④ 边界（不美化）** ✗：**带载时钟一个数都没动**（1530 → 1530）——这个窗口本身功耗受限（100 W 板卡），-15 MHz 的加法偏移本轮没有可观测量级的效果。所以本轮证明的是"候选能被应用、被驱动自己回读确认、被精确复位、整轮 round trip 干净"，**不**证明"更快/更好"；`settled` 只声明 round trip。只应用一个候选（多候选被参数门拒绝，扫参数属扫描器职责）；20 秒窗口不是稳定性认证。证据：`outputs/stage-eval-candidate-20261125T162340Z/`（10 个文件 + `SHA256SUMS`）。
+
+## 一百五十九、闭环有分了：用验证器自己的吞吐量对比两轮窗口，并说明它测不出什么
+
+**① 补的是什么** ✔：上一轮（第一百五十八节）证了候选能应用/复位，但报告里没有任何可比数字，"有没有用"无从回答。`metal_check` 自己打一行 JSON（dispatch 次数、验证次数、耗时），core 新增 `metal_throughput()` 读成 `LoadThroughput`（`iterations` / `verified` / `failures` / `elapsed_ms` / `iterations_per_second`），`throughput_delta()` 把两轮并成百分比；报告新增 `under_load_throughput`、`candidate_throughput`、`candidate_comparison`。无可比对象时报 `null` 而不是"无限提升"，`note` 写明 delta 是**比较**不是判决。
+
+**② 真机同候选两种粒度** ✔：
+
+| 粒度 | baseline | 候选 | delta | round trip |
+| --- | --- | --- | --- | --- |
+| `--stress-iters 20000`（20 s 仅 5 次迭代） | 0.23834 /s | 0.23798 /s | **-0.152%** | `settled: true` |
+| `--stress-iters 2000`（20 s 有 48 次迭代） | 2.38131 /s | 2.38154 /s | **+0.0099%** | `settled: true` |
+
+两轮 `verified == iterations`、`failures: 0`、`verified_full_buffer: true`；带载时钟均 `1530 MHz`（n=13/16，min=mean=max）；复位后偏移 `0 kHz`、窗口 `1620/1700`、风扇 `auto`/2800、板卡 `100 W`、`ac`。
+
+**③ 读法（不美化）** ✗：粗粒度那格是**噪声**——20 s 只 5 次迭代，末位量化约 ±20%，-0.15% 不能说成"变慢"。细粒度那格量化约 ±2%，实测差 0.0099% ⇒ **这条 -15 MHz 偏移在这个功耗受限窗口里没有可测吞吐效果**。所以本轮补的是"能测"和"测出来是什么"，不是"候选没价值"；要判价值需要一个能放开功耗/锁频的窗口。20 秒窗口不是稳定性认证。证据：`outputs/stage-eval-score-20261125T163024Z/`（11 个文件 + `SHA256SUMS`）。
