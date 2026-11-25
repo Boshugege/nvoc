@@ -9,7 +9,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
-from src.parsing import summarize_locked_state
+from src.parsing import summarize_locked_history, summarize_locked_state
 from src.platform import api_label_default, api_labels, is_macos, macos_duty_seed
 from src.tabs.dashboard.sections.fan import FanControlPane
 from src.widgets.lightweight_controls import (
@@ -1179,23 +1179,32 @@ class OverclockTab:
             except Exception:
                 payload = None
             text = summarize_locked_state(payload)
+            # A second line only when the table holds more than one window: the
+            # count is about what this boot was told, the window above is about
+            # what is locked now, and neither replaces the other.
+            history = summarize_locked_history(payload)
             try:
                 # The gpu rides along: a switch landing mid-flight must not
                 # report the old card's window against the new selection.
                 self.frame.after(
-                    0, lambda: self._on_stored_locked_state_loaded(text, gpu)
+                    0, lambda: self._on_stored_locked_state_loaded(text, history, gpu)
                 )
             except Exception:
                 pass
 
         self.app.run_background("locked-state", worker)
 
-    def _on_stored_locked_state_loaded(self, text: Optional[str], gpu: str) -> None:
-        if text is None:
+    def _on_stored_locked_state_loaded(
+        self, text: Optional[str], history: Optional[str], gpu: str
+    ) -> None:
+        if text is None and history is None:
             return
         if gpu != self.app.selected_gpu_target():
             return
-        self._log_oc_message(f"driver stores {text}\n")
+        if text is not None:
+            self._log_oc_message(f"driver stores {text}\n")
+        if history is not None:
+            self._log_oc_message(f"driver table: {history}\n")
 
     def _fetch_fabric_relations(self, gpu: str) -> Optional[dict]:
         """Read the driver's master → slave relation from the private V/F

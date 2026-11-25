@@ -18,6 +18,7 @@ from src.parsing import (
     parse_supported_pstates,
     parse_vfp_lock_bounds,
     route_for_index,
+    summarize_locked_history,
     summarize_locked_state,
     write_vfp_points,
 )
@@ -221,6 +222,31 @@ def test_summarize_locked_state_reads_the_newest_record() -> None:
     assert summarize_locked_state(payload) == (
         "stored window 1620.0-1800.0 MHz, memory 6001.0 MHz"
     )
+
+
+def test_summarize_locked_history_counts_more_than_one_window() -> None:
+    payload = {
+        "count_at_4": 96,
+        "records": [
+            {"offset": 16, "min_khz": 1_700_000, "max_khz": 1_700_000},
+            {"offset": 64, "min_khz": 1_620_000, "max_khz": 1_800_000},
+        ],
+    }
+    assert summarize_locked_history(payload) == (
+        "2 stored windows since the driver loaded (driver counter 96)"
+    )
+
+
+def test_summarize_locked_history_stays_quiet_for_one_window_or_none() -> None:
+    # One window is already the line above it; nothing to add.
+    assert (
+        summarize_locked_history({
+            "records": [{"offset": 16, "min_khz": 1_620_000, "max_khz": 1_800_000}]
+        })
+        is None
+    )
+    assert summarize_locked_history(None) is None
+    assert summarize_locked_history({"count_at_4": 0, "records": []}) is None
 
 
 def test_summarize_locked_state_says_nothing_rather_than_zero() -> None:

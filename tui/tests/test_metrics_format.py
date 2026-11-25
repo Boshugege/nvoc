@@ -317,7 +317,17 @@ def test_locked_state_text_reads_the_newest_record() -> None:
             },
         ],
     }
-    assert locked_state_text(payload) == "locked 1620.0-1800.0 MHz | MEM 6001.0 MHz"
+    # Two records also carry the total: the window is what is locked now, the
+    # count is what this boot was told, and neither replaces the other.
+    assert (
+        locked_state_text(payload)
+        == "locked 1620.0-1800.0 MHz | MEM 6001.0 MHz | 2 SETs"
+    )
+
+
+def test_a_single_locked_record_adds_no_count() -> None:
+    payload = {"records": [{"offset": 16, "min_khz": 1_620_000, "max_khz": 1_800_000}]}
+    assert locked_state_text(payload) == "locked 1620.0-1800.0 MHz"
 
 
 def test_locked_state_text_says_nothing_rather_than_zero() -> None:

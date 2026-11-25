@@ -263,6 +263,11 @@ def locked_state_text(payload: object) -> str | None:
     memory = newest.get("memory_khz")
     if isinstance(memory, int) and memory > 0:
         text += f" | MEM {memory / 1000:.1f} MHz"
+    # The table appends one record per SET and keeps them until the driver is
+    # reloaded, so the total says what this boot was told while the window above
+    # says what is locked now. One record adds nothing worth the width.
+    if len(records) > 1:
+        text += f" | {len(records)} SETs"
     return text
 
 

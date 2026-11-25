@@ -1006,6 +1006,27 @@ def test_update_limits_reports_the_stored_locked_window_once() -> None:
     ), app.console.messages
 
 
+def test_more_than_one_stored_window_adds_a_second_console_line() -> None:
+    tab, app = make_tab()
+    app.backend = _BackendWithLockedState({
+        "count_at_4": 96,
+        "records": [
+            {"offset": 16, "min_khz": 1_700_000, "max_khz": 1_700_000},
+            {"offset": 64, "min_khz": 1_620_000, "max_khz": 1_800_000},
+        ],
+    })
+    tab._query_stored_locked_state()
+    messages = app.console.messages
+    # The window is what is locked now; the count is what this boot was told.
+    # Both lines, and the window line still describes the newest record.
+    assert any(
+        "driver stores stored window 1620.0-1800.0 MHz" in m for m in messages
+    ), messages
+    assert any(
+        "driver table: 2 stored windows since the driver loaded" in m for m in messages
+    ), messages
+
+
 def test_an_unreadable_stored_table_prints_nothing() -> None:
     tab, app = make_tab()
     app.backend = _BackendWithLockedState(None)

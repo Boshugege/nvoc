@@ -110,6 +110,29 @@ def parse_info_limits(output: str) -> dict[str, Any]:
     return limits
 
 
+def summarize_locked_history(payload: object) -> Optional[str]:
+    """How many windows the driver's own table holds, when that is more than one.
+
+    The table appends a record per locked-clock SET and keeps them until the
+    driver is reloaded, so "three windows" is a fact about what this boot was
+    told, not about the current lock. That is why the newest window stays in
+    :func:`summarize_locked_state` and this only adds the count: a single stored
+    window says nothing worth a second line. ``None`` when the payload is absent,
+    carries no records, or carries exactly one — an older binding and a card
+    that stores nothing both land on "nothing to add".
+    """
+    if not isinstance(payload, dict):
+        return None
+    records = payload.get("records")
+    if not isinstance(records, list) or len(records) < 2:
+        return None
+    text = f"{len(records)} stored windows since the driver loaded"
+    count = payload.get("count_at_4")
+    if isinstance(count, int):
+        text += f" (driver counter {count})"
+    return text
+
+
 def summarize_locked_state(payload: object) -> Optional[str]:
     """One line describing the locked-clock table a backend read returned.
 
