@@ -186,6 +186,23 @@ class NativeBackend:
             except Exception:
                 return None
 
+    def get_gpu_locked_state(self, gpu: str) -> dict | None:
+        """Read the locked-clock table the macOS RM driver stores.
+
+        A read of stored state, not a normalisation query: it needs no window to
+        answer, so it is the only way to see what the driver kept without
+        writing first. ``None`` when the installed pynvoc predates the binding or
+        the read failed; callers must not read that as an empty table.
+        """
+        try:
+            return self._pynvoc().get_gpu_locked_state(gpu)
+        except Exception:
+            self._force_wake(gpu)
+            try:
+                return self._pynvoc().get_gpu_locked_state(gpu)
+            except Exception:
+                return None
+
     def query_private_freq_domain_status(
         self, gpu: str, domain_bit: int
     ) -> dict | None:

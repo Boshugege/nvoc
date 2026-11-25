@@ -235,6 +235,16 @@ impl MacosRmBackend {
     }
 }
 
+/// The stored window in whole MHz, which is the unit the rest of this API uses.
+///
+/// Whole MHz on purpose: every other window in `/api/oc` is whole MHz, and the
+/// stored records carry kHz because that is what the driver's block holds. The
+/// division truncates, so a driver that stored 1 620 500 kHz reports 1620 MHz --
+/// the floor of the window, never a value above it.
+fn stored_window_mhz(window: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    window.map(|(min_khz, max_khz)| (min_khz / 1000, max_khz / 1000))
+}
+
 /// Map the RM status onto the controller's legacy core/memory/board view.
 /// There is no ThermChannel hotspot on this transport, so `hotspot_c` stays
 /// `None` and a `Hotspot` sensor selection degrades to core (as the trait
@@ -492,9 +502,7 @@ impl ControlBackend for MacosRmBackend {
         // read, which the GET reports as null rather than as a window of zero.
         self.forget_readout();
         let report = self.run_op(gpu_index, nvoc_core::ReadMacosRmLockedState)?;
-        Ok(report
-            .stored_window()
-            .map(|(min_khz, max_khz)| (min_khz / 1000, max_khz / 1000)))
+        Ok(stored_window_mhz(report.stored_window()))
     }
 
     fn write_locked_window(
@@ -653,6 +661,20 @@ fn acoustic_window_c(policy: &nvoc_core::ThermalPolicySettings) -> (i32, i32, i3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stored_window_is_reported_in_whole_mhz() {
+        assert_eq!(
+            stored_window_mhz(Some((1_620_000, 1_800_000))),
+            Some((1620, 1800))
+        );
+        // Truncation is the floor of the window, not a rounded value above it.
+        assert_eq!(
+            stored_window_mhz(Some((1_620_500, 1_799_999))),
+            Some((1620, 1799))
+        );
+        assert_eq!(stored_window_mhz(None), None);
+    }
 
     /// A synthetic RM status with every sensor the mapping consumes.
     fn sample_status() -> DeviceStatus {

@@ -18,6 +18,7 @@ from src.parsing import (
     parse_supported_pstates,
     parse_vfp_lock_bounds,
     route_for_index,
+    summarize_locked_state,
     write_vfp_points,
 )
 
@@ -197,3 +198,40 @@ def test_group_route_runs_splits_and_merges() -> None:
 def test_group_route_runs_rejects_misaligned_input() -> None:
     with pytest.raises(ValueError):
         group_route_runs(["public", "private"], [0], start=0)
+
+
+def test_summarize_locked_state_reads_the_newest_record() -> None:
+    payload = {
+        "count_at_4": 96,
+        "records": [
+            {
+                "offset": 16,
+                "min_khz": 1_700_000,
+                "max_khz": 1_700_000,
+                "memory_khz": 6_000_984,
+            },
+            {
+                "offset": 64,
+                "min_khz": 1_620_000,
+                "max_khz": 1_800_000,
+                "memory_khz": 6_000_984,
+            },
+        ],
+    }
+    assert summarize_locked_state(payload) == (
+        "stored window 1620.0-1800.0 MHz, memory 6001.0 MHz"
+    )
+
+
+def test_summarize_locked_state_says_nothing_rather_than_zero() -> None:
+    # No payload: an older binding or a failed read.
+    assert summarize_locked_state(None) is None
+    assert summarize_locked_state({}) is None
+    # An empty table reads the same way on purpose: the GUI cannot tell it from
+    # a card it cannot ask, and "0 MHz" would be invented either way.
+    assert summarize_locked_state({"count_at_4": 0, "records": []}) is None
+    # A record without both bounds is not a window.
+    assert (
+        summarize_locked_state({"records": [{"offset": 16, "min_khz": 1_620_000}]})
+        is None
+    )

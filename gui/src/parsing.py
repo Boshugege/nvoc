@@ -110,6 +110,33 @@ def parse_info_limits(output: str) -> dict[str, Any]:
     return limits
 
 
+def summarize_locked_state(payload: object) -> Optional[str]:
+    """One line describing the locked-clock table a backend read returned.
+
+    ``None`` means "this transport does not say" — either no payload at all (an
+    older binding, or a failed read) or a payload without records. An empty
+    table and an unreadable one are deliberately reported the same way, because
+    the GUI cannot tell a card that stores nothing from a card it cannot ask,
+    and showing "0 MHz" for either would be a fabricated reading.
+    """
+    if not isinstance(payload, dict):
+        return None
+    records = payload.get("records")
+    if not isinstance(records, list) or not records:
+        return None
+    newest = records[-1]
+    if not isinstance(newest, dict):
+        return None
+    min_khz, max_khz = newest.get("min_khz"), newest.get("max_khz")
+    if not isinstance(min_khz, int) or not isinstance(max_khz, int):
+        return None
+    text = f"stored window {min_khz / 1000:.1f}-{max_khz / 1000:.1f} MHz"
+    memory = newest.get("memory_khz")
+    if isinstance(memory, int) and memory > 0:
+        text += f", memory {memory / 1000:.1f} MHz"
+    return text
+
+
 def parse_status_current_values(output: str) -> Tuple[Optional[float], dict[str, Any]]:
     locked_voltage_mv: Optional[float] = None
     limits_update: dict[str, Any] = {}
