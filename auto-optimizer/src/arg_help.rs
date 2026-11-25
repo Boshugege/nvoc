@@ -238,6 +238,20 @@ fn macos_eval_command() -> Command {
                 ),
         )
         .arg(
+            Arg::new("resume-file")
+                .long("resume-file")
+                .value_name("PATH")
+                .num_args(1)
+                .help(
+                    "Resume ledger: one JSON line per finished candidate, appended after that \
+                     candidate was held, verified and restored. A candidate already recorded \
+                     with outcome ok is skipped instead of being written again, so a sweep \
+                     that has to cross a reboot -- one unknown write per boot -- continues \
+                     where it stopped. Malformed lines (a run interrupted mid-write) are \
+                     ignored, and an entry that did not restore does not count as done",
+                ),
+        )
+        .arg(
             Arg::new("out")
                 .long("out")
                 .value_name("PATH")

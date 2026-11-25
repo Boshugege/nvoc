@@ -82,6 +82,12 @@ pub struct StockEvalOptions {
     /// sweep, which additionally repeats the baseline window so the run can
     /// measure its own noise; empty keeps the run read-only.
     pub candidates: Vec<PlanRequest>,
+    /// Optional resume ledger. One line per finished candidate; a candidate
+    /// already in it is skipped instead of being written again. This exists
+    /// because the probe discipline allows one unknown write per boot, so a
+    /// sweep that crosses a reboot has to be able to start where it stopped
+    /// without redoing (and re-writing) the candidates already measured.
+    pub resume_file: Option<PathBuf>,
 }
 
 fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
@@ -132,6 +138,10 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
              apply/measure/restore transaction and more than that is a scanner's job"
         )));
     }
+    let resume_file = matches
+        .get_one::<String>("resume-file")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from);
     let dry_run = matches.get_flag("dry-run");
     if !candidates.is_empty() && dry_run {
         return Err(error(
@@ -176,6 +186,7 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
             .ok_or_else(|| error("missing --cooldown-timeout-s"))?,
         plan: parse_plan_requests(&plan_values)?,
         candidates,
+        resume_file,
     })
 }
 
@@ -502,6 +513,83 @@ fn run_candidate(
     })
 }
 
+/// One finished candidate, as the resume ledger records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeEntry {
+    /// The candidate identity a repeat boot has to recognise: the plan target
+    /// label plus the offset, because the same target at another offset is a
+    /// different experiment.
+    pub target: String,
+    pub delta_khz: i32,
+    /// What the run concluded, kept so the ledger is readable on its own and so
+    /// a skipped candidate never looks like a successful one.
+    pub outcome: String,
+}
+
+impl ResumeEntry {
+    fn to_line(&self) -> String {
+        json!({
+            "target": self.target,
+            "delta_khz": self.delta_khz,
+            "outcome": self.outcome,
+        })
+        .to_string()
+    }
+}
+
+/// Parse a ledger, ignoring lines that are not usable entries.
+///
+/// A half-written last line is the normal case when a run is interrupted by a
+/// reboot, so a malformed line must not make the whole ledger unreadable -- but
+/// it also must never be read as "this candidate is done".
+pub fn parse_resume_ledger(text: &str) -> Vec<ResumeEntry> {
+    let mut entries = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let (Some(target), Some(delta_khz), Some(outcome)) = (
+            value.get("target").and_then(Value::as_str),
+            value.get("delta_khz").and_then(Value::as_i64).map(|v| v as i32),
+            value.get("outcome").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        entries.push(ResumeEntry {
+            target: target.to_string(),
+            delta_khz,
+            outcome: outcome.to_string(),
+        });
+    }
+    entries
+}
+
+/// Whether this exact candidate is already in the ledger.
+///
+/// Only entries whose outcome says the window was held *and* restored count: an
+/// entry that records a failed restore must not stop the next boot from trying
+/// that candidate again, because the earlier attempt left nothing verified.
+pub fn resume_skips(entries: &[ResumeEntry], target: &str, delta_khz: i32) -> bool {
+    entries.iter().any(|entry| {
+        entry.target == target && entry.delta_khz == delta_khz && entry.outcome == "ok"
+    })
+}
+
+fn append_resume_entry(path: &PathBuf, entry: &ResumeEntry) -> Result<(), Error> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| error(format!("resume ledger {}: {err}", path.display())))?;
+    writeln!(file, "{}", entry.to_line())
+        .map_err(|err| error(format!("resume ledger {}: {err}", path.display())))
+}
+
 pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result<(), Error> {
     if !cfg!(target_os = "macos") {
         return Err(error(
@@ -550,7 +638,22 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         let start = wait_for_cool(gpu, &opts)?;
         round_starts.push(start);
         let mut this_round: Vec<(PlanRequest, CandidateRun)> = Vec::new();
+        let ledger = match &opts.resume_file {
+            Some(path) => std::fs::read_to_string(path)
+                .map(|text| parse_resume_ledger(&text))
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
         for request in &opts.candidates {
+            let label = target_label(&request.target);
+            if resume_skips(&ledger, &label, request.delta_khz) {
+                eprintln!(
+                    "macos-eval: skipping candidate {label} {} kHz -- the resume ledger already \
+                     records it as held, verified and restored",
+                    request.delta_khz
+                );
+                continue;
+            }
             let run = run_candidate(gpu, &opts, request)?;
             // Stop the moment a restore is not read back: the next candidate
             // would otherwise be stacked on top of an offset nobody verified was
@@ -568,6 +671,16 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                     run.exit_code,
                     target_label(&request.target)
                 )));
+            }
+            if let Some(path) = &opts.resume_file {
+                append_resume_entry(
+                    path,
+                    &ResumeEntry {
+                        target: label,
+                        delta_khz: request.delta_khz,
+                        outcome: "ok".into(),
+                    },
+                )?;
             }
             this_round.push((request.clone(), run));
         }
@@ -964,4 +1077,60 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::*;
+
+    #[test]
+    fn a_round_trip_line_is_read_back_unchanged() {
+        let entry = ResumeEntry {
+            target: "graphics".into(),
+            delta_khz: -25_000,
+            outcome: "ok".into(),
+        };
+        let parsed = parse_resume_ledger(&format!("{}\n", entry.to_line()));
+        assert_eq!(parsed, vec![entry]);
+    }
+
+    #[test]
+    fn a_half_written_last_line_is_ignored_rather_than_fatal() {
+        let text = concat!(
+            "{\"target\":\"graphics\",\"delta_khz\":-25000,\"outcome\":\"ok\"}\n",
+            "{\"target\":\"memory\",\"delta_kh",
+        );
+        let parsed = parse_resume_ledger(text);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].target, "graphics");
+    }
+
+    #[test]
+    fn a_recorded_candidate_is_skipped_and_another_offset_is_not() {
+        let entries = vec![ResumeEntry {
+            target: "graphics".into(),
+            delta_khz: -25_000,
+            outcome: "ok".into(),
+        }];
+        assert!(resume_skips(&entries, "graphics", -25_000));
+        assert!(!resume_skips(&entries, "graphics", -50_000));
+        assert!(!resume_skips(&entries, "memory", -25_000));
+    }
+
+    #[test]
+    fn an_entry_that_did_not_restore_does_not_count_as_done() {
+        let entries = vec![ResumeEntry {
+            target: "graphics".into(),
+            delta_khz: -25_000,
+            outcome: "restore-not-read-back".into(),
+        }];
+        assert!(!resume_skips(&entries, "graphics", -25_000));
+    }
+
+    #[test]
+    fn empty_and_blank_ledgers_parse_to_nothing() {
+        assert!(parse_resume_ledger("").is_empty());
+        assert!(parse_resume_ledger("\n  \n").is_empty());
+        assert!(!resume_skips(&[], "graphics", 0));
+    }
 }
