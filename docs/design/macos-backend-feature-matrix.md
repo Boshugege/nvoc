@@ -3278,3 +3278,19 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **⑥ 诚实边界** ✔：1400 rpm 那次 `rpm` 当场读到 0（tach 与 duty 是两路，风扇降速途中读 0 属可能），不把 duty 当转速结论；panic 根因代码未定位；证据目录 `outputs/stage-panic-forensics-20261125T214332Z/`（25 份哈希全 OK）。
 
 **⑦ 测试** ✔：`cargo test -p nvoc-core --lib macos_fan` 10 passed（改 1 条：越界由"夹取"变"拒绝并点名跨度 + 块不变"）；`cargo xtask ci` = `CI_EXIT=0`。
+
+## 一百九十一、服务读入口补上风扇面：写入口能写的东西，读入口要能说出它的边界
+
+**① 选择依据** ✔：`srv` 的 `/fan?percent=` 一直接在写占空比，而它的读入口 `GET /api/oc` 公布了功率窗口（70–100 W）、温度窗口（65–87 °C）、偏移窗口（±18750 kHz）——**唯独风扇那一格空着**。这正是阶段 11 第 5 项那一类缺口：同一个入口能写，却报不出它写在什么跨度里，调用方只能猜或者改用 CLI。取值的来源是**写入口自己用的那条控制记录**（980 字节块），不是另抄一份常量。
+
+**② 公布的字段** ✔：`min_percent` / `max_percent`（驱动接受的占空比跨度）、`max_rpm`（cooler 自报的刻度，0 表示没有刻度因而 rpm 目标无法换算）、`mode`（auto/manual/fanstop）、`current_percent`（反馈）、`target_percent`（请求）、`rpm`（转速表读数，不可信时为 null）。后端公布不了这一面时整个 `fan` 为 **null**——"没有风扇面"与"风扇窗口全为 0"必须能区分，与 `offset_window` 那条同规矩。
+
+**③ 两个诚实说明** ✔：`current_percent` 是反馈不是请求（0 %→40 % 的过程里先读到 35.3 %，把反馈当成"写没生效"是误读），所以本轮同时公布 `target_percent`；`auto` 下 `target_percent` 读到 **0.0**，因为固件自己的曲线目标不在这个字段里——**这不是"驱动要求 0 %"**。
+
+**④ 真机闭环** ✔（`outputs/stage-fan-plane-20261125T215041Z/`，3 份哈希全 OK）：`GET /api/oc` 给出 `"max_rpm":2800 / min 0.0 / max 100.0 / mode auto`；`POST /fan?percent=40` ⇒ 200，`mode manual`、`target_percent 39.9994`（Q16，40 % 落不回整数百分比）、`current_percent 35.3`、`rpm 988`；`POST /restore` ⇒ 200，`mode auto` 复原。
+
+**⑤ 两次踩空（记下来）** ✔：`POST /api/fan` 是 **404**——`/fan`、`/restore`、`/loop` 住在**旧路由面**，不带 `/api` 前缀，而 `/api/oc*` 在 API 面；`POST /fan` 裸发是 **405 `use POST with X-Requested-With: XMLHttpRequest`**——写面要浏览器那种头，脚本必须显式带上，否则连"参数错了"都看不到。
+
+**⑥ 保护项复核** ✔：风扇 `auto`/`max_rpm 2800`、板卡 100 W（窗口 70–100）、电源 `ac`、偏移 `Restore kHz: 0`、`nvoc-srv` 进程 0。
+
+**⑦ 测试** ✔：`cargo test -p nvoc-srv --lib` **69 passed**；`cargo xtask ci` = `CI_EXIT=0`。
