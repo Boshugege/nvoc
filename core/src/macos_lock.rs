@@ -222,6 +222,19 @@ pub fn last_stored_window(records: &[StateRecord]) -> Option<(u32, u32)> {
         .map(|record| (record.min_khz(), record.max_khz()))
 }
 
+/// Whether the newest stored record carries the window that was applied.
+///
+/// `None` when either side is empty. `Some(false)` is a real finding: the driver
+/// stored a window other than the one it answered with. Only the first applied
+/// window is compared, because that is the one this backend writes and the one
+/// the records have been seen to carry; more windows would need a record each and
+/// that mapping has not been measured.
+pub fn storage_matches(applied: &[LockWindow], records: &[StateRecord]) -> Option<bool> {
+    let wanted = applied.first()?;
+    let stored = last_stored_window(records)?;
+    Some(stored == (wanted.min_khz, wanted.max_khz))
+}
+
 /// Walk the records out of a `0x20809040` answer.
 ///
 /// Stops at the first slot whose type word is zero: that is what the dumps show
@@ -853,6 +866,33 @@ mod state_count_tests {
             Some((1_620_000, 1_800_000))
         );
         assert_eq!(last_stored_window(&[]), None);
+    }
+
+    fn window(min_khz: u32, max_khz: u32) -> LockWindow {
+        LockWindow {
+            pstate: 8,
+            domain: DOMAIN_GRAPHICS,
+            min_khz,
+            max_khz,
+        }
+    }
+
+    #[test]
+    fn a_stored_record_is_compared_against_the_applied_window() {
+        let block =
+            block_with_records(&[record(1_700_000, 1_700_000), record(1_620_000, 1_800_000)]);
+        let records = parse_state_records(&block);
+        assert_eq!(
+            storage_matches(&[window(1_620_000, 1_800_000)], &records),
+            Some(true)
+        );
+        assert_eq!(
+            storage_matches(&[window(1_620_000, 1_750_000)], &records),
+            Some(false)
+        );
+        // Nothing on either side is not a pass.
+        assert_eq!(storage_matches(&[], &records), None);
+        assert_eq!(storage_matches(&[window(1_620_000, 1_800_000)], &[]), None);
     }
 
     #[test]

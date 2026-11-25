@@ -2136,15 +2136,7 @@ impl Device {
                     ),
                 }));
             }
-            let storage_matches_applied = if twin_records.is_empty() {
-                None
-            } else {
-                let stored = macos_lock::last_stored_window(&twin_records);
-                let wanted = applied
-                    .first()
-                    .map(|window| (window.min_khz, window.max_khz));
-                Some(stored == wanted)
-            };
+            let storage_matches_applied = macos_lock::storage_matches(&applied, &twin_records);
             Ok(LockedClockWriteReport {
                 requested: request.to_vec(),
                 snapshot: expected,
