@@ -2885,3 +2885,15 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **④ 新机制** ✔：`repeat.round_starts[]` 记录每轮**实际起始温度**、等待秒数、`cooled`、`timed_out`——没有这项读者无从判断三轮是否可比；core 侧 `needs_cooldown()` / `cooldown_expired()` 纯函数 + 3 条单测（含"无温度读数不等于够凉""0 超时永不超时"）。
 
 **⑤ 边界与收尾** ✗：每窗口 20 s、2 候选、3 轮、单卡单负载形状；负载窗口抽样校验（33.4482 it/s），正确性由同次调用的全量 verifier 段证明（passed=true）；六次写入全部回读并复位（`apply_verified`/`restore_verified` 均 true、`original_khz=0` 复位到 0、`other_bytes_preserved=true`、`settled=true`、`settings_written=true`）；收尾风扇 auto、板卡 100 W、电源 ac、全局偏移 0 kHz、窗口未变。证据：`outputs/stage-eval-cooldown-20261125T183017Z/`（4 文件 + `SHA256SUMS`）。
+
+## 一百七十、换一种负载也到不了墙，而且功耗字段本身不可用
+
+**① 新增内存受限负载** ✔：`stress-macos --stream <sec>` 走另一个内核 `nvoc_stream`（每线程 grid stride 走遍全缓冲，每趟读+写），功耗来自内存流量而非 ALU。**它是负载发生器不是校验器**：缓冲被反复改写，无 CPU 参考，JSON 显式 `"verification":"none"`，只报 dispatches / 字节数 / GB/s 与廉价 `state_changed`；正确性仍由 `--verify`/`--stress` 逐元素比对承担；与 `--verify`/`--stress` 同用直接 **exit 2** 并说明理由。
+
+**② 测到的** ✔：`4 M 元素 × 8 趟` 与 `16 M 元素 × 4 趟` 两种配置都稳定在 **14.17–14.18 GB/s**（TU116 的 192 GB/s 的约 7 %）；1 / 3 / 6 实例并发时遥测都是 **利用率 100 %、功耗 11.8 W、温度抬 1–2 ℃、时钟 1950 MHz**。
+
+**③ 两条结论** ✗✗：
+1. **这条路径送不出足以触到功耗墙的负载**：内存受限内核的功耗读数比 ALU 内核**还低**（11.8 W vs 14.5 W），温度几乎不动。换负载种类解决不了，NVMTL over NVK 对这两类工作负载都只交付很小的实际吞吐。
+2. **`power_w` 不能用来判定离 100 W 上限有多远**：空闲 11.3–11.5 W、ALU 负载 13–14.5 W、内存负载 11.8 W，几乎不动；而 `utilization_percent` 在 40 % 与 100 % 之间大幅摆动——两个字段**彼此不自洽**，"利用率 100 %"不能当作"满载"的证据。"到没到 100 W"在本机是**不可判定**的问题，不是"测出来没到"。这正好是 §一百六十五 `load_evidence` 里**不让功耗参与判定**的依据。
+
+**④ 边界** ✗：单卡、两种负载形状、每形态 40 s；`--stream` 无正确性含义；遥测取自驱动自报字段，无法独立测得真实芯片功耗；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。证据：`outputs/stage-stream-load-20261125T184157Z/`（7 文件 + `SHA256SUMS`，含拒绝用例与采样脚本）。
