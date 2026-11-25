@@ -465,6 +465,15 @@ class NativeBackend:
             return
 
         def apply(native: Any, gpu: str = gpu, settings: FanSettings = settings) -> str:
+            if settings.policy == "fanstop":
+                # The firmware's zero-RPM mode, not a 0 percent pin: the level
+                # box is not forwarded, so a stale number there cannot become
+                # the request.
+                native.set_fanstop_status(gpu, True, 0)
+                return (
+                    "Successfully asked the firmware to stop the fan "
+                    "(zero-RPM mode; a 0 percent pin is a different request)."
+                )
             native.set_fan(
                 gpu, settings.backend, settings.fan_id, settings.policy, settings.level
             )

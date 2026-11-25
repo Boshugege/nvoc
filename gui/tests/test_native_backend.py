@@ -44,6 +44,9 @@ class FakeNative:
     def set_fan(self, gpu, backend, fan_id, policy, level):
         self.calls.append(("set_fan", gpu, backend, fan_id, policy, level))
 
+    def set_fanstop_status(self, gpu, enable, curve_index=0):
+        self.calls.append(("set_fanstop_status", gpu, enable, curve_index))
+
 
 class RejectingSubmitApp(FakeApp):
     def run_background(self, _name: str, _task) -> None:
@@ -187,6 +190,20 @@ def test_fan_settings_call_native_action() -> None:
 
     assert app.actions == [("apply fan settings", "Successfully applied fan settings.")]
     assert app.native.calls == [("set_fan", "0x0000", "nvml-cooler", "1", "manual", 55)]
+
+
+def test_the_fanstop_policy_asks_the_firmware_to_stop_the_fan() -> None:
+    app = FakeApp()
+    backend = NativeBackend(app)
+
+    backend.apply_fan_settings(
+        FanSettings(backend="macos-rm", fan_id="1", policy="fanstop", level=55)
+    )
+
+    # The firmware's zero-RPM mode, not a 0 percent pin: the level is not
+    # forwarded, so a stale number in the box cannot become the request.
+    assert app.native.calls == [("set_fanstop_status", "0x0000", True, 0)]
+    assert "zero-RPM" in app.actions[0][1]
 
 
 def test_run_action_rejects_overlapping_action() -> None:

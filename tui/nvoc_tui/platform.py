@@ -63,7 +63,10 @@ def fan_policy_options(macos: bool | None = None) -> list[tuple[str, str]]:
     """
     macos = is_macos() if macos is None else macos
     if macos:
-        return [("manual", "manual"), ("auto", "auto")]
+        # ``fanstop`` is the firmware's own zero-RPM mode (control-record mode
+        # 2), which is a different request from pinning 0 percent: one asks the
+        # cooler to stop, the other pins a duty of zero.
+        return [("manual", "manual"), ("fanstop", "fanstop"), ("auto", "auto")]
     return [("contin.", "continuous"), ("curve", "curve")]
 
 
@@ -76,7 +79,12 @@ def fan_policy_default(macos: bool | None = None) -> str:
 #: ``continuous`` is the manual level under another name, so it lands on
 #: ``manual``; ``curve`` has no macOS equivalent and must be refused rather
 #: than quietly downgraded to a fixed duty the user did not ask for.
-_MACOS_POLICY_REQUEST = {"manual": "manual", "continuous": "manual", "auto": "auto"}
+_MACOS_POLICY_REQUEST = {
+    "manual": "manual",
+    "continuous": "manual",
+    "fanstop": "fanstop",
+    "auto": "auto",
+}
 
 
 def macos_fan_request(policy: str | None) -> str:

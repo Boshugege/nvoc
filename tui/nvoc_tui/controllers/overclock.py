@@ -2404,6 +2404,14 @@ class OverclockController(PaneController):
         if reset:
             native.set_fan(gpu, backend, fan_id, "auto", 0)
             return "Successfully reset fan control."
+        if request == "fanstop":
+            # The firmware's zero-RPM stop mode, not a 0 percent pin: the level
+            # box is not consulted, because a duty is not the request here.
+            native.set_fanstop_status(gpu, True, 0)
+            return (
+                f"Successfully asked the firmware to stop fan {fan_id} "
+                "(zero-RPM mode; a 0 percent pin is a different request)."
+            )
         native.set_fan(gpu, backend, fan_id, request, level)
         if request != policy:
             return (

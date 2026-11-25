@@ -32,12 +32,20 @@ MACOS_FAN_POLICY_REASON = (
 )
 
 #: Policies the macOS transport can apply, in dropdown order.
-MACOS_FAN_POLICIES = ["manual", "auto"]
+#: ``fanstop`` is the firmware's own zero-RPM mode (control-record mode 2),
+#: which is a different request from pinning 0 percent: one asks the cooler to
+#: stop, the other pins a duty of zero.
+MACOS_FAN_POLICIES = ["manual", "fanstop", "auto"]
 
 #: Pane policy -> the macOS request it means. ``continuous`` is the manual
 #: level under another name (the NVAPI cooler family's TemperatureContinuous
 #: applies the level), so it maps onto ``manual``.
-_MACOS_POLICY_REQUEST = {"manual": "manual", "continuous": "manual", "auto": "auto"}
+_MACOS_POLICY_REQUEST = {
+    "manual": "manual",
+    "continuous": "manual",
+    "fanstop": "fanstop",
+    "auto": "auto",
+}
 
 
 def is_macos() -> bool:

@@ -3016,6 +3016,30 @@ def _overclock_controller_with_fan_panes() -> tuple[OverclockController, FakeApp
     return OverclockController(app), app
 
 
+def test_the_fanstop_policy_asks_the_firmware_to_stop_the_fan() -> None:
+    controller, app = _overclock_controller_with_fan_panes()
+
+    message = controller.apply_fan(
+        app.native, "0x0000", "macos-rm", "0", False, "fanstop", 40
+    )
+
+    # The firmware's zero-RPM mode, not a 0 percent pin: the level box is not
+    # forwarded at all, so a stale number there cannot become the request.
+    assert ("set_fanstop_status", "0x0000", True, 0) in app.native.calls
+    assert not [c for c in app.native.calls if c[0] == "set_fan"]
+    assert "zero-RPM" in message
+    assert "different request" in message
+
+
+def test_a_percent_pin_still_goes_through_the_level_path() -> None:
+    controller, app = _overclock_controller_with_fan_panes()
+
+    controller.apply_fan(app.native, "0x0000", "macos-rm", "0", False, "manual", 35)
+
+    assert ("set_fan", "0x0000", "macos-rm", "0", "manual", 35) in app.native.calls
+    assert not [c for c in app.native.calls if c[0] == "set_fanstop_status"]
+
+
 def test_overclock_is_server_flag() -> None:
     controller, app = _overclock_controller_with_fan_panes()
     assert controller.is_server() is False

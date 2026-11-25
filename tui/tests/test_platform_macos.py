@@ -54,8 +54,14 @@ def test_macos_offers_exactly_one_transport():
     assert api_default(False) == "nvapi"
 
 
-def test_macos_fan_policies_are_the_two_that_exist():
-    assert fan_policy_options(True) == [("manual", "manual"), ("auto", "auto")]
+def test_macos_fan_policies_are_the_three_that_exist():
+    # fanstop is the firmware's zero-RPM mode, which is a different request from
+    # pinning 0 percent: one asks the cooler to stop, the other pins a duty.
+    assert fan_policy_options(True) == [
+        ("manual", "manual"),
+        ("fanstop", "fanstop"),
+        ("auto", "auto"),
+    ]
     assert fan_policy_default(True) == "manual"
     # The NVAPI cooler policies are untouched off macOS.
     assert fan_policy_options(False) == [
@@ -77,6 +83,7 @@ def test_the_curve_editor_has_nothing_to_talk_to_on_macos():
         # The software continuous policy is the manual level under another
         # name, so it keeps working rather than becoming an error.
         ("continuous", "manual"),
+        ("fanstop", "fanstop"),
         ("auto", "auto"),
         (None, "manual"),
         ("MANUAL", "manual"),
@@ -183,7 +190,11 @@ def test_the_macos_surface_seeds_the_pane_from_the_drivers_duty():
     )
 
     assert widgets["#fan-id"].options == [("All", "all"), ("Fan 1", "1")]
-    assert widgets["#fan-policy"].options == [("manual", "manual"), ("auto", "auto")]
+    assert widgets["#fan-policy"].options == [
+        ("manual", "manual"),
+        ("fanstop", "fanstop"),
+        ("auto", "auto"),
+    ]
     assert widgets["#fan-policy"].value == "manual"
     assert widgets["#fan-level"].value == "55"
     # The curve table does not exist on this transport.
