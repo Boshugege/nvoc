@@ -2652,3 +2652,15 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 - `0x20809062@648` ✗/✔ 各半：零块 → `0x3a NV_ERR_INVALID_PARAM_STRUCT`（尺寸对、结构不对）；把**驱动在 `0x20809014` 上明确接受过的那 648 字节体**原样喂进去 → `NV_OK`，答数 5 个非零 dword：头 `(1, 1)` + 一条目 `+0=0`、`+4=1`（域位 graphics）、`+8=+12=1530000` kHz。把请求里的 vPstate 换成 0 / 4 / 15，答数**一字不变**。1530000 正是这张 GTX 1650 SUPER 的基准时钟，所以这一面是**与 vPstate 无关的「出厂窗口」视图**，既不是当前锁定的回读（当前存储的是 1620/1700），也不是复位。证据 `15`/`16`。
 - `0x20809063@520` ✗：零块直接 `0x3a`，它的结构还没被任何已测请求命中；按「不扩大步长碰运气」的规矩停在这里，没有换尺寸、没有扫种子。证据 `14`。
 - 结论：**解锁仍无通路**，而且现在已经能说清原因——floor 是存储值、对写入口惰性、且早于本轮工作就存在；能动的只有 ceiling。`0x20809062` 给出的「出厂 1530/1530」是目前唯一有来源的复位目标值，但没有一条被接受的写路径能把它写下去，所以不作为交付能力宣传。
+
+## 一百五十一、一次真实事故：连续 RM 探针把显示栈拖停、用户态看门狗 panic
+
+**① 事实** ✗：2026-11-25 在测试机上连续跑 locked-clock 的 SET/回读和 16 条 `--raw-read` 探针之后，机器 panic 了两次。证据目录 `outputs/stage-macos-panic-20261125/`（`01-panic-evidence.txt`、`02-windowserver-crash-timeline.txt`、`03-protection-state.txt`，带 `SHA256SUMS`）。
+
+**② 两次 panic 是两件不同的事** ✔：
+- `05:56:32` 关机看门狗：`watchdog timeout: no checkins from watchdogd in 183 seconds … shutdown in progress, vfs shutdown not yet started`，backtrace 在 `com.apple.driver.watchdog` + `com.apple.driver.AppleSMC`。这是 `sudo reboot` 在关机阶段卡住被 SMC 看门狗打断——也正是"重启之后很久不回来"的真实原因，不是网络。
+- `06:56:04` 用户态看门狗：`userspace watchdog timeout: no successful checkins from WindowServer … in 120 seconds`、`WindowServer last exited with reason namespace: SIGNAL, code 6`；backtrace 是 `com.apple.driver.watchdog` 的 `userspacePanic`，**没有 NVRM 帧**。
+
+**③ 与本次探针的时间关系（按证据能说的范围）** ✔/✗：`06:43:08` 起 WindowServer 进入崩溃循环，到 `06:48:11` 共 15 份 `.ips`，全是 `EXC_CRASH / SIGABRT / Abort trap: 6`，约每 15 秒一次；`06:47:29 / 06:48:47 / 06:49:27` 三份 `userspace_watchdog_timeout.spin` 里大量内核线程停在同一地址（`kernel + 8458880`，60+ 处），其中包括 `NVAccel`、`NVRM`、`NVDisplayPipe`、`IOGraphics-GFX0-0x2d4`。本会话在那个 boot 的探针集中在 `06:16–06:49`，崩溃循环起点落在这段里；而该 boot 从 `05:56` 起来后 `06:43` 之前**没有任何** WindowServer 崩溃记录。所以：显示/加速栈被拖停与 RM 探针高度重合，但**不能说**驱动在内核里 panic——panic 是用户态看门狗触发的。
+
+**④ 由此固定下来的纪律** ✔：一个 boot 里只碰一条未知 id、先只读；出现 `0x62 / 0x65 / 0x3a` 立刻整轮停手；写入口必须先有原始快照、写后 exact restore 并验回，同一 boot 不叠多次 SET；探针导致掉线或 panic 时，下一个 boot 先取 panic 证据再继续。事故后复核：风扇 `auto` / `max_rpm 2800`、板卡 100 W（窗口 70–100）、电源 `ac`，上一阶段证据 `SHA256SUMS` 18/18 OK。
