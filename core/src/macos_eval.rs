@@ -511,6 +511,80 @@ fn gap_as_null<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok
     }
 }
 
+/// The clock a window actually ran at, taken from the driver's own samples.
+///
+/// The offset this backend accepts is small -- the device reports a span of about
+/// 19 MHz -- and the clock moves in steps, so a report that shows only throughput
+/// cannot tell "the offset did nothing" from "the offset moved the clock but the
+/// load did not follow". The median is reported with the min and max so a step
+/// inside one window is visible.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClockWindow {
+    pub median_mhz: f64,
+    pub min_mhz: f64,
+    pub max_mhz: f64,
+    pub samples: usize,
+}
+
+/// Median of the samples the driver actually produced. A window with no clock
+/// readings yields nothing rather than a zero that would read as "0 MHz".
+pub fn clock_window(samples: &[Option<u32>]) -> Option<ClockWindow> {
+    let mut khz: Vec<u32> = samples.iter().flatten().copied().collect();
+    if khz.is_empty() {
+        return None;
+    }
+    khz.sort_unstable();
+    let middle = khz.len() / 2;
+    let median = if khz.len().is_multiple_of(2) {
+        (f64::from(khz[middle - 1]) + f64::from(khz[middle])) / 2.0
+    } else {
+        f64::from(khz[middle])
+    };
+    Some(ClockWindow {
+        median_mhz: median / 1000.0,
+        min_mhz: f64::from(khz[0]) / 1000.0,
+        max_mhz: f64::from(khz[khz.len() - 1]) / 1000.0,
+        samples: khz.len(),
+    })
+}
+
+/// How much faster the candidate window's clock was, in percent. A baseline of
+/// zero is not a baseline: no division, no number.
+pub fn clock_delta_percent(baseline_mhz: f64, candidate_mhz: f64) -> Option<f64> {
+    if baseline_mhz <= 0.0 || candidate_mhz <= 0.0 {
+        return None;
+    }
+    Some((candidate_mhz - baseline_mhz) / baseline_mhz * 100.0)
+}
+
+/// Throughput change next to the clock change that is supposed to explain it.
+///
+/// `consistent` is the weakest useful claim: the measured throughput moved by
+/// about the amount the clock moved, within the same threshold the throughput
+/// had to clear. A throughput gain with no clock change, or a clock change the
+/// throughput ignored, is worth seeing rather than averaging away.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClockAgreement {
+    pub clock_percent: Option<f64>,
+    pub throughput_percent: f64,
+    pub difference_percent: Option<f64>,
+    pub consistent: bool,
+}
+
+pub fn clock_agreement(
+    clock_percent: Option<f64>,
+    throughput_percent: f64,
+    threshold_percent: f64,
+) -> ClockAgreement {
+    let difference_percent = clock_percent.map(|clock| throughput_percent - clock);
+    ClockAgreement {
+        clock_percent,
+        throughput_percent,
+        difference_percent,
+        consistent: difference_percent.is_some_and(|d| d.abs() <= threshold_percent),
+    }
+}
+
 /// Whether a round should wait before it starts.
 ///
 /// Repeated rounds on a card that is still cooling measure the card's thermal
@@ -896,6 +970,48 @@ mod tests {
         let text = serde_json::to_string(fifteen).unwrap();
         assert!(text.contains("\"percent_per_round\":[null,0.68]"), "{text}");
         assert!(!text.contains("NaN"), "{text}");
+    }
+
+    #[test]
+    fn a_clock_window_reports_the_state_the_card_ran_in() {
+        let window = clock_window(&[Some(1_935_000), Some(1_950_000), None, Some(1_935_000)])
+            .expect("samples");
+        assert_eq!(window.median_mhz, 1935.0);
+        assert_eq!(window.min_mhz, 1935.0);
+        assert_eq!(window.max_mhz, 1950.0);
+        assert_eq!(window.samples, 3, "a missing sample is not a zero");
+    }
+
+    #[test]
+    fn a_window_without_clock_readings_has_no_window() {
+        assert_eq!(clock_window(&[None, None]), None);
+        assert_eq!(clock_window(&[]), None);
+    }
+
+    #[test]
+    fn an_offset_that_buys_one_step_is_about_three_quarters_of_a_percent() {
+        let percent = clock_delta_percent(1935.0, 1950.0).expect("both clocks known");
+        assert!((percent - 0.7752).abs() < 0.001, "{percent}");
+    }
+
+    #[test]
+    fn a_clock_that_did_not_move_cannot_explain_a_throughput_gain() {
+        let agreement = clock_agreement(Some(0.0), 0.82, 0.5);
+        assert!(!agreement.consistent);
+        assert_eq!(agreement.difference_percent, Some(0.82));
+    }
+
+    #[test]
+    fn a_throughput_that_follows_the_clock_is_consistent() {
+        let agreement = clock_agreement(Some(0.775), 0.788, 0.5);
+        assert!(agreement.consistent);
+    }
+
+    #[test]
+    fn no_clock_change_reported_means_no_agreement_claim() {
+        let agreement = clock_agreement(None, 0.9, 0.5);
+        assert!(!agreement.consistent, "silence is not agreement");
+        assert_eq!(agreement.difference_percent, None);
     }
 
     #[test]

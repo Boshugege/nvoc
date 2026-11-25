@@ -59,13 +59,14 @@ pub use macos_lock::{DOMAINS, LockWindow, domain_name, is_single_bit};
 pub mod macos_offset;
 pub mod macos_rm;
 pub use macos_eval::{
-    CANDIDATE_NOTE, CandidateOutcome, LOAD_CLOCK_LIFT_MHZ, LOAD_EVIDENCE_NOTE,
-    LOAD_TEMPERATURE_RISE_C, LOAD_UTILIZATION_PERCENT, LoadEvidence, LoadSummary, LoadThroughput,
-    NoiseFloor, PLAN_NOTE, PlanDocument, PlanRequest, REPEAT_NOTE, ReproducedVerdict,
-    SWEEP_IDLE_NOTE, SWEEP_NOTE, Stats, SweepVerdict, THROUGHPUT_NOTE, ThrottleSummary,
-    ThroughputDelta, candidate_outcome, cooldown_expired, fps_tail, load_evidence, load_summary,
-    metal_throughput, needs_cooldown, noise_floor, parse_plan_requests, plan_document, rank_sweep,
-    reproduce_sweeps, stats, throttle_summary, throughput_delta,
+    CANDIDATE_NOTE, CandidateOutcome, ClockAgreement, ClockWindow, LOAD_CLOCK_LIFT_MHZ,
+    LOAD_EVIDENCE_NOTE, LOAD_TEMPERATURE_RISE_C, LOAD_UTILIZATION_PERCENT, LoadEvidence,
+    LoadSummary, LoadThroughput, NoiseFloor, PLAN_NOTE, PlanDocument, PlanRequest, REPEAT_NOTE,
+    ReproducedVerdict, SWEEP_IDLE_NOTE, SWEEP_NOTE, Stats, SweepVerdict, THROUGHPUT_NOTE,
+    ThrottleSummary, ThroughputDelta, candidate_outcome, clock_agreement, clock_delta_percent,
+    clock_window, cooldown_expired, fps_tail, load_evidence, load_summary, metal_throughput,
+    needs_cooldown, noise_floor, parse_plan_requests, plan_document, rank_sweep, reproduce_sweeps,
+    stats, throttle_summary, throughput_delta,
 };
 pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{

@@ -179,6 +179,15 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
     })
 }
 
+/// The clocks a window's own samples reported.
+fn clock_of(samples: &[nvoc_core::macos_rm::DeviceStatus]) -> Option<nvoc_core::ClockWindow> {
+    let clocks: Vec<Option<u32>> = samples
+        .iter()
+        .map(|sample| sample.graphics_clock_khz)
+        .collect();
+    nvoc_core::clock_window(&clocks)
+}
+
 /// What a candidate round started from. Recorded whether or not a cooldown was
 /// asked for, so a reader can see the die temperature behind each round's number
 /// instead of assuming the rounds were comparable.
@@ -246,6 +255,8 @@ struct LoadRun {
     exit_code: Option<i32>,
     /// The verified Metal window's own throughput, when the load printed one.
     throughput: Option<LoadThroughput>,
+    /// The clock the window actually ran at, from the driver's own samples.
+    clock: Option<nvoc_core::ClockWindow>,
 }
 
 fn run_bounded_load(gpu: &GpuTarget<'_>, opts: &StockEvalOptions) -> Result<LoadRun, Error> {
@@ -344,6 +355,7 @@ fn sample_while_loaded(
     Ok(LoadRun {
         evidence,
         throughput: metal_throughput(&output.stdout),
+        clock: clock_of(&under_load),
         under_load: under_load_report,
         stressor: json!({
             "exit_code": output.status.code(),
@@ -395,6 +407,7 @@ fn run_verifier(path: Option<&PathBuf>, dry_run: bool) -> Result<Value, Error> {
 struct CandidateRun {
     evidence: nvoc_core::LoadEvidence,
     throughput: Option<LoadThroughput>,
+    clock: Option<nvoc_core::ClockWindow>,
     applied: nvoc_core::ClockOffsetWriteReport,
     restored: Option<nvoc_core::ClockOffsetWriteReport>,
     under_load: Value,
@@ -477,6 +490,7 @@ fn run_candidate(
     Ok(CandidateRun {
         evidence: load.evidence.clone(),
         throughput: load.throughput.clone(),
+        clock: load.clock.clone(),
         applied,
         restored,
         under_load: load.under_load,
@@ -519,6 +533,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             post: Value::Null,
             exit_code: Some(0),
             throughput: None,
+            clock: None,
         }
     } else {
         run_bounded_load(gpu, &opts)?
@@ -606,6 +621,8 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                 Some(json!({
                     "schema": "nvoc/macos-sweep/1",
                     "baseline_windows": floor,
+                    "baseline_clock": load.clock,
+                    "repeat_baseline_clock": baseline_repeat.and_then(|run| run.clock.clone()),
                     "candidates_measured": measured.len(),
                     "candidates_requested": runs.len(),
                     "windows_loaded": windows_loaded,
@@ -616,6 +633,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                             "target": target_label(&request.target),
                             "delta_khz": request.delta_khz,
                             "evidence": run.evidence,
+                            "clock": run.clock,
                         }))
                         .collect::<Vec<_>>(),
                     "verdicts": verdicts,
@@ -672,6 +690,71 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             per_round.push(nvoc_core::rank_sweep(&floor, &measured));
         }
         let verdicts = nvoc_core::reproduce_sweeps(&per_round);
+        // A throughput number whose clock did not move by the same amount is
+        // worth seeing next to the number, not instead of it: the offset window
+        // is small enough that a report without clocks cannot tell "the offset
+        // did nothing" from "the load did not follow the clock".
+        let mut round_clocks: Vec<Value> = Vec::new();
+        for (index, round) in round_runs.iter().enumerate() {
+            let repeat_run = round_repeats.get(index).and_then(|run| run.as_ref());
+            round_clocks.push(json!({
+                "baseline": repeat_run.and_then(|run| run.clock.clone()),
+                "candidates": round
+                    .iter()
+                    .map(|(request, run)| json!({
+                        "target": target_label(&request.target),
+                        "delta_khz": request.delta_khz,
+                        "clock": run.clock,
+                    }))
+                    .collect::<Vec<_>>(),
+            }));
+        }
+        let threshold = per_round_floors
+            .iter()
+            .map(|floor| floor.threshold_percent)
+            .fold(0.0_f64, f64::max);
+        let clock_checks: Vec<Value> = verdicts
+            .iter()
+            .map(|verdict| {
+                let mut deltas: Vec<f64> = Vec::new();
+                for (index, round) in round_runs.iter().enumerate() {
+                    let baseline = round_repeats
+                        .get(index)
+                        .and_then(|run| run.as_ref())
+                        .and_then(|run| run.clock.as_ref());
+                    let candidate = round
+                        .iter()
+                        .find(|(request, _)| {
+                            request.delta_khz == verdict.requested_khz
+                                && target_label(&request.target) == verdict.target
+                        })
+                        .and_then(|(_, run)| run.clock.as_ref());
+                    if let (Some(baseline), Some(candidate)) = (baseline, candidate)
+                        && let Some(percent) = nvoc_core::clock_delta_percent(
+                            baseline.median_mhz,
+                            candidate.median_mhz,
+                        )
+                    {
+                        deltas.push(percent);
+                    }
+                }
+                let mean_clock = if deltas.is_empty() {
+                    None
+                } else {
+                    Some(deltas.iter().sum::<f64>() / deltas.len() as f64)
+                };
+                json!({
+                    "target": verdict.target,
+                    "requested_khz": verdict.requested_khz,
+                    "clock_percent_per_round": deltas,
+                    "agreement": nvoc_core::clock_agreement(
+                        mean_clock,
+                        verdict.percent_mean,
+                        threshold,
+                    ),
+                })
+            })
+            .collect::<Vec<_>>();
         let winner = verdicts.iter().find(|verdict| verdict.reproduced);
         Some(json!({
             "schema": "nvoc/macos-repeat/1",
@@ -687,6 +770,8 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                     "timed_out": start.timed_out,
                 }))
                 .collect::<Vec<_>>(),
+            "round_clocks": round_clocks,
+            "clock_checks": clock_checks,
             "verdicts": verdicts,
             "winner": winner,
             "note": nvoc_core::REPEAT_NOTE,
