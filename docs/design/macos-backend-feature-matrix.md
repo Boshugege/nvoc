@@ -3065,3 +3065,25 @@ refusal_for_18mhz   : null
 **⑤ 未做（不美化）** ✗：GUI 的 OC 段是滑条驱动、范围另有一处来源，本轮没接这条窗口；跑探针需要 `textual`，机器上的 `.venv` 没有，因此用 `uv run --locked --package nvoc-tui` 并把 `tui/` 与 `.venv` 的 site-packages 一起放进 `PYTHONPATH`。
 
 **⑥ 证据** ✔：`outputs/stage-tui-offsetwindow-20261125T203752Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
+
+## 一百八十、GUI 的 OC 行也以驱动跨度为界
+
+**① 数据通路早就在，只是没人看** ✔：`_apply_gpu_get` 里的 `merged.update(native_payload)` 早就把 settings 的所有键（含 §一百七十八 的 `clock_offset_window`）并进了 `_gpu_limits_cache`，所以标签页本来就能拿到跨度。本轮让它被**吸收**（`_absorb_offset_window`）、被**显示**（Core/Mem 行下方的 `_offset_window_label`）、被当作**上界**（`_offset_window_error`）。
+
+**② 真机输出** ✔（真实 settings 喂真实 `OverclockTab`）：
+
+```
+span_line                     : "driver span ±18.75 MHz (±1.23 % at 1530 MHz)"
+refusal_40mhz                 : "Offset refused, nothing was written: core +40 MHz is outside
+                                 the span the driver itself accepts (...)"
+refusal_12mhz                 : null
+refusal_after_window_dropped  : null
+```
+
+**③ 语义** ✔：跨度消失（换卡/换传输）时**立即解除上界**——否则上一张卡的界会挡住这一张卡的写入（最后一行就是这个断言）；mV 行不受此界约束（另一块存储、另一堵墙 ±300 mV）；未发布跨度的传输（NVAPI/NVML）保持不设界，**"没被告知"≠"跨度为 0"**。
+
+**④ 测试** ✔：`gui/tests/test_overclock.py` 新增五条（core/mem 超界拒绝且零调用、跨度内正常写、无窗口不设界、窗口消失后解除）；`pytest -q gui/tests/` **298 passed / 13 skipped**；`cargo xtask ci` = `CI_EXIT=0`。
+
+**⑤ 未做（不美化）** ✗："Apply all"（`_apply_oc`）与 fabric 行还没接这条界；GUI 探针需要 uv 的 nvoc-gui 环境（tkinter/customtkinter 只在那个环境）。
+
+**⑥ 证据** ✔：`outputs/stage-gui-offsetwindow-20261125T204127Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
