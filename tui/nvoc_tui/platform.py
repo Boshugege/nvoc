@@ -98,13 +98,16 @@ def macos_fan_request(policy: str | None) -> str:
 def macos_duty_seed(info: object) -> int | None:
     """The duty to seed the level box with, from a macOS fan-info payload.
 
-    The RM fan report publishes the duty the driver holds as
-    ``target_percent`` (a float) and the rounded live duty as
-    ``current_percent``; in auto mode both can be 0 while the firmware is
-    actually spinning the fan, so a zero seed is only accepted when the report
-    also says the mode is manual. Anything absent stays ``None``: seeding a
-    default-looking number would make an accidental Apply write a duty nobody
-    chose.
+    Measured on the test card: pinned at 40 percent the report carries
+    ``target_percent`` 39.9994 (the duty the driver stored) and
+    ``current_percent`` 45 (rounded status feedback); in auto mode
+    ``target_percent`` is 0.0 while ``current_percent`` carries the live duty
+    the firmware chose (57 on that card). So ``target_percent`` is preferred and
+    ``current_percent`` is the fallback, which makes the box show what the
+    cooler is doing in auto and what it will keep doing in manual. A zero is
+    only accepted when the report says the mode is manual (a real 0 percent
+    pin); anything absent stays ``None``, because seeding a default-looking
+    number would let an accidental Apply write a duty nobody chose.
     """
     if not isinstance(info, dict):
         return None
