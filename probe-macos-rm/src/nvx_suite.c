@@ -2581,6 +2581,11 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
          * one zero-background GET decides that, and it stays last so a latch on
          * it cannot take the earlier dumps down.  Read-only: it is not a known
          * SET id and nothing here writes it. */
+        /* The read the product already uses for the locked-clock window
+         * (core/src/macos_rm.rs: "query 0x20809014, write 0x2080d041", 648 B).
+         * It sits immediately before the sibling so one battery yields both
+         * dumps and the two can be compared byte for byte. */
+        { "lock-read        0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 0u },
         { "sibling          0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u },
     };
 
