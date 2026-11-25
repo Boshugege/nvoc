@@ -3402,6 +3402,10 @@ class OverclockTab:
                 ),
             )
             return
+        window_error = self._offset_window_error({"xbar": value})
+        if window_error:
+            self._log_oc_message(window_error)
+            return
         parents = self._fabric_relation()
         freq_slot = self._clk_freq_slot()
         self.app.run_native_action(
@@ -3447,6 +3451,10 @@ class OverclockTab:
                 ),
             )
             return
+        window_error = self._offset_window_error({"sys": value})
+        if window_error:
+            self._log_oc_message(window_error)
+            return
         parents = self._fabric_relation()
         freq_slot = self._clk_freq_slot()
         self.app.run_native_action(
@@ -3486,6 +3494,10 @@ class OverclockTab:
                 ),
             )
             return
+        window_error = self._offset_window_error({"msd": value})
+        if window_error:
+            self._log_oc_message(window_error)
+            return
         parents = self._fabric_relation()
         freq_slot = self._clk_freq_slot()
         self.app.run_native_action(
@@ -3524,6 +3536,10 @@ class OverclockTab:
                     )
                 ),
             )
+            return
+        window_error = self._offset_window_error({"host": value})
+        if window_error:
+            self._log_oc_message(window_error)
             return
         parents = self._fabric_relation()
         freq_slot = self._clk_freq_slot()
@@ -3662,6 +3678,9 @@ class OverclockTab:
         page = self._oc_page
         if page == 0:
             actions = []
+            # The frequency-plane rows on this page, for the driver span check
+            # below: a row on mV is a different storage with its own wall.
+            frequency_rows: Dict[str, float] = {}
             volt_slot = self._clk_volt_slot()
             freq_slot = self._clk_freq_slot()
             core_mhz = self.core_var.get().strip()
@@ -3682,6 +3701,7 @@ class OverclockTab:
                             ),
                         ))
                     else:
+                        frequency_rows["core"] = cv
                         pstate = self._oc_pstate()
                         actions.append((
                             "apply core offset",
@@ -3714,6 +3734,7 @@ class OverclockTab:
                         ),
                     ))
                 else:
+                    frequency_rows["mem"] = mv
                     pstate = self._oc_pstate()
                     actions.append((
                         "apply memory offset",
@@ -3733,6 +3754,12 @@ class OverclockTab:
             if not actions:
                 self.app.console.append("[GUI] No valid clock offset values.\n")
                 return
+            # One row past the driver's span and NOTHING is written: a half
+            # applied offset set is worse than none.
+            window_error = self._offset_window_error(frequency_rows)
+            if window_error:
+                self._log_oc_message(window_error)
+                return
             self.app.run_native_action_chain(actions)
             return
 
@@ -3743,6 +3770,7 @@ class OverclockTab:
         parents = self._fabric_relation()
         if page == 1:
             actions = []
+            frequency_rows = {}
             volt_slot = self._clk_volt_slot()
             freq_slot = self._clk_freq_slot()
             if self.xbar_slider.cget("state") != "disabled":
@@ -3763,6 +3791,7 @@ class OverclockTab:
                                 ),
                             ))
                         else:
+                            frequency_rows["xbar"] = xv
                             actions.append((
                                 "apply xbar offset",
                                 lambda native, gpu=gpu, xv=xv, parents=parents, slot=freq_slot: (
@@ -3791,6 +3820,7 @@ class OverclockTab:
                                 ),
                             ))
                         else:
+                            frequency_rows["sys"] = sv
                             actions.append((
                                 "apply sys offset",
                                 lambda native, gpu=gpu, sv=sv, parents=parents, slot=freq_slot: (
@@ -3804,10 +3834,15 @@ class OverclockTab:
             if not actions:
                 self.app.console.append("[GUI] No valid clock offset values.\n")
                 return
+            window_error = self._offset_window_error(frequency_rows)
+            if window_error:
+                self._log_oc_message(window_error)
+                return
             self.app.run_native_action_chain(actions)
             return
         # page 2: Msd / Host
         actions = []
+        frequency_rows = {}
         volt_slot = self._clk_volt_slot()
         freq_slot = self._clk_freq_slot()
         if self._msd_supported and self.msd_slider.cget("state") != "disabled":
@@ -3828,6 +3863,7 @@ class OverclockTab:
                             ),
                         ))
                     else:
+                        frequency_rows["msd"] = mv
                         actions.append((
                             "apply msd offset",
                             lambda native, gpu=gpu, mv=mv, parents=parents, slot=freq_slot: (
@@ -3856,6 +3892,7 @@ class OverclockTab:
                             ),
                         ))
                     else:
+                        frequency_rows["host"] = hv
                         actions.append((
                             "apply host offset",
                             lambda native, gpu=gpu, hv=hv, parents=parents, slot=freq_slot: (
@@ -3868,6 +3905,10 @@ class OverclockTab:
                 pass
         if not actions:
             self.app.console.append("[GUI] No valid clock offset values.\n")
+            return
+        window_error = self._offset_window_error(frequency_rows)
+        if window_error:
+            self._log_oc_message(window_error)
             return
         self.app.run_native_action_chain(actions)
 

@@ -1871,6 +1871,56 @@ def test_format_xbar_offset_result_unsupported() -> None:
     assert "not supported" in msg
 
 
+def test_apply_all_is_refused_when_one_row_is_past_the_span() -> None:
+    """Apply-all must not half-apply: one row over the driver's span and the
+    whole page writes nothing."""
+    tab, app = make_tab()
+    tab._absorb_offset_window({"clock_offset_window": WINDOW})
+    tab.core_var.set("40")
+    tab.mem_var.set("600")
+
+    tab._apply_oc()
+
+    assert app.actions == []
+    assert app.native.calls == []
+    message = app.console.messages[0]
+    assert "core +40 MHz" in message and "nothing was written" in message
+
+
+def test_apply_all_writes_when_every_row_is_inside_the_span() -> None:
+    tab, app = make_tab()
+    tab._absorb_offset_window({"clock_offset_window": WINDOW})
+    tab.core_var.set("18")
+    tab.mem_var.set("-18")
+
+    tab._apply_oc()
+
+    assert app.actions == ["apply core offset", "apply memory offset"]
+
+
+def test_apply_all_checks_the_fabric_rows_too() -> None:
+    tab, app = make_tab(xbar_supported=True, xbar_value="40")
+    tab._absorb_offset_window({"clock_offset_window": WINDOW})
+    tab._oc_page = 1
+
+    tab._apply_oc()
+
+    assert app.actions == []
+    assert app.native.calls == []
+    assert "xbar +40 MHz" in app.console.messages[0]
+
+
+def test_a_single_fabric_row_is_refused_past_the_span() -> None:
+    tab, app = make_tab(xbar_supported=True, xbar_value="40")
+    tab._absorb_offset_window({"clock_offset_window": WINDOW})
+
+    tab._apply_xbar_only()
+
+    assert app.actions == []
+    assert app.native.calls == []
+    assert "xbar +40 MHz" in app.console.messages[0]
+
+
 def test_apply_oc_includes_xbar_when_supported() -> None:
     # Apply Section applies the CURRENT page; page 1 = Xbar/Sys.
     tab, app = make_tab(xbar_supported=True, xbar_value="10")
