@@ -188,6 +188,24 @@ impl<'a> GpuTarget<'a> {
         }
     }
 
+    /// A target whose only backend is one already-discovered macOS RM device.
+    ///
+    /// Long-lived consumers (the service) hold their own `Device` handles from
+    /// `macos_rm::discover()` and reach the shared operations with them, so
+    /// this constructor exists instead of a second discovery pass; without it a
+    /// caller that owns a `Device` has no way to build a target at all, and the
+    /// only alternative is rebuilding the inventory per write.
+    pub fn macos_rm_only(id: GpuId, index: usize, device: &'a crate::macos_rm::Device) -> Self {
+        Self {
+            id,
+            index,
+            nvapi: None,
+            nvml: None,
+            macos_rm: Some(device),
+            nvml_error: None,
+        }
+    }
+
     pub fn has_nvapi(&self) -> bool {
         self.nvapi.is_some()
     }

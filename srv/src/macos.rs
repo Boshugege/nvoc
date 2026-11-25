@@ -6,7 +6,9 @@
 //! exposes telemetry — clocks, temperatures, power, fan rpm, utilization,
 //! throttle reasons — and a private control channel now partially mapped.
 //!
-//! The read half is implemented; every actuator fails closed. Two facts keep
+//! The read half is implemented; the actuators that have a validated,
+//! transactional route are wired to the shared core operations, and the ones
+//! that do not fail closed with a reason naming what is missing. Two facts keep
 //! that honest, because the usual shorthand ("this driver has no write
 //! command") is wrong here and the difference matters to a user:
 //!
@@ -22,13 +24,18 @@
 //!   the 776-byte clock document (`0x20809061`) came back `NV_OK` and
 //!   published per-domain offsets.
 //!
-//! So [`supports_writes`](ControlBackend::supports_writes) reports
-//! `nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED` — the same switch the
-//! optimizer's write gate reads, so no entry point can drift away from the
-//! backend or from each other — and the control loop stays observe-only until
-//! the write gate opens. This backend deliberately fabricates nothing: a
-//! sensor / limit the RM channel does not publish is `None`, never a
-//! default-looking zero.
+//! [`supports_writes`](ControlBackend::supports_writes) is `true`: four
+//! families have end-to-end verified routes (graphics/memory additive clock
+//! offsets, the board power limit, cooler0 percent + firmware auto, and the
+//! acoustic temperature target), and the control loop drives those. It is a
+//! per-backend answer, not the coarse
+//! `nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED` switch, which describes
+//! whether *bulk* settings/restore can be applied and is still false. The
+//! frequency-cap actuator stays closed on purpose: writing a locked-clock
+//! window has no verified clear route on this driver (`0x2080c535` returns
+//! `0x40`), so exposing it would leave a card locked with no way back.
+//! This backend deliberately fabricates nothing: a sensor / limit the RM
+//! channel does not publish is `None`, never a default-looking zero.
 //!
 //! The read path reuses `nvoc_core::macos_rm` exactly as the read-only
 //! pynvoc backend and the `macos-eval` optimizer step do, so all three
@@ -45,9 +52,12 @@ use std::borrow::Cow;
 /// write command: the write path exists (`0x2080d01c`), but reaching it needs
 /// privilege this client does not have and a client-side SET entry point that
 /// is not wired yet.
-const READ_ONLY: &str = "read-only macOS backend: the clock-offset write path (0x2080d01c) exists \
-     but is not reachable yet -- it requires privilege this client does not have (an unprivileged \
-     caller measured NV_ERR_INSUFFICIENT_PERMISSIONS 0x1b) and the native layer sends no SET id";
+/// Why the frequency-cap actuator is still closed. Kept next to the actuator so
+/// the service body, the audit entry and the capability matrix cannot drift:
+/// the write exists, the *undo* does not.
+const NO_FREQUENCY_UNDO: &str = "the macOS locked-clock window is writable (0x2080d041) but has no \
+     verified clear route on this driver (the reset twin 0x2080c535 answers 0x40), so the service \
+     does not expose a one-way lock";
 
 /// One discovered GPU: the core handle plus the resolved display name.
 struct MacosGpu {
@@ -100,6 +110,50 @@ impl MacosRmBackend {
             .status()
             .map_err(|e| format!("GPU {index}: macOS RM status: {e}"))
     }
+
+    /// Additive clock offset in kHz, one domain at a time.
+    ///
+    /// The MHz entry points convert first, so both the OC page and any
+    /// kHz-aware caller land on the same shared operation and the same
+    /// transaction; the window (-18750..18750 kHz) is the driver's own and is
+    /// enforced by core, not re-implemented here.
+    fn write_offset_khz(
+        &self,
+        gpu_index: usize,
+        domain: OffsetDomain,
+        khz: i32,
+    ) -> Result<(), String> {
+        let clock_domain = match domain {
+            OffsetDomain::Core => nvoc_core::ClockDomain::Graphics,
+            OffsetDomain::Mem => nvoc_core::ClockDomain::Memory,
+        };
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmClockOffset {
+                domain: clock_domain,
+                khz,
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
+    }
+
+    /// Run one shared core operation against one of our own devices.
+    ///
+    /// Every macOS write in this backend goes through here, so the actuators
+    /// cannot grow a private escape sequence: the transaction semantics
+    /// (snapshot -> single-domain SET -> read-back -> restore on failure) live
+    /// in `nvoc_core` and are the same ones the CLI and pynvoc use.
+    fn run_op<O>(&self, index: usize, op: O) -> Result<O::Output, String>
+    where
+        O: nvoc_core::GpuOperation,
+    {
+        let gpu = self.gpu(index)?;
+        let target = nvoc_core::GpuTarget::macos_rm_only(gpu.device.id(), index, &gpu.device);
+        nvoc_core::run(&target, op)
+            .map(|report| report.output)
+            .map_err(|e| format!("{e}"))
+    }
 }
 
 /// Map the RM status onto the controller's legacy core/memory/board view.
@@ -148,9 +202,11 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn supports_writes(&self) -> bool {
-        // Same switch the optimizer's write gate reads. Hard-coding false here
-        // would let the service and the optimizer disagree about the backend.
-        nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED
+        // Per-backend answer: the four families below have verified routes, so
+        // the control loop may drive them. This is deliberately *not* the
+        // coarse `SETTINGS_WRITE_SUPPORTED` switch, which is about bulk
+        // settings/restore and stays false.
+        true
     }
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -263,52 +319,104 @@ impl ControlBackend for MacosRmBackend {
 
     fn write_offset_mhz(
         &mut self,
-        _gpu_index: usize,
-        _domain: OffsetDomain,
-        _backend: OffsetBackend,
-        _mhz: i32,
+        gpu_index: usize,
+        domain: OffsetDomain,
+        backend: OffsetBackend,
+        mhz: i32,
     ) -> Result<(), String> {
-        Err(READ_ONLY.to_string())
+        // `backend` selects NVAPI vs NVML offset semantics; this transport has
+        // one additive channel, so both route to the same RM write instead of
+        // silently ignoring the request.
+        let _ = backend;
+        self.write_offset_khz(gpu_index, domain, mhz.saturating_mul(1000))
     }
 
-    fn write_power_limit_w(&mut self, _gpu_index: usize, _watts: u32) -> Result<(), String> {
-        Err(READ_ONLY.to_string())
+    fn write_power_limit_w(&mut self, gpu_index: usize, watts: u32) -> Result<(), String> {
+        let milliwatts =
+            nvoc_core::validate_macos_power_limit_watts(watts).map_err(|e| format!("{e}"))?;
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmPowerLimit {
+                target: nvoc_core::PowerLimitTarget::Milliwatts(milliwatts),
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
     }
 
-    fn write_temp_limit_c(&mut self, _gpu_index: usize, _celsius: i32) -> Result<(), String> {
-        Err(READ_ONLY.to_string())
+    fn write_temp_limit_c(&mut self, gpu_index: usize, celsius: i32) -> Result<(), String> {
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmAcousticTarget {
+                target: nvoc_core::AcousticTarget::Celsius(celsius),
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
     }
 
-    fn reset_offset(&mut self, _gpu_index: usize, _domain: OffsetDomain) -> Result<(), String> {
-        Err(READ_ONLY.to_string())
+    fn reset_offset(&mut self, gpu_index: usize, domain: OffsetDomain) -> Result<(), String> {
+        self.write_offset_khz(gpu_index, domain, 0)
     }
 
-    fn reset_power_limit(&mut self, _gpu_index: usize) -> Result<(), String> {
-        Err(READ_ONLY.to_string())
+    fn reset_power_limit(&mut self, gpu_index: usize) -> Result<(), String> {
+        // `PowerLimitTarget::Default` asks the driver for its own limit rather
+        // than pinning a number this client invented.
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmPowerLimit {
+                target: nvoc_core::PowerLimitTarget::Default,
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
     }
 
-    fn reset_temp_limit(&mut self, _gpu_index: usize) -> Result<(), String> {
-        Err(READ_ONLY.to_string())
+    fn reset_temp_limit(&mut self, gpu_index: usize) -> Result<(), String> {
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmAcousticTarget {
+                target: nvoc_core::AcousticTarget::Default,
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
     }
 
-    fn write_fan_percent(&mut self, _gpu_index: usize, _percent: u32) -> Result<(), String> {
-        Err(READ_ONLY.to_string())
+    fn write_fan_percent(&mut self, gpu_index: usize, percent: u32) -> Result<(), String> {
+        nvoc_core::validate_macos_fan_request(0, nvoc_core::FanControlTarget::Percent(percent))
+            .map_err(|e| format!("{e}"))?;
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmFanControl {
+                slot: 0,
+                target: nvoc_core::FanControlTarget::Percent(percent),
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
     }
 
     fn write_freq_cap_khz(&mut self, _gpu_index: usize, _cap_khz: u32) -> Result<(), String> {
-        Err(READ_ONLY.to_string())
+        Err(NO_FREQUENCY_UNDO.to_string())
     }
 
-    fn restore_fan_auto(&mut self, _gpu_index: usize) -> Result<(), String> {
-        // Nothing was ever pinned, so there is nothing to un-pin. Reporting
-        // success keeps a stray hand-back call from raising a false
-        // `RestoreFailed` failsafe; the loop does not call this anyway
-        // (`supports_writes` is false).
-        Ok(())
+    fn restore_fan_auto(&mut self, gpu_index: usize) -> Result<(), String> {
+        self.run_op(
+            gpu_index,
+            nvoc_core::SetMacosRmFanControl {
+                slot: 0,
+                target: nvoc_core::FanControlTarget::Auto,
+                cancelled: &|| false,
+            },
+        )
+        .map(|_| ())
     }
 
     fn restore_freq_auto(&mut self, _gpu_index: usize) -> Result<(), String> {
-        // See `restore_fan_auto`: the soft wall was never set.
+        // The soft wall is never set (see `write_freq_cap_khz`), so there is
+        // nothing to clear; success keeps a stray hand-back from raising a
+        // false `RestoreFailed` failsafe.
         Ok(())
     }
 }
@@ -372,32 +480,31 @@ mod tests {
     }
 
     #[test]
-    fn the_shared_reason_names_the_missing_layers_not_a_missing_command() {
-        // The write command exists; only the path to it is blocked. A reason
-        // string that says otherwise is the exact confusion the delivery
-        // requirements forbid, so pin the wording's substance.
-        assert!(
-            READ_ONLY.contains("0x2080d01c"),
-            "the reason should name the write command that exists: {READ_ONLY}"
+    fn the_frequency_cap_stays_closed_because_it_cannot_be_undone() {
+        // A one-way lock is worse than no lock: this driver has a writable
+        // window (0x2080d041) and no verified clear route, so the actuator
+        // names the missing undo instead of pretending the write is available.
+        assert!(NO_FREQUENCY_UNDO.contains("0x2080d041"));
+        assert!(NO_FREQUENCY_UNDO.contains("0x2080c535"));
+        let mut backend = MacosRmBackend { gpus: Vec::new() };
+        assert_eq!(
+            backend.write_freq_cap_khz(0, 1_620_000),
+            Err(NO_FREQUENCY_UNDO.to_string())
         );
-        assert!(
-            READ_ONLY.contains("privilege"),
-            "the reason should name the privilege precondition: {READ_ONLY}"
-        );
-        assert!(
-            !READ_ONLY.contains("no writable RM control"),
-            "the reason must not claim the driver lacks a write command: {READ_ONLY}"
-        );
+        // Hand-back stays a no-op success: nothing was ever pinned.
+        assert_eq!(backend.restore_freq_auto(0), Ok(()));
     }
 
     #[test]
-    fn every_actuator_fails_closed_with_the_shared_reason() {
+    fn the_writable_families_are_announced_and_differ_from_the_bulk_switch() {
+        // Two different questions: `SETTINGS_WRITE_SUPPORTED` is about bulk
+        // settings/restore (still false), `supports_writes` is about the four
+        // families this backend can actually apply one transaction at a time.
+        let bulk = nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED;
+        assert!(!bulk, "bulk settings/restore is still gated: {bulk}");
         let mut backend = MacosRmBackend { gpus: Vec::new() };
-        assert_eq!(
-            backend.supports_writes(),
-            nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED,
-            "the service must read the backend capability, not a local copy of it"
-        );
+        assert!(backend.supports_writes());
+        assert_ne!(backend.supports_writes(), bulk);
         assert_eq!(backend.backend_kind(), "macos-rm");
         assert_eq!(backend.gpu_count(), 0);
         assert_eq!(backend.name(0).as_ref(), "GPU 0");
@@ -407,35 +514,44 @@ mod tests {
                 .downcast_mut::<MacosRmBackend>()
                 .is_some()
         );
-        assert_eq!(
-            backend.write_fan_percent(0, 100),
-            Err(READ_ONLY.to_string())
+    }
+
+    #[test]
+    fn arguments_are_refused_before_the_device_is_touched() {
+        // With no GPUs attached a validation failure must still be the *first*
+        // error: a caller with 150 W or 101 percent gets the range, not "GPU 0
+        // out of range", so the gate order is visible in the message.
+        let mut backend = MacosRmBackend { gpus: Vec::new() };
+        let power = backend.write_power_limit_w(0, 150).unwrap_err();
+        assert!(
+            power.contains('1') && power.to_lowercase().contains("w"),
+            "{power}"
         );
-        assert_eq!(
-            backend.write_power_limit_w(0, 150),
-            Err(READ_ONLY.to_string())
-        );
-        assert_eq!(
-            backend.write_temp_limit_c(0, 80),
-            Err(READ_ONLY.to_string())
-        );
-        assert_eq!(
-            backend.write_offset_mhz(0, OffsetDomain::Core, OffsetBackend::Nvml, 100),
-            Err(READ_ONLY.to_string())
-        );
-        assert_eq!(
-            backend.write_freq_cap_khz(0, 1_000_000),
-            Err(READ_ONLY.to_string())
-        );
-        assert_eq!(
-            backend.reset_offset(0, OffsetDomain::Mem),
-            Err(READ_ONLY.to_string())
-        );
-        assert_eq!(backend.reset_power_limit(0), Err(READ_ONLY.to_string()));
-        assert_eq!(backend.reset_temp_limit(0), Err(READ_ONLY.to_string()));
-        // Nothing was ever pinned, so hand-back is a no-op success.
-        assert_eq!(backend.restore_fan_auto(0), Ok(()));
-        assert_eq!(backend.restore_freq_auto(0), Ok(()));
+        assert!(!power.contains("out of range"), "{power}");
+        let fan = backend.write_fan_percent(0, 101).unwrap_err();
+        assert!(fan.contains("100"), "{fan}");
+        assert!(!fan.contains("out of range"), "{fan}");
+    }
+
+    #[test]
+    fn a_missing_gpu_is_named_instead_of_writing_to_nothing() {
+        // The actuators are routable now, so the failure mode changed: an index
+        // that does not exist must say so rather than quietly succeeding.
+        let mut backend = MacosRmBackend { gpus: Vec::new() };
+        for err in [
+            backend.write_fan_percent(0, 40).unwrap_err(),
+            backend.restore_fan_auto(0).unwrap_err(),
+            backend.write_power_limit_w(0, 90).unwrap_err(),
+            backend.reset_power_limit(0).unwrap_err(),
+            backend.write_temp_limit_c(0, 80).unwrap_err(),
+            backend.reset_temp_limit(0).unwrap_err(),
+            backend
+                .write_offset_mhz(0, OffsetDomain::Core, OffsetBackend::Nvml, 100)
+                .unwrap_err(),
+            backend.reset_offset(0, OffsetDomain::Mem).unwrap_err(),
+        ] {
+            assert!(err.contains("out of range"), "{err}");
+        }
     }
 
     #[test]
