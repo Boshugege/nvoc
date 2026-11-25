@@ -344,7 +344,20 @@ pub struct NoiseFloor {
     /// Largest absolute deviation from the mean, as a percentage of the mean.
     /// One window is not a spread, so this is `None` until there are two.
     pub spread_percent: Option<f64>,
+    /// The smallest difference the run is willing to call a difference: the
+    /// measured spread, or [`MIN_RESOLVABLE_PERCENT`] when the two windows
+    /// happened to land closer together than the report can resolve.
+    pub threshold_percent: f64,
 }
+
+/// A spread measured from two windows is a *lower* bound on run-to-run noise,
+/// not the whole of it, and the score itself is quantised (whole iterations in
+/// a bounded window). On the test card a single 20 s window moved by 0.02
+/// percent between two identical runs, while a longer A/B comparison moved by
+/// 0.15 percent for no reason at all. Anything under half a percent is
+/// therefore below what this instrument can resolve, whatever two lucky
+/// windows happened to say, and is reported as indistinguishable.
+pub const MIN_RESOLVABLE_PERCENT: f64 = 0.5;
 
 pub fn noise_floor(runs: &[LoadThroughput]) -> Option<NoiseFloor> {
     if runs.is_empty() {
@@ -359,10 +372,14 @@ pub fn noise_floor(runs: &[LoadThroughput]) -> Option<NoiseFloor> {
             .map(|r| (r.iterations_per_second - mean).abs() * 100.0 / mean)
             .fold(0.0_f64, f64::max)
     });
+    let threshold_percent = spread_percent.map_or(MIN_RESOLVABLE_PERCENT, |spread| {
+        spread.max(MIN_RESOLVABLE_PERCENT)
+    });
     Some(NoiseFloor {
         windows: runs.len(),
         mean_per_second: mean,
         spread_percent,
+        threshold_percent,
     })
 }
 
@@ -379,9 +396,9 @@ pub struct SweepVerdict {
 }
 
 pub const SWEEP_NOTE: &str = "Candidates are ranked against a baseline repeat, not against \
-a single window: the spread between two identical stock windows is the smallest \
-difference this card can resolve, and any candidate inside it is reported as \
-indistinguishable rather than promoted.";
+a single window. The threshold is the wider of the measured spread and half a \
+percent, because two lucky windows understate the real run-to-run noise; \
+anything inside it is reported as indistinguishable rather than promoted.";
 
 /// Rank candidates by their measured window, refusing to promote anything the
 /// noise floor cannot separate. Order is best-first, and a tie keeps the order
@@ -399,7 +416,9 @@ pub fn rank_sweep(
                 target: target.clone(),
                 requested_khz: *requested_khz,
                 percent,
-                beats_noise: floor.spread_percent.is_some_and(|spread| percent > spread),
+                // Two windows and no floor is the one case with no threshold:
+                // never promote on the strength of a single baseline window.
+                beats_noise: floor.spread_percent.is_some() && percent > floor.threshold_percent,
             }
         })
         .collect();
@@ -807,6 +826,9 @@ mod tests {
         assert!((floor.mean_per_second - 2.425).abs() < 1e-12);
         let spread = floor.spread_percent.expect("spread");
         assert!((spread - 1.0309278350515463).abs() < 1e-9, "{spread}");
+        // The measured spread is wider than the resolution floor here, so it is
+        // the threshold.
+        assert!((floor.threshold_percent - spread).abs() < 1e-12);
     }
 
     #[test]
@@ -823,6 +845,22 @@ mod tests {
         assert!(ranked[0].beats_noise);
         assert_eq!(ranked[1].target, "graphics=-15mhz");
         assert!(!ranked[1].beats_noise, "{}", ranked[1].percent);
+    }
+
+    #[test]
+    fn a_quiet_pair_of_windows_does_not_lower_the_bar_to_its_own_luck() {
+        // Two identical windows 0.02 percent apart (the value the test card
+        // actually produced) would otherwise let a 0.08 percent candidate pass
+        // as a winner. The floor keeps it where it belongs.
+        let floor = noise_floor(&[window(2.3810), window(2.3815)]).expect("floor");
+        assert!(floor.spread_percent.expect("spread") < MIN_RESOLVABLE_PERCENT);
+        assert_eq!(floor.threshold_percent, MIN_RESOLVABLE_PERCENT);
+        let ranked = rank_sweep(&floor, &[("graphics".to_string(), -8_000, window(2.3834))]);
+        assert!(ranked[0].percent > 0.0);
+        assert!(
+            !ranked[0].beats_noise,
+            "a 0.08 percent gain is below this instrument's resolution"
+        );
     }
 
     #[test]
