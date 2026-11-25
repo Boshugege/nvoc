@@ -23,6 +23,11 @@
  *   --stream <seconds>     run the memory-bound stream kernel until the deadline
  *                          (a load generator, not a verifier -- see --stream-*
  *                          below and the note it prints)
+ *   --stream-lanes <n>     independent accumulator lanes per thread (default 1);
+ *                          more lanes keep more loads in flight
+ *   --stream-storage <s>   private (device memory, default) or shared (host
+ *                          memory across the bus); private is what makes the
+ *                          stream kernel draw power instead of the bus
  *   --json                 accepted; the JSON summary is always printed
  *   --inject-mismatch      test-only: corrupt one element after the dispatch so
  *                          the verifier must fail (proves detection end to end,
@@ -74,7 +79,7 @@ static const char *kSrc =
  * that every thread mutates, so --stream reports dispatch count and achieved
  * bandwidth and claims no correctness. Correctness comes from --verify and
  * --stress, which compare against a CPU reference element by element. */
-static const char *kStreamSrc =
+static const char *kStreamSrcTemplate =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
     "static inline ulong mix64(ulong x) {\n"
@@ -82,21 +87,53 @@ static const char *kStreamSrc =
     "  x ^= x >> 27; x *= 0x94d049bb133111ebUL;\n"
     "  return x ^ (x >> 31);\n"
     "}\n"
+    "#define LANES @LANES@\n"
     "kernel void nvoc_stream(device ulong *buf [[buffer(0)]],\n"
     "                        constant ulong &seed [[buffer(1)]],\n"
     "                        constant uint &count [[buffer(2)]],\n"
     "                        constant uint &passes [[buffer(3)]],\n"
     "                        constant uint &grid [[buffer(4)]],\n"
     "                        uint gid [[thread_position_in_grid]]) {\n"
-    "  ulong x = mix64(seed + ulong(gid));\n"
+    "  ulong acc[LANES];\n"
+    "  for (uint l = 0; l < LANES; ++l) acc[l] = mix64(seed + ulong(gid) + ulong(l));\n"
     "  for (uint p = 0; p < passes; ++p) {\n"
-    "    for (uint i = gid; i < count; i += grid) {\n"
-    "      x = mix64(x ^ buf[i] ^ ulong(p));\n"
-    "      buf[i] = x;\n"
+    "    for (uint base = gid; base < count; base += grid * LANES) {\n"
+    "      ulong v[LANES];\n"
+    "      for (uint l = 0; l < LANES; ++l) {\n"
+    "        uint i = base + l * grid;\n"
+    "        v[l] = i < count ? buf[i] : 0UL;\n"
+    "      }\n"
+    "      for (uint l = 0; l < LANES; ++l) {\n"
+    "        uint i = base + l * grid;\n"
+    "        acc[l] = mix64(acc[l] ^ v[l] ^ ulong(p));\n"
+    "        if (i < count) buf[i] = acc[l];\n"
+    "      }\n"
     "    }\n"
     "  }\n"
-    "  buf[gid] = x;\n"
+    "  buf[gid] = acc[0] ^ seed;\n"
     "}\n";
+
+/* One independent accumulator per lane, so each thread keeps several loads in
+ * flight instead of waiting on one dependent pair. The single-accumulator
+ * version moved 14.2 GB/s -- about 7 percent of the card's memory bandwidth,
+ * which is not enough to make the card draw power. */
+static char *build_stream_source(uint32_t lanes)
+{
+    const char *needle = "@LANES@";
+    const char *at = strstr(kStreamSrcTemplate, needle);
+    if (!at) return NULL;
+    char number[16];
+    snprintf(number, sizeof number, "%u", lanes);
+    const size_t head = (size_t)(at - kStreamSrcTemplate);
+    const size_t tail = strlen(at + strlen(needle));
+    char *out = malloc(head + strlen(number) + tail + 1);
+    if (!out) return NULL;
+    memcpy(out, kStreamSrcTemplate, head);
+    memcpy(out + head, number, strlen(number));
+    memcpy(out + head + strlen(number), at + strlen(needle), tail);
+    out[head + strlen(number) + tail] = '\0';
+    return out;
+}
 
 /* CPU reference: the same definition, so equality is exact. */
 static uint64_t mix64_cpu(uint64_t x)
@@ -164,12 +201,18 @@ static int parse_u64(const char *raw, uint64_t max, uint64_t *out)
  * buffer. Nothing here claims the data is right -- see the note above. */
 static int run_stream(id<MTLDevice> dev, const char *dev_name, double seconds,
                       uint64_t stream_elements, uint64_t stream_threads,
-                      uint64_t stream_passes)
+                      uint64_t stream_passes, uint64_t stream_lanes, int stream_private)
 {
     NSError *err = nil;
-    id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:kStreamSrc]
+    char *source = build_stream_source((uint32_t)stream_lanes);
+    if (!source) {
+        fprintf(stderr, "stream source build failed\n");
+        return 2;
+    }
+    id<MTLLibrary> lib = [dev newLibraryWithSource:[NSString stringWithUTF8String:source]
                                            options:nil
                                              error:&err];
+    free(source);
     if (!lib) {
         fprintf(stderr, "stream library error: %s\n", err.description.UTF8String);
         return 2;
@@ -183,15 +226,31 @@ static int run_stream(id<MTLDevice> dev, const char *dev_name, double seconds,
     id<MTLCommandQueue> queue = [dev newCommandQueue];
 
     const uint64_t bytes = stream_elements * sizeof(uint64_t);
-    id<MTLBuffer> buf = [dev newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+    /* Private storage is device memory; shared storage is host memory that the
+     * GPU reaches across the bus. The verifier needs shared because it reads
+     * every element back on the CPU, and that choice capped the stream kernel at
+     * the bus -- about 14 GB/s, no matter how many loads each thread keeps in
+     * flight. A load generator has nothing to read back, so it uses private. */
+    const MTLResourceOptions buf_options =
+        stream_private ? MTLResourceStorageModePrivate : MTLResourceStorageModeShared;
+    id<MTLBuffer> buf = [dev newBufferWithLength:bytes options:buf_options];
     if (!buf) {
         fprintf(stderr, "stream buffer allocation failed (%llu bytes)\n",
                 (unsigned long long)bytes);
         return 2;
     }
-    uint64_t *host = buf.contents;
-    for (uint64_t i = 0; i < stream_elements; ++i) host[i] = (i * 0x9e3779b97f4a7c15ULL) ^ 0xa5a5a5a5ULL;
-    const uint64_t first_before = host[0];
+    uint64_t *host = stream_private ? NULL : buf.contents;
+    if (host) {
+        for (uint64_t i = 0; i < stream_elements; ++i) host[i] = (i * 0x9e3779b97f4a7c15ULL) ^ 0xa5a5a5a5ULL;
+    }
+    /* For a private buffer the only witness that the kernel ran is a value that
+     * comes back from the device: peek the first element through a 8-byte shared
+     * staging buffer after the first dispatch and again at the end. */
+    id<MTLBuffer> peek = [dev newBufferWithLength:sizeof(uint64_t)
+                                          options:MTLResourceStorageModeShared];
+    uint64_t first_peek = 0, last_peek = 0;
+    int peeks = 0;
+    const uint64_t first_before = host ? host[0] : 0;
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
@@ -250,25 +309,73 @@ static int run_stream(id<MTLDevice> dev, const char *dev_name, double seconds,
     }
 
     const uint64_t elapsed = now_ns() - t0;
-    /* Cheap evidence that the kernel ran at all: the first element it owns must
-     * have changed. It is not a correctness check and does not pretend to be. */
-    const int state_changed = host[0] != first_before;
+    /* Cheap evidence that the kernel ran at all: either the host-visible first
+     * element changed, or a value read back from the device differs from what a
+     * second read back returns. Neither is a correctness check. */
+    int state_changed = host ? (host[0] != first_before) : 0;
+    if (!host && !failed) {
+        for (int round = 0; round < 2; ++round) {
+            id<MTLCommandBuffer> cb = [queue commandBuffer];
+            id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+            [blit copyFromBuffer:buf sourceOffset:0 toBuffer:peek destinationOffset:0
+                          size:sizeof(uint64_t)];
+            [blit endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (cb.status != MTLCommandBufferStatusCompleted) {
+                fprintf(stderr, "stream read-back failed: %s\n",
+                        cb.error.description.UTF8String);
+                ++failed;
+                break;
+            }
+            /* Nudge the device between the two reads so the second read cannot
+             * simply repeat the first one. */
+            uint64_t seed = 0x9e3779b97f4a7c15ULL * (uint64_t)(round + 2 + launched);
+            id<MTLCommandBuffer> cbn = [queue commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cbn computeCommandEncoder];
+            [enc setComputePipelineState:pipe];
+            [enc setBuffer:buf offset:0 atIndex:0];
+            [enc setBytes:&seed length:sizeof(seed) atIndex:1];
+            [enc setBytes:&count length:sizeof(count) atIndex:2];
+            [enc setBytes:&passes length:sizeof(passes) atIndex:3];
+            [enc setBytes:&grid_u32 length:sizeof(grid_u32) atIndex:4];
+            [enc dispatchThreads:grid threadsPerThreadgroup:group];
+            [enc endEncoding];
+            [cbn commit];
+            [cbn waitUntilCompleted];
+            uint64_t value = 0;
+            memcpy(&value, peek.contents, sizeof(value));
+            if (round == 0) first_peek = value;
+            else last_peek = value;
+            ++peeks;
+            if (cbn.status != MTLCommandBufferStatusCompleted) {
+                fprintf(stderr, "stream command buffer failed: %s\n",
+                        cbn.error.description.UTF8String);
+                ++failed;
+                break;
+            }
+        }
+        if (peeks == 2) state_changed = first_peek != last_peek;
+    }
     const double seconds_elapsed = (double)elapsed / 1e9;
     const double gigabytes = (double)per_dispatch_bytes * (double)(launched - failed) / 1e9;
     printf("{\"schema\":\"nvoc/macos-metal-stream/1\",\"device\":\"%s\","
            "\"backend\":\"metal\",\"mode\":\"stream\","
-           "\"elements\":%llu,\"threads\":%llu,\"passes\":%llu,"
+           "\"elements\":%llu,\"threads\":%llu,\"passes\":%llu,\"lanes\":%llu,"
            "\"bytes_per_dispatch\":%llu,\"dispatches\":%llu,\"failed\":%llu,"
            "\"elapsed_ms\":%llu,\"gigabytes_moved\":%.3f,"
            "\"gigabytes_per_second\":%.3f,\"state_changed\":%s,"
+           "\"storage\":\"%s\","
            "\"verification\":\"none\",\"stopped_by_signal\":%s}\n",
            dev_name,
            (unsigned long long)stream_elements, (unsigned long long)stream_threads,
-           (unsigned long long)stream_passes, (unsigned long long)per_dispatch_bytes,
+           (unsigned long long)stream_passes, (unsigned long long)stream_lanes,
+           (unsigned long long)per_dispatch_bytes,
            (unsigned long long)launched, (unsigned long long)failed,
            (unsigned long long)(elapsed / 1000000), gigabytes,
            seconds_elapsed > 0.0 ? gigabytes / seconds_elapsed : 0.0,
-           state_changed ? "true" : "false", g_stop ? "true" : "false");
+           state_changed ? "true" : "false", stream_private ? "private" : "shared",
+           g_stop ? "true" : "false");
     fflush(stdout);
     return failed ? 1 : 0;
 }
@@ -287,6 +394,8 @@ int main(int argc, char **argv)
         uint64_t stream_elements = 4194304;
         uint64_t stream_threads = 8192;
         uint64_t stream_passes = 8;
+        uint64_t stream_lanes = 1;
+        int stream_private = 1;
 
         for (int i = 1; i < argc; i++) {
             if (!strcmp(argv[i], "--verify")) want_verify = 1;
@@ -321,6 +430,15 @@ int main(int argc, char **argv)
                 if (parse_u64(argv[++i], 4096, &stream_passes) || !stream_passes) {
                     fprintf(stderr, "bad --stream-passes\n"); return 2;
                 }
+            } else if (!strcmp(argv[i], "--stream-lanes") && i + 1 < argc) {
+                if (parse_u64(argv[++i], 16, &stream_lanes) || !stream_lanes) {
+                    fprintf(stderr, "bad --stream-lanes\n"); return 2;
+                }
+            } else if (!strcmp(argv[i], "--stream-storage") && i + 1 < argc) {
+                const char *how = argv[++i];
+                if (!strcmp(how, "private")) stream_private = 1;
+                else if (!strcmp(how, "shared")) stream_private = 0;
+                else { fprintf(stderr, "bad --stream-storage (private|shared)\n"); return 2; }
             } else if (!strcmp(argv[i], "--inject-mismatch")) inject_mismatch = 1;
             else if (!strcmp(argv[i], "--json")) {
                 /* the summary line is always emitted */
@@ -328,7 +446,8 @@ int main(int argc, char **argv)
                 printf("usage: metal_check (--verify | --stress <sec>) [--gpu <substr>] "
                        "[--elements N] [--iters N] [--verify-sample N]\n"
                        "       metal_check --stream <sec> [--gpu <substr>] "
-                       "[--stream-elements N] [--stream-threads N] [--stream-passes N]\n");
+                       "[--stream-elements N] [--stream-threads N] [--stream-passes N] "
+                       "[--stream-lanes N] [--stream-storage private|shared]\n");
                 return 0;
             } else {
                 fprintf(stderr, "unknown argument: %s\n", argv[i]);
@@ -368,7 +487,8 @@ int main(int argc, char **argv)
         if (!dev) { fprintf(stderr, "no Metal device\n"); return 2; }
         if (stream_only) {
             return run_stream(dev, dev.name ? dev.name.UTF8String : "unknown", stream_seconds,
-                              stream_elements, stream_threads, stream_passes);
+                              stream_elements, stream_threads, stream_passes, stream_lanes,
+                              stream_private);
         }
 
         NSError *err = nil;
@@ -402,23 +522,29 @@ int main(int argc, char **argv)
             seeds[i] = 0;
         }
 
-        /* Self-test: a deliberately corrupted value must be rejected. */
+        /* Self-test: a deliberately corrupted value must be rejected.
+         *
+         * Only the probed index needs a reference. Filling the whole array used
+         * to cost elements * iters CPU mixes -- 4 M elements at 20000 iterations
+         * is 8e10, minutes of wall clock per process -- which quietly made any
+         * large-grid run look like a hung GPU. */
         const uint64_t selftest_seed = 0x0123456789abcdefULL;
         uint64_t *selftest = malloc((size_t)bytes);
         if (!selftest) { fprintf(stderr, "host allocation failed\n"); return 2; }
-        for (uint64_t i = 0; i < elements; ++i) {
-            selftest[i] = reference_one(selftest_seed, i, (uint32_t)iters);
-        }
-        struct mismatch st = compare_one(selftest, elements / 2, selftest_seed, (uint32_t)iters);
+        const uint64_t selftest_index = elements / 2;
+        memset(selftest, 0, (size_t)bytes);
+        selftest[selftest_index] = reference_one(selftest_seed, selftest_index,
+                                                 (uint32_t)iters);
+        struct mismatch st = compare_one(selftest, selftest_index, selftest_seed, (uint32_t)iters);
         if (st.count) {
             fprintf(stderr, "verifier self-test failed: reference disagrees with itself\n");
             free(selftest);
             return 2;
         }
-        uint64_t saved = selftest[elements / 2];
-        selftest[elements / 2] ^= 1;
-        st = compare_one(selftest, elements / 2, selftest_seed, (uint32_t)iters);
-        selftest[elements / 2] = saved;
+        uint64_t saved = selftest[selftest_index];
+        selftest[selftest_index] ^= 1;
+        st = compare_one(selftest, selftest_index, selftest_seed, (uint32_t)iters);
+        selftest[selftest_index] = saved;
         if (st.count != 1) {
             fprintf(stderr, "verifier self-test failed: comparator missed a corrupted value\n");
             free(selftest);
