@@ -45,6 +45,7 @@ use crate::controller::{ControlBackend, FanReading, SensorBundle};
 use crate::monitor::{MonitorSample, OffsetBackend, OffsetDomain};
 use nvoc_core::DeviceStatus;
 use std::borrow::Cow;
+use std::time::{Duration, Instant};
 
 /// One reason string shared by every actuator path, so the HTTP body, the
 /// audit entry and the capability matrix cannot drift apart. It names the two
@@ -78,9 +79,37 @@ struct MacosGpu {
 /// releases the lock before starting the next one.
 pub const RECOMMENDED_INTERVAL_MS: u64 = 8000;
 
+/// How long one readout may be reused by later calls.
+///
+/// A single HTTP request asks this backend for the power window, the thermal
+/// window, the offset window, two offsets, the live clock and a monitor
+/// sample; a single tick asks for status, settings and a monitor sample. Each
+/// underlying read costs 0.7 s (status) to 1.3 s (settings) on the validation
+/// card, so reading them separately once per caller made `/api/oc` take 9.6 s
+/// and drove the loop's tick far past its interval. Within one second they are
+/// the same readout, so they are read once.
+const READOUT_TTL: Duration = Duration::from_millis(1000);
+
+/// Whether a cached readout may be reused for this index right now.
+///
+/// Split out from the readers so the two rules that matter — same GPU, and
+/// younger than `READOUT_TTL` — can be tested without a device.
+fn readout_hit<T>(cache: &Option<(Instant, usize, T)>, index: usize) -> Option<&T> {
+    let (at, cached_index, value) = cache.as_ref()?;
+    if *cached_index == index && at.elapsed() < READOUT_TTL {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 /// Read-only [`ControlBackend`] backed by the NullMoth RM session.
 pub struct MacosRmBackend {
     gpus: Vec<MacosGpu>,
+    /// Last readout per GPU, reused for `READOUT_TTL`. Cleared on every write:
+    /// a write is exactly when the next read must not be the pre-write one.
+    settings_cache: Option<(Instant, usize, nvoc_core::DeviceSettings)>,
+    status_cache: Option<(Instant, usize, DeviceStatus)>,
 }
 
 impl MacosRmBackend {
@@ -102,7 +131,11 @@ impl MacosRmBackend {
                 MacosGpu { device, name }
             })
             .collect();
-        Ok(Self { gpus })
+        Ok(Self {
+            gpus,
+            settings_cache: None,
+            status_cache: None,
+        })
     }
 
     fn gpu(&self, index: usize) -> Result<&MacosGpu, String> {
@@ -114,26 +147,44 @@ impl MacosRmBackend {
         })
     }
 
+    /// Forget both readouts: the next read must reflect a write that just
+    /// happened, including the readback that proves it landed.
+    fn forget_readout(&mut self) {
+        self.settings_cache = None;
+        self.status_cache = None;
+    }
+
     /// One coherent, read-only snapshot for `index`. `Device::status` opens,
     /// samples and closes the RM chain, and re-checks identity, so a device
     /// that vanished behind us is reported rather than mislabelled.
-    fn status(&self, index: usize) -> Result<DeviceStatus, String> {
-        self.gpu(index)?
+    fn status(&mut self, index: usize) -> Result<DeviceStatus, String> {
+        if let Some(status) = readout_hit(&self.status_cache, index) {
+            return Ok(status.clone());
+        }
+        let status = self
+            .gpu(index)?
             .device
             .status()
-            .map_err(|e| format!("GPU {index}: macOS RM status: {e}"))
+            .map_err(|e| format!("GPU {index}: macOS RM status: {e}"))?;
+        self.status_cache = Some((Instant::now(), index, status.clone()));
+        Ok(status)
     }
 
     /// One coherent, read-only settings projection for `index`.
     ///
     /// This is the same `QueryMacosRmSettings` the CLI and pynvoc read, so the
     /// OC page cannot publish a window the other two consumers do not see.
-    fn settings(&self, index: usize) -> Result<nvoc_core::DeviceSettings, String> {
+    fn settings(&mut self, index: usize) -> Result<nvoc_core::DeviceSettings, String> {
+        if let Some(settings) = readout_hit(&self.settings_cache, index) {
+            return Ok(settings.clone());
+        }
         let gpu = self.gpu(index)?;
         let target = nvoc_core::GpuTarget::macos_rm_only(gpu.device.id(), index, &gpu.device);
-        nvoc_core::run(&target, nvoc_core::QueryMacosRmSettings)
+        let settings = nvoc_core::run(&target, nvoc_core::QueryMacosRmSettings)
             .map(|report| report.output)
-            .map_err(|e| format!("GPU {index}: macOS RM settings: {e}"))
+            .map_err(|e| format!("GPU {index}: macOS RM settings: {e}"))?;
+        self.settings_cache = Some((Instant::now(), index, settings.clone()));
+        Ok(settings)
     }
 
     /// Additive clock offset in kHz, one domain at a time.
@@ -143,11 +194,12 @@ impl MacosRmBackend {
     /// transaction; the window (-18750..18750 kHz) is the driver's own and is
     /// enforced by core, not re-implemented here.
     fn write_offset_khz(
-        &self,
+        &mut self,
         gpu_index: usize,
         domain: OffsetDomain,
         khz: i32,
     ) -> Result<(), String> {
+        self.forget_readout();
         let clock_domain = match domain {
             OffsetDomain::Core => nvoc_core::ClockDomain::Graphics,
             OffsetDomain::Mem => nvoc_core::ClockDomain::Memory,
@@ -394,6 +446,7 @@ impl ControlBackend for MacosRmBackend {
         backend: OffsetBackend,
         mhz: i32,
     ) -> Result<(), String> {
+        self.forget_readout();
         // `backend` selects NVAPI vs NVML offset semantics; this transport has
         // one additive channel, so both route to the same RM write instead of
         // silently ignoring the request.
@@ -402,6 +455,7 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn write_power_limit_w(&mut self, gpu_index: usize, watts: u32) -> Result<(), String> {
+        self.forget_readout();
         let milliwatts =
             nvoc_core::validate_macos_power_limit_watts(watts).map_err(|e| format!("{e}"))?;
         self.run_op(
@@ -415,6 +469,7 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn write_temp_limit_c(&mut self, gpu_index: usize, celsius: i32) -> Result<(), String> {
+        self.forget_readout();
         self.run_op(
             gpu_index,
             nvoc_core::SetMacosRmAcousticTarget {
@@ -426,10 +481,12 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn reset_offset(&mut self, gpu_index: usize, domain: OffsetDomain) -> Result<(), String> {
+        self.forget_readout();
         self.write_offset_khz(gpu_index, domain, 0)
     }
 
     fn reset_power_limit(&mut self, gpu_index: usize) -> Result<(), String> {
+        self.forget_readout();
         // `PowerLimitTarget::Default` asks the driver for its own limit rather
         // than pinning a number this client invented.
         self.run_op(
@@ -443,6 +500,7 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn reset_temp_limit(&mut self, gpu_index: usize) -> Result<(), String> {
+        self.forget_readout();
         self.run_op(
             gpu_index,
             nvoc_core::SetMacosRmAcousticTarget {
@@ -454,6 +512,7 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn write_fan_percent(&mut self, gpu_index: usize, percent: u32) -> Result<(), String> {
+        self.forget_readout();
         nvoc_core::validate_macos_fan_request(0, nvoc_core::FanControlTarget::Percent(percent))
             .map_err(|e| format!("{e}"))?;
         self.run_op(
@@ -472,6 +531,7 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn restore_fan_auto(&mut self, gpu_index: usize) -> Result<(), String> {
+        self.forget_readout();
         self.run_op(
             gpu_index,
             nvoc_core::SetMacosRmFanControl {
@@ -577,7 +637,11 @@ mod tests {
         // names the missing undo instead of pretending the write is available.
         assert!(NO_FREQUENCY_UNDO.contains("0x2080d041"));
         assert!(NO_FREQUENCY_UNDO.contains("0x2080c535"));
-        let mut backend = MacosRmBackend { gpus: Vec::new() };
+        let mut backend = MacosRmBackend {
+            gpus: Vec::new(),
+            settings_cache: None,
+            status_cache: None,
+        };
         assert_eq!(
             backend.write_freq_cap_khz(0, 1_620_000),
             Err(NO_FREQUENCY_UNDO.to_string())
@@ -593,7 +657,11 @@ mod tests {
         // families this backend can actually apply one transaction at a time.
         let bulk = nvoc_core::macos_rm::SETTINGS_WRITE_SUPPORTED;
         assert!(!bulk, "bulk settings/restore is still gated: {bulk}");
-        let mut backend = MacosRmBackend { gpus: Vec::new() };
+        let mut backend = MacosRmBackend {
+            gpus: Vec::new(),
+            settings_cache: None,
+            status_cache: None,
+        };
         assert!(backend.supports_writes());
         assert_ne!(backend.supports_writes(), bulk);
         assert_eq!(backend.backend_kind(), "macos-rm");
@@ -612,7 +680,11 @@ mod tests {
         // With no GPUs attached a validation failure must still be the *first*
         // error: a caller with 150 W or 101 percent gets the range, not "GPU 0
         // out of range", so the gate order is visible in the message.
-        let mut backend = MacosRmBackend { gpus: Vec::new() };
+        let mut backend = MacosRmBackend {
+            gpus: Vec::new(),
+            settings_cache: None,
+            status_cache: None,
+        };
         let power = backend.write_power_limit_w(0, 150).unwrap_err();
         assert!(
             power.contains('1') && power.to_lowercase().contains("w"),
@@ -628,7 +700,11 @@ mod tests {
     fn a_missing_gpu_is_named_instead_of_writing_to_nothing() {
         // The actuators are routable now, so the failure mode changed: an index
         // that does not exist must say so rather than quietly succeeding.
-        let mut backend = MacosRmBackend { gpus: Vec::new() };
+        let mut backend = MacosRmBackend {
+            gpus: Vec::new(),
+            settings_cache: None,
+            status_cache: None,
+        };
         for err in [
             backend.write_fan_percent(0, 40).unwrap_err(),
             backend.restore_fan_auto(0).unwrap_err(),
@@ -647,7 +723,11 @@ mod tests {
 
     #[test]
     fn unavailable_reads_report_a_reason_instead_of_a_fake_window() {
-        let mut backend = MacosRmBackend { gpus: Vec::new() };
+        let mut backend = MacosRmBackend {
+            gpus: Vec::new(),
+            settings_cache: None,
+            status_cache: None,
+        };
         // Power and thermal now read the driver's own policy blocks, so with no
         // GPU attached they fail loudly instead of returning a window: a
         // missing device must not read as "no window published".
@@ -711,5 +791,35 @@ mod tests {
         const _: () = assert!(RECOMMENDED_INTERVAL_MS > MEASURED_SETTINGS_MS + MEASURED_STATUS_MS);
         // And it is a floor, not a cap: a longer configured interval wins.
         const _: () = assert!(RECOMMENDED_INTERVAL_MS >= 4 * MEASURED_STATUS_MS);
+    }
+
+    #[test]
+    fn a_readout_is_reused_only_for_the_same_gpu_and_only_inside_the_window() {
+        let fresh: Option<(Instant, usize, u8)> = Some((Instant::now(), 0, 7));
+        assert_eq!(readout_hit(&fresh, 0), Some(&7));
+        // A different GPU must never be served the other card's readout.
+        assert_eq!(readout_hit(&fresh, 1), None);
+        // An entry older than the window is due for a fresh read.
+        let stale: Option<(Instant, usize, u8)> = Some((
+            Instant::now() - READOUT_TTL - Duration::from_millis(1),
+            0,
+            7,
+        ));
+        assert_eq!(readout_hit(&stale, 0), None);
+        assert_eq!(readout_hit::<u8>(&None, 0), None);
+    }
+
+    #[test]
+    fn a_write_forgets_the_readout_so_the_readback_is_the_new_one() {
+        let mut backend = MacosRmBackend {
+            gpus: Vec::new(),
+            settings_cache: None,
+            status_cache: None,
+        };
+        backend.settings_cache = Some((Instant::now(), 0, Default::default()));
+        assert!(readout_hit(&backend.settings_cache, 0).is_some());
+        backend.forget_readout();
+        assert!(readout_hit(&backend.settings_cache, 0).is_none());
+        assert!(readout_hit(&backend.status_cache, 0).is_none());
     }
 }
