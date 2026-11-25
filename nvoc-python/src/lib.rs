@@ -1477,6 +1477,7 @@ fn settings_macos_rm_to_map(
     gpu_id: u32,
     index: usize,
     settings: &nvoc_core::DeviceSettings,
+    live_clock_khz: Option<u32>,
 ) -> Value {
     let mut map = Map::new();
     map.insert("backend".into(), text("macos-rm"));
@@ -1651,6 +1652,57 @@ fn settings_macos_rm_to_map(
             ),
         );
     }
+    // The span the driver itself accepts, and what it is worth at the clock the
+    // card is running now. Absent with a reason when the range block was not
+    // read: "no window" must never read as "a window of zero".
+    match &settings.clock_offset_limits_khz {
+        Some(limits) => {
+            let potential =
+                nvoc_core::offset_potential(limits.min_khz, limits.max_khz, live_clock_khz);
+            map.insert(
+                "clock_offset_window".into(),
+                value_object([
+                    ("min_khz", i64_value(limits.min_khz as i64)),
+                    ("max_khz", i64_value(limits.max_khz as i64)),
+                    ("records", u64_value(limits.records as u64)),
+                    (
+                        "potential",
+                        value_object([
+                            ("window_min_mhz", f64_value(potential.window_min_mhz)),
+                            ("window_max_mhz", f64_value(potential.window_max_mhz)),
+                            (
+                                "clock_mhz",
+                                match potential.clock_mhz {
+                                    Some(clock) => f64_value(clock),
+                                    None => Value::Null,
+                                },
+                            ),
+                            (
+                                "min_percent",
+                                match potential.min_percent {
+                                    Some(v) => f64_value(v),
+                                    None => Value::Null,
+                                },
+                            ),
+                            (
+                                "max_percent",
+                                match potential.max_percent {
+                                    Some(v) => f64_value(v),
+                                    None => Value::Null,
+                                },
+                            ),
+                            ("note", text(potential.note)),
+                        ]),
+                    ),
+                ]),
+            );
+        }
+        None => {
+            if let Some(reason) = settings.window_absence_reason() {
+                map.insert("clock_offset_window_unavailable".into(), text(reason));
+            }
+        }
+    }
     // The domains the driver will offset. Each entry is the device's own index,
     // domain bit and type stamp: the bit is a *position* in a domain namespace
     // this frontend cannot name (see `ClockOffsetDomain`), so no name is
@@ -1720,10 +1772,15 @@ fn normalize_settings(target: &GpuTarget<'_>) -> PyResultValue {
     if target.has_macos_rm() {
         let device = target.macos_rm().map_err(to_py_err)?;
         let settings = device.settings().map_err(to_py_err)?;
+        // The live clock is the divisor the window's worth is expressed against.
+        // Best effort: a status read that fails must not fail the settings read,
+        // it just means the potentials stay null.
+        let live_clock_khz = device.status().ok().and_then(|s| s.graphics_clock_khz);
         return Ok(settings_macos_rm_to_map(
             target.id.0,
             target.index,
             &settings,
+            live_clock_khz,
         ));
     }
     let settings = run(target, QueryGpuSettings).map_err(to_py_err)?.output;
@@ -7163,6 +7220,27 @@ mod tests {
         );
     }
 
+    /// An unread window must arrive as a reason, not as a window of zero and not
+    /// as a percentage of nothing.
+    #[test]
+    fn macos_rm_settings_report_an_unread_window_as_a_reason() {
+        let settings = nvoc_core::DeviceSettings {
+            clock_offset_limits_khz: None,
+            notes: vec!["offset channel: the range block answered 0x3a".to_string()],
+            ..Default::default()
+        };
+        let value = settings_macos_rm_to_map(0x100, 0, &settings, Some(1_530_000));
+        let map = value.as_object().expect("settings map is an object");
+        assert!(
+            !map.contains_key("clock_offset_window"),
+            "no span was read, so none may be published: {map:?}"
+        );
+        let reason = map["clock_offset_window_unavailable"]
+            .as_str()
+            .expect("the absence names its cause");
+        assert!(reason.contains("0x3a"), "{reason}");
+    }
+
     /// The macOS settings projection must report what it reads, and must name
     /// the families it cannot read instead of emitting default-looking zeros.
     #[test]
@@ -7228,7 +7306,7 @@ mod tests {
             },
             notes: vec!["read: ...".to_string()],
         };
-        let value = settings_macos_rm_to_map(0x100, 0, &settings);
+        let value = settings_macos_rm_to_map(0x100, 0, &settings, Some(6_000_984));
         let map = value.as_object().expect("settings map is an object");
         assert_eq!(map["pstate"].as_str(), Some("P8"));
         assert_eq!(map["power_limit_current"], u64_value(100));
@@ -7246,6 +7324,27 @@ mod tests {
         // the per-bit list is carried instead of two named values.
         assert_eq!(map["clock_offset_min_khz"], i64_value(-18_750));
         assert_eq!(map["clock_offset_max_khz"], i64_value(18_750));
+        // The window arrives with what it is worth at the clock this snapshot
+        // published: a caller that only sees "18750 kHz" cannot tell that this is
+        // under one percent of the clock the card actually runs.
+        let window = map["clock_offset_window"]
+            .as_object()
+            .expect("the window is an object when the range block was read");
+        assert_eq!(window["min_khz"], i64_value(-18_750));
+        assert_eq!(window["max_khz"], i64_value(18_750));
+        assert_eq!(window["records"], u64_value(3));
+        let potential = window["potential"]
+            .as_object()
+            .expect("the window carries its potential");
+        assert_eq!(potential["window_max_mhz"], f64_value(18.75));
+        assert_eq!(potential["clock_mhz"], f64_value(6000.984));
+        assert!(
+            potential["max_percent"]
+                .as_f64()
+                .is_some_and(|v| (v - 0.3125).abs() < 1e-3),
+            "{:?}",
+            potential["max_percent"]
+        );
         assert_eq!(map["clock_offset_limits_records"], u64_value(3));
         let offsets = map["clock_offsets"]
             .as_array()
