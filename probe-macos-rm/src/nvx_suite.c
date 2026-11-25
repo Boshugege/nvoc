@@ -2642,6 +2642,10 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
          * this family, and 0x20809014 is a different one.  Read-only, one
          * unknown id this boot. */
         { "lock-twin 0x20809040 @4808", 0x20809040u, 4808u, ~0u, 0u, 0u },
+        /* Same family with the product-shaped request in it: if the zero answer
+         * means "no window requested" this one has to fill something in. */
+        { "lock-twin seed 0x20809040 @4808", 0x20809040u, 4808u, ~0u, 0u, 0u,
+          lock_request, 6u },
         { "lock-query vP8 100/200 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 0u,
           lock_request, 6u },
         { "lock-query vP8 100/200 0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u,
