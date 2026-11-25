@@ -48,6 +48,28 @@ macOS 侧**正确性校验**补充件。主力压力负载沿用原 NVOC 的 Vul
 `failures`/`checked_elements`/`mismatched_elements`/`first_bad_*`/`elapsed_ms`/
 `stopped_by_signal`，可直接被上层消费者解析。
 
+## `--stream`：内存受限负载（负载发生器，不是校验器）
+
+`nvoc_mix` 内核把状态全留在寄存器里，功耗与 SM 占用都上不去（6 实例并发也只有 14 W）。`--stream`
+走另一个内核 `nvoc_stream`：每个线程以 grid stride 走遍整个缓冲，每一趟读+写全缓冲，功耗来自
+内存流量而不是 ALU。
+
+```sh
+./metal_check --stream 60                                        # 默认 4M 元素 × 8 趟 × 8192 线程
+./metal_check --stream 60 --stream-elements 16777216 --stream-passes 4
+```
+
+- 参数：`--stream <sec>`、`--stream-elements <n>`（默认 4194304 = 32 MB）、`--stream-threads <n>`
+  （默认 8192）、`--stream-passes <n>`（默认 8）。
+- **不能**与 `--verify`/`--stress` 同时使用（直接 exit 2 并说明理由）：缓冲被每个线程反复改写，
+  没有可比的 CPU 参考，所以这一模式只报"跑了多少次 dispatch、搬了多少字节、达到多少 GB/s"，
+  JSON 里显式写 `"verification":"none"`，并给一个廉价的 `state_changed`（线程 0 拥有的元素
+  首尾是否变化）作为"确实跑了"的弱证据。**正确性仍由 `--verify` / `--stress` 逐元素比对承担。**
+
+结果 JSON schema `nvoc/macos-metal-stream/1`：`elements`/`threads`/`passes`/
+`bytes_per_dispatch`/`dispatches`/`failed`/`elapsed_ms`/`gigabytes_moved`/
+`gigabytes_per_second`/`state_changed`/`verification`/`stopped_by_signal`。
+
 ## 实测（GTX 1650 SUPER / NVMTL over NVK TU116-A）
 
 | 项 | 命令 | 结果 |
@@ -61,3 +83,28 @@ macOS 侧**正确性校验**补充件。主力压力负载沿用原 NVOC 的 Vul
 65536 元素 × `iters` 次混合会主导墙钟时间（`iters=20000` 约 4 s CPU/次），
 GPU 端单位 dispatch 只有几十毫秒量级。要拉长负载请优先加 `--elements`
 或用 `--stress`，不要靠 `--iters` 堆 CPU 时间。
+
+## 实测补充：`--stream` 与"这台机器到不了功耗墙"
+
+| 项 | 命令 | 结果 |
+| --- | --- | --- |
+| 内存受限负载 | `--stream 5 --stream-elements 4194304 --stream-passes 8` | exit 0，136 次 dispatch，73.0 GB 搬运，**14.2 GB/s**，`state_changed=true` |
+| 更大缓冲 | `--stream 5 --stream-elements 16777216 --stream-passes 4` | 70 次 dispatch，75.2 GB，**14.2 GB/s** |
+| 拒绝组合 | `--stream 1 --verify` | exit 2，输出"不能与 --verify/--stress 组合"的理由 |
+
+RM 遥测同步采样（`--stream` × 1 / 3 / 6 实例，各 40 s）：
+
+| 实例数 | 功耗峰值 | 利用率峰值 | 温度峰值 | 时钟峰值 |
+| --- | --- | --- | --- | --- |
+| 1 | 11.85 W | **100 %** | 53.0 ℃ | 1950 MHz |
+| 3 | 11.84 W | 100 % | 51.1 ℃ | 1950 MHz |
+| 6 | 11.80 W | 100 % | 50.1 ℃ | 1950 MHz |
+
+两条结论，都写进文档：
+
+1. 内存受限内核在这台机器上只有 **14.2 GB/s**（TU116 的 192 GB/s 的约 7 %），且功耗读数
+   比 ALU 内核还低（11.8 W vs 14.5 W），温度只抬 1.7–2.5 ℃ ⇒ 这条路径（NVMTL over NVK）
+   **送不出足以触到功耗墙的负载**。
+2. 驱动的 `power_w` 在"空闲 11.3–11.5 W"与"任意负载 11.8–14.5 W"之间几乎不动，**不能用来判定
+   离 100 W 上限有多远**；`utilization_percent` 则会在 100 % 与 40 % 之间大幅摆动，二者不自洽，
+   所以"利用率 100 %"也不能当作"卡在满载"的证据。
