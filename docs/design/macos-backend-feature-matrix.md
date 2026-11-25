@@ -2811,3 +2811,13 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **③ 验证** ✔（仅单测，见边界）：`gui/tests/test_platform_macos.py` 新增 **17 条**，覆盖单传输标签与后端映射（含"下拉写 NVML 也只能落到 RM"）、两项策略、`curve` 抛错含完整理由、占空比预填五种形态（含布尔与 auto/0）、`apply`/`reset` 发出的 `FanSettings`（`manual`/`auto` + level 0）、`on_backend_change` 把游离的 `continuous` 归一成 `manual`、NVAPI 路径不受影响；`cd gui && uv run pytest tests` → **298 passed / 13 skipped**；`cargo xtask ci` → `CI_EXIT=0`。
 
 **④ 边界** ✗：**GUI 没有跑过**。tkinter 需要窗口服务器，而测试机是 SSH 进的 headless 会话，起不了 Aqua——所以本轮没有 GUI 的真机证据。底层 pynvoc 调用（`set_fan(gpu,"macos-rm","all","manual",40)` → 回读 39.9994/manual → 复位 auto/0，转速 0→1285–1327→0）已在 `outputs/stage-tui-macos-fan-20261125T170936Z/` 实测过，GUI 现在发出的正是这些实参；两者之间只差 GUI 自己的壳。这条差距写在文档里而不是含糊过去：**"代码路径与实参相同"不等于"GUI 在 macOS 上被点过"**。
+
+## 一百六十五、"under load" 必须由窗口自己的遥测证明
+
+**① 发现** ✗（2026-11-25 实测）：优化器 `--load-source metal` 的窗口**没有把这张卡拉起来**。`metal_check --elements 65536`（优化器默认）在 30 s 内完成 72 次全 bit-exact 校验（证明它确实在算），但同期 `query_status` 读到的是**空闲时钟 1530 MHz、空闲功耗 11.4–11.5 W、利用率 0 %**，芯片温度相对运行前只抬升约 1–4 ℃；把 elements 提到 4 M 也只是偶发一次 1875 MHz。⇒ 之前 `stage-eval-sweep-*` 报告里的 `under_load` 块应读作"校验器运行期间"，而非"负载下"；那几份报告的 `winner: null` 结论仍成立（0.5 % 噪声底已挡住），但真实理由更强：窗口里没有可比较的负载效应。
+
+**② 修复** ✔：`core::macos_eval::load_evidence()` 把同一窗口的遥测归约成三个在这台卡上真会动的信号，`demonstrated` 仅当至少一个越线——利用率均值 ≥ 50 %、芯片温度**相对窗口前基线**抬升 ≥ 5 ℃、时钟**相对窗口前基线**抬升 ≥ 100 MHz。功耗照报但**不参与判定**（本机 11.3–11.6 W 几乎不动，用它判定会把"没测到"当"没发生"）。基线是窗口开始前多取的一次 `query_status`，所以"本来就已抬频/已温热"不算这个窗口的功劳；无遥测时 `demonstrated=false` 且 `signals=[]`，报告分得清"没数据"与"没干活"。优化器：`LoadRun`/`CandidateRun` 各带自己的 evidence，报告新增 `load_evidence` 与 `sweep.{baseline,candidate}_load_evidence`，`sweep.windows_loaded=false` 时 **`winner` 强制 null** 并换用 `SWEEP_IDLE_NOTE`（数字保留、不作排序）。
+
+**③ 真机复核** ✔：`--duration 20` + 两个 candidate 的 sweep → `windows_loaded=false`、`winner=null`、`demonstrated=false / signals=[]`、`util_max=2 % / clock_max=1530 MHz / power_max=11.49 W / temp_rise=1.28 ℃`，`settings_written=true`（两次写都回读且已复位），收尾保护项全绿。证据：`outputs/stage-eval-loadgate-20261125T173418Z/`（4 文件 + `SHA256SUMS`）。
+
+**④ 边界** ✗：本机此刻**没有真实 GPU 负载可用**——`--load-source vulkan` 需要 `cli-stressor-cuda-rs`，`target/release/` 里没有该二进制；`demonstrated=false` 只说明"没测到工作证据"，不等于"没有工作"；`throttle_reasons` 在本机**空闲与负载下都全 false**，故"没有限频"这一结论目前**无法成立**（该字段在本传输上不携带信息）；本目录 0.238 it/s 与早前 sweep 的 2.38 it/s 节奏不同（`--iters` 20000 vs 2000），跨报告比吞吐前必须先对齐该参数。
