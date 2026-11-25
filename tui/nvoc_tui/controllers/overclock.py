@@ -196,6 +196,7 @@ class OverclockController(PaneController):
         # Power pane unit labels (Power Limit follows the #power-api
         # selector: NVAPI % / NVML W).
         self._prime_power_units()
+        self._prime_offset_window()
         self._poll_clk_domain_mask()
         # Mobile Power pane: mobile GPUs only. Same verdict the loader uses
         # (is_mobile — Rust detect_gpu_type flag primary, name heuristic
@@ -259,6 +260,76 @@ class OverclockController(PaneController):
         # instead of the previous card's values and every capability-gated row
         # greys out; the switch's own queries re-prime again as they land.
         self.prime_inputs()
+
+    def _prime_offset_window(self) -> None:
+        """Show the driver's offset span next to the rows it bounds."""
+        try:
+            label = self.app.query_one("#oc-offset-window", Label)
+        except Exception:
+            return
+        try:
+            label.update(self.offset_window_summary())
+        except Exception:
+            pass
+
+    def offset_window(self) -> dict | None:
+        """The offset span the driver itself published, or None.
+
+        macOS RM reports it (`clock_offset_window`, with a `potential` block
+        saying what the span is worth at the live clock). NVAPI/NVML publish no
+        such record, so the key is simply absent there and no row is bounded —
+        the window is information the backend gave us, never one we assume.
+        """
+        window = self.app.cache.settings.get("clock_offset_window")
+        if not isinstance(window, dict):
+            return None
+        if not isinstance(window.get("max_khz"), int):
+            return None
+        return window
+
+    def offset_window_summary(self) -> str:
+        """One line for the OC pane: the span, and what it is worth."""
+        window = self.offset_window()
+        if window is None:
+            return ""
+        max_mhz = abs(window["max_khz"]) / 1000.0
+        text = f"driver span ±{max_mhz:g} MHz"
+        potential = window.get("potential")
+        if isinstance(potential, dict):
+            percent = potential.get("max_percent")
+            clock = potential.get("clock_mhz")
+            if isinstance(percent, (int, float)) and isinstance(clock, (int, float)):
+                text += f" (±{abs(percent):.2f} % at {clock:g} MHz)"
+        return text
+
+    def offset_window_error(self, offsets: dict[str, int | None]) -> str | None:
+        """Refuse an offset the driver's own span cannot hold, before writing.
+
+        A value past the span is not clamped by this frontend: the driver
+        refuses it, so sending it would spend a write to learn what the window
+        already said. Nothing is written for *any* row when one row is out of
+        span — a half-applied offset set is worse than none.
+        """
+        window = self.offset_window()
+        if window is None:
+            return None
+        max_mhz = abs(window["max_khz"]) / 1000.0
+        over = {
+            name: value
+            for name, value in offsets.items()
+            if isinstance(value, int) and abs(value) > max_mhz
+        }
+        if not over:
+            return None
+        named = ", ".join(
+            f"{name} {value:+d} MHz" for name, value in sorted(over.items())
+        )
+        return (
+            f"Offset refused, nothing was written: {named} is outside the span the "
+            f"driver itself accepts ({self.offset_window_summary()}). A larger offset "
+            "is rejected by the driver rather than clamped, and the realised gain is "
+            "quantised to the clock's own step, so the whole span is the ceiling here."
+        )
 
     def apply_oc(
         self,
@@ -2277,6 +2348,18 @@ class OverclockController(PaneController):
                     host_offset,
                     volt_offsets,
                 )
+
+            window_error = self.offset_window_error({
+                "core": core_offset,
+                "mem": mem_offset,
+                "xbar": xbar_offset,
+                "sys": sys_offset,
+                "msd": msd_offset,
+                "host": host_offset,
+            })
+            if window_error:
+                self.app.write_log(window_error)
+                return True
 
             self.app.run_native_action(
                 "apply overclock",

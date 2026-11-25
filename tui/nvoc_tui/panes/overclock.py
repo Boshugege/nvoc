@@ -49,6 +49,11 @@ def compose_overclock() -> ComposeResult:
                             classes="green",
                             compact=True,
                         )
+                    # The span the driver itself accepts, filled by the
+                    # controller when the backend publishes one. Empty on
+                    # NVAPI/NVML, which publish no such record — an empty line
+                    # means "not told", not "no span".
+                    yield Label("", id="oc-offset-window", classes="oc-window")
                     with Grid(id="clock-controls"):
                         # Each offset row carries a MHz/mV unit toggle (GUI
                         # V/F Offsets parity): mV mode reroutes the row's

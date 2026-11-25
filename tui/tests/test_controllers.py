@@ -584,6 +584,67 @@ def test_overclock_apply_limits_for_nvapi_calls_native_apis() -> None:
     ]
 
 
+def test_overclock_refuses_an_offset_past_the_driver_window() -> None:
+    # macOS RM publishes the span it will accept (with what it is worth). An
+    # offset past it must be refused *before* any write: the driver rejects it
+    # rather than clamping, so sending it would spend a write to learn nothing.
+    app = FakeApp()
+    app.cache.settings["clock_offset_window"] = {
+        "min_khz": -18_750,
+        "max_khz": 18_750,
+        "records": 3,
+        "potential": {"clock_mhz": 1530.0, "max_percent": 1.2254},
+    }
+    app.widgets = {
+        "#oc-api": SimpleNamespace(value="nvapi"),
+        "#core-offset": SimpleNamespace(value="40"),
+        "#mem-offset": SimpleNamespace(value="100"),
+    }
+
+    controller = OverclockController(app)
+    assert controller.handle_button("oc-apply") is True
+
+    assert app.actions == [], "nothing may be written when a row is out of span"
+    assert app.native.calls == []
+    (message,) = app.logs
+    assert "core +40 MHz" in message
+    assert "mem +100 MHz" in message
+    assert "±18.75 MHz" in message
+    assert "±1.23 % at 1530 MHz" in message
+    assert "nothing was written" in message
+
+
+def test_overclock_writes_inside_the_driver_window() -> None:
+    app = FakeApp()
+    app.cache.settings["clock_offset_window"] = {
+        "min_khz": -18_750,
+        "max_khz": 18_750,
+        "potential": {"clock_mhz": 1530.0, "max_percent": 1.2254},
+    }
+    app.widgets = {
+        "#oc-api": SimpleNamespace(value="nvapi"),
+        "#core-offset": SimpleNamespace(value="18"),
+        "#mem-offset": SimpleNamespace(value="-18"),
+    }
+
+    assert OverclockController(app).handle_button("oc-apply") is True
+
+    assert app.actions == ["apply overclock"]
+    assert app.native.calls == [
+        ("set_clock_offset", "0x0000", "nvapi", "core", 18, "P0"),
+        ("set_clock_offset", "0x0000", "nvapi", "memory", -18, "P0"),
+    ]
+
+
+def test_overclock_summary_is_empty_when_no_window_was_published() -> None:
+    app = FakeApp()
+    controller = OverclockController(app)
+    assert controller.offset_window() is None
+    assert controller.offset_window_summary() == ""
+    # NVAPI/NVML publish no span, so no row is bounded by one.
+    assert controller.offset_window_error({"core": 500}) is None
+
+
 def test_overclock_apply_ignores_pstate_fields() -> None:
     app = FakeApp()
     app.cache.settings["supported_pstates"] = ["P0", "P2"]
