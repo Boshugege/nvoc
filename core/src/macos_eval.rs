@@ -552,6 +552,48 @@ pub fn offset_potential(
     }
 }
 
+/// Whether the driver's own span can hold a requested offset.
+///
+/// The window is not a range the driver clamps into: a value past it is refused
+/// outright, so sending one spends a write to learn what the window already
+/// said. This is the pre-write admission check every writer shares — the chip,
+/// the CLI, the Python binding, the service and both UIs answer the same
+/// question here instead of each guessing at the edge in its own unit.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OffsetVerdict {
+    pub value_mhz: f64,
+    pub window_min_mhz: f64,
+    pub window_max_mhz: f64,
+    /// True when the span holds the value; a value past it is refused, not
+    /// clamped, so `false` means "do not send this".
+    pub admitted: bool,
+    /// Why it was refused, in the same words everywhere. `None` when admitted.
+    pub reason: Option<String>,
+}
+
+pub fn offset_verdict(value_khz: i32, window_min_khz: i32, window_max_khz: i32) -> OffsetVerdict {
+    let admitted = value_khz >= window_min_khz && value_khz <= window_max_khz;
+    let value_mhz = f64::from(value_khz) / 1000.0;
+    let (min_mhz, max_mhz) = (
+        f64::from(window_min_khz) / 1000.0,
+        f64::from(window_max_khz) / 1000.0,
+    );
+    let reason = (!admitted).then(|| {
+        format!(
+            "{value_mhz:+} MHz is outside the span the driver itself accepts \
+             ({min_mhz:+} .. {max_mhz:+} MHz); a larger offset is refused rather than clamped, \
+             so nothing was written"
+        )
+    });
+    OffsetVerdict {
+        value_mhz,
+        window_min_mhz: min_mhz,
+        window_max_mhz: max_mhz,
+        admitted,
+        reason,
+    }
+}
+
 /// What one clock step is worth as a percentage, for comparing a measurement's
 /// resolution against the thing it is supposed to resolve.
 pub fn step_percent(clock_mhz: f64, step_mhz: f64) -> Option<f64> {
@@ -1686,5 +1728,43 @@ mod tests {
         );
         assert!(!ranked[0].beats_noise);
         assert!(ranked[0].percent > 20.0);
+    }
+
+    #[test]
+    fn an_offset_inside_the_driver_span_is_admitted() {
+        let verdict = offset_verdict(18_000, -18_750, 18_750);
+        assert!(verdict.admitted);
+        assert_eq!(verdict.reason, None);
+        assert_eq!(verdict.value_mhz, 18.0);
+        assert_eq!(verdict.window_max_mhz, 18.75);
+        // The edges themselves are inside: the driver published them.
+        assert!(offset_verdict(18_750, -18_750, 18_750).admitted);
+        assert!(offset_verdict(-18_750, -18_750, 18_750).admitted);
+        assert!(offset_verdict(0, -18_750, 18_750).admitted);
+    }
+
+    #[test]
+    fn an_offset_past_the_span_is_refused_with_the_span_in_the_reason() {
+        let verdict = offset_verdict(40_000, -18_750, 18_750);
+        assert!(!verdict.admitted);
+        let reason = verdict.reason.expect("a refusal says why");
+        assert!(reason.contains("+40 MHz"), "{reason}");
+        assert!(reason.contains("-18.75 .. +18.75 MHz"), "{reason}");
+        assert!(reason.contains("nothing was written"), "{reason}");
+    }
+
+    #[test]
+    fn the_span_is_read_end_by_end_not_by_its_magnitude() {
+        // A lopsided window is legal input: the negative end is what bounds a
+        // negative offset, and -12 MHz is outside a window that only allows -8.
+        let verdict = offset_verdict(-12_000, -8_000, 18_750);
+        assert!(!verdict.admitted);
+        assert!(
+            verdict
+                .reason
+                .expect("refused")
+                .contains("-8 .. +18.75 MHz")
+        );
+        assert!(offset_verdict(-8_000, -8_000, 18_750).admitted);
     }
 }

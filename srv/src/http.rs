@@ -294,6 +294,18 @@ fn handle_api(
             let Some(backend) = guard.as_mut() else {
                 return text_response(request, 503, "backend not ready");
             };
+            // Admission before the write: a transport that publishes the span
+            // it accepts (macOS RM does) is asked to admit the value first. A
+            // value past the span is refused by the driver rather than clamped,
+            // so sending it would spend a write to learn what /api/oc already
+            // publishes. A transport that publishes no span admits everything:
+            // "not told" is not "no span".
+            if let Some(refusal) =
+                offset_window_refusal(value, backend.read_offset_window_mhz(index))
+            {
+                log::warn!("oc.offset refused: {refusal}");
+                return text_response(request, 409, format!("Refused: {refusal}"));
+            }
             let response = audited_write(auth_user, "oc.offset", detail, || {
                 backend.write_offset_mhz(index, domain, backend_kind, value)
             });
@@ -383,6 +395,20 @@ fn handle_api(
 
 /// Parse + validate `oc/offset` params: `gpu`, `domain=core|mem`,
 /// `backend=nvml|nvapi`, `value=±MHz`.
+/// The pre-write admission verdict for an offset write, or `None` to let it run.
+///
+/// `window` is the span the backend published in MHz (min, max); `None` means the
+/// transport publishes none, and an unpublished span refuses nothing.
+fn offset_window_refusal(value_mhz: i32, window: Option<(f32, f32)>) -> Option<String> {
+    let (min_mhz, max_mhz) = window?;
+    let verdict = nvoc_core::offset_verdict(
+        value_mhz.saturating_mul(1000),
+        (min_mhz * 1000.0).round() as i32,
+        (max_mhz * 1000.0).round() as i32,
+    );
+    verdict.reason
+}
+
 fn oc_offset_params(
     params: &HashMap<String, String>,
 ) -> Result<(usize, OffsetDomain, OffsetBackend, i32), String> {
@@ -943,5 +969,31 @@ fn handle_oc_global(
             format!("Bad request: oc must be {OC_DELTA_MIN}–{OC_DELTA_MAX} kHz, got {delta}"),
         ),
         None => text_response(request, 400, "Bad request: missing or invalid 'oc'"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::offset_window_refusal;
+
+    #[test]
+    fn a_published_span_refuses_an_offset_past_it() {
+        let refusal = offset_window_refusal(40, Some((-18.75, 18.75))).expect("refused");
+        assert!(refusal.contains("+40 MHz"), "{refusal}");
+        assert!(refusal.contains("-18.75 .. +18.75 MHz"), "{refusal}");
+        assert!(refusal.contains("nothing was written"), "{refusal}");
+    }
+
+    #[test]
+    fn a_published_span_admits_what_it_holds() {
+        assert_eq!(offset_window_refusal(18, Some((-18.75, 18.75))), None);
+        assert_eq!(offset_window_refusal(-18, Some((-18.75, 18.75))), None);
+        assert_eq!(offset_window_refusal(0, Some((-18.75, 18.75))), None);
+    }
+
+    #[test]
+    fn no_published_span_refuses_nothing() {
+        // NVAPI/NVML publish no window; "not told" is not "no span".
+        assert_eq!(offset_window_refusal(500, None), None);
     }
 }
