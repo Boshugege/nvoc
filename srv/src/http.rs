@@ -147,6 +147,18 @@ fn audited_write_reported(
     }
 }
 
+/// The locked window a stored table already carries: its newest record.
+///
+/// `None` when there is no table, or when the newest record cannot be read --
+/// never a window of zero, which is a real value the driver refuses.
+fn locked_window_from_history(
+    history: Option<&crate::controller::LockedHistory>,
+) -> Option<(u32, u32)> {
+    let history = history?;
+    let (min_mhz, max_mhz) = *history.windows.last()?;
+    (min_mhz != 0 && max_mhz != 0).then_some((min_mhz, max_mhz))
+}
+
 /// The locked window as `/api/oc` publishes it: `null`, or both ends in MHz.
 fn locked_window_json(window: Option<(u32, u32)>) -> serde_json::Value {
     match window {
@@ -325,8 +337,16 @@ fn handle_api(
             let fan = backend.read_fan_window(index);
             // The locked window the transport can report, if any. Null is "this
             // plane publishes none", not a window of zero.
-            let locked = backend.read_locked_window(index).ok().flatten();
+            // One stored-state read per request, not two: a transport that
+            // keeps a table answers both questions out of it (the newest record
+            // *is* the locked window), and a transport that keeps none is asked
+            // the older question. On this backend each read opens an RM session,
+            // so asking twice would double the cost of polling this endpoint.
             let locked_history = backend.read_locked_history(index).ok().flatten();
+            let locked = match &locked_history {
+                Some(history) => locked_window_from_history(Some(history)),
+                None => backend.read_locked_window(index).ok().flatten(),
+            };
             json_response(
                 request,
                 &serde_json::json!({
@@ -1222,10 +1242,41 @@ fn locked_window_refusal(min_mhz: u32, max_mhz: u32) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        limit_window_refusal, locked_history_json, locked_window_json, locked_window_refusal,
-        offset_window_refusal, stored_window_note,
+        limit_window_refusal, locked_history_json, locked_window_from_history, locked_window_json,
+        locked_window_refusal, offset_window_refusal, stored_window_note,
     };
     use crate::controller::LockedHistory;
+
+    #[test]
+    fn the_window_comes_out_of_the_table_that_was_already_read() {
+        // The newest record is the locked window, so a table read answers both
+        // questions and the older single-window read is not issued again.
+        let history = LockedHistory {
+            count_at_4: Some(96),
+            windows: vec![(1_700, 1_700), (1_620, 1_800)],
+        };
+        assert_eq!(
+            locked_window_from_history(Some(&history)),
+            Some((1_620, 1_800))
+        );
+        assert_eq!(locked_window_from_history(None), None);
+        // A table with no windows says nothing about the window.
+        assert_eq!(
+            locked_window_from_history(Some(&LockedHistory {
+                count_at_4: Some(0),
+                windows: Vec::new(),
+            })),
+            None
+        );
+        // A zero end is the driver's "absent", not a window of zero.
+        assert_eq!(
+            locked_window_from_history(Some(&LockedHistory {
+                count_at_4: Some(48),
+                windows: vec![(0, 1_800)],
+            })),
+            None
+        );
+    }
 
     #[test]
     fn the_stored_table_is_published_whole_or_as_null() {
