@@ -3151,3 +3151,28 @@ half_read    : ""                                             两端都不设界
 **⑤ 诚实边界** ✔：这张卡窗口对称，"按两端判"在本机**等价**——它不是新测量，而是让判据与公布数据同构。CLI 写路径另有硬编码 `-18750..18750` kHz 的墙（`validate_clock_offset_request`），与驱动自报窗口在本机一致，是安全底线；动态窗口是通用机制，两者不冲突。
 
 **⑥ 证据** ✔：`outputs/stage-frontends-ends-20261125T205145Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾偏移 0 kHz、风扇 auto/2800 rpm、板卡 100 W（70–100）、电源 ac。
+
+## 一百八十四、CLI 的偏移写也先问驱动公布的窗口
+
+**① 缺口** ✔：CLI 写前只有**解析期硬编码**的 `-18750..18750 kHz`。那是本卡量出来的数，写死后驱动若收窄/放宽自己接受的跨度，工具就会与驱动互相矛盾。五条写入口里唯独 CLI 还在用常量而不是窗口。
+
+**② 改法** ✔：`set/reset-pstate-global-freq-offset` 在 SET 之前先**读**窗口（只读，与读面同一个 `QueryMacosRmSettings`），用 `nvoc_core::offset_verdict` 判，超界在**任何 SET 之前**拒绝；JSON 回报 `window_checked` 与两端。未读到的窗口不阻塞写入（硬墙仍是唯一界）。判据抽成纯函数 `offset_window_refusal(khz, window)`，单测可直接钉。
+
+**③ 真机输出** ✔：
+
+```
+set 8 MHz core → {"applied":true,"offset_khz":8000,"readback_verified":true,
+                  "other_bytes_preserved":true,"window_checked":true,
+                  "window_min_khz":-18750,"window_max_khz":18750}
+CLI 读         → Offset MHz: 8.0 / Restore kHz: 8000
+reset core     → {"applied":true,"offset_khz":0,"original_offset_khz":8000,"readback_verified":true}
+CLI 读         → Offset MHz: 0.0 / Restore kHz: 0
+set 19 MHz     → Error: macOS additive clock target must be within -18750..18750 kHz
+CLI 读         → Offset MHz: 0.0 / Restore kHz: 0
+```
+
+**④ 诚实边界** ✔：本卡驱动窗口（±18 750 kHz）与解析期硬墙**数值相同**，真机上**无法构造**"通过硬墙但落在窗口外"的偏移——那一格只有单测覆盖（`-12` 对 `-8..+18.75` 拒绝、`19` 对 ±18.75 拒绝）。硬件证据证明的是"窗口被读取、参与判定、写回读与复位仍成立"，**不**证明这张卡上多拦下了什么。
+
+**⑤ 测试** ✔：`cargo test -p nvoc-cli --lib macos_rm` **29 passed**（+3）；`cargo xtask ci` = `CI_EXIT=0`。
+
+**⑥ 证据** ✔：`outputs/stage-cli-windowgate-20261125T205449Z/`（4 文件 + `SHA256SUMS` 全 OK）；收尾偏移 0 kHz、风扇 auto/2800 rpm、板卡 100 W（70–100）、电源 ac、srv 进程 0。
