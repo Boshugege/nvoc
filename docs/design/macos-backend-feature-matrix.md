@@ -3131,3 +3131,23 @@ POST value=0  → 200 → CLI 读回 0.0 MHz / Restore kHz: 0      （exact rest
 **⑤ 边界** ✔：这是**写前准入**，不是测量——只保证发出去的值在驱动自报跨度内，不保证兑现多少（取决于时钟档）。`power`/`temp` 仍 `null`。`value=500` 先撞到更窄的跨度闸（409），预存的 ±1000 MHz 参数范围检查仍在它之前。
 
 **⑥ 证据** ✔：`outputs/stage-srv-offsetgate-20261125T204825Z/`（5 文件 + `SHA256SUMS` 全 OK）；收尾偏移 0 kHz、风扇 auto/2800 rpm、板卡 100 W（70–100）、电源 ac、srv 进程 0。
+
+## 一百八十三、两个前端也改成按两端判
+
+**① 缺陷** ✔：TUI/GUI 的准入检查是 `abs(value) > abs(max_khz)`，只在跨度对称时成立；驱动公布的是 `min_khz`/`max_khz` 两端，窗口一旦不对称（如 `-8 .. +18.75`），`-12 MHz` 会被放过、由驱动拒绝——用一次写去学一件读面已写着的事。
+
+**② 改法** ✔：按两端判（`min_khz <= value <= max_khz`）；不对称窗口如实显示 `-8 .. +18.75 MHz` 而非伪装成 ±；**只拿到一端的窗口等于没有窗口**（不替它编另一端），与服务面/`nvoc-core::offset_verdict` 同一规矩。
+
+**③ 真机输出** ✔（真实 settings，只读）：
+
+```
+as_published : "driver span ±18.75 MHz (±1.23 % at 1530 MHz)"  −12 放行 / +19 拒绝（与上一轮一致）
+lopsided     : "driver span -8 .. +18.75 MHz"                  −12 拒绝 / +19 拒绝（上一轮会放过 −12）
+half_read    : ""                                             两端都不设界
+```
+
+**④ 测试** ✔：TUI +2、GUI +2；`pytest -q tui/tests/` **234 passed**；`pytest -q gui/tests/` **309 passed / 13 skipped**；`cargo xtask ci` = `CI_EXIT=0`。
+
+**⑤ 诚实边界** ✔：这张卡窗口对称，"按两端判"在本机**等价**——它不是新测量，而是让判据与公布数据同构。CLI 写路径另有硬编码 `-18750..18750` kHz 的墙（`validate_clock_offset_request`），与驱动自报窗口在本机一致，是安全底线；动态窗口是通用机制，两者不冲突。
+
+**⑥ 证据** ✔：`outputs/stage-frontends-ends-20261125T205145Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾偏移 0 kHz、风扇 auto/2800 rpm、板卡 100 W（70–100）、电源 ac。
