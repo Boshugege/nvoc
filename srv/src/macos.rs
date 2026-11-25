@@ -483,12 +483,18 @@ impl ControlBackend for MacosRmBackend {
     }
 
     fn read_locked_window(&mut self, gpu_index: usize) -> Result<Option<(u32, u32)>, String> {
-        // A read on this transport needs the request the write would send (the
-        // driver answers by normalising it), so a window has to be asked for.
-        // The plane reports the span the driver publishes for a graphics vP8
-        // request only when it has one; there is no state read to invent.
-        let _ = gpu_index;
-        Ok(None)
+        // The normalisation query needs a window to normalise, but the driver
+        // also keeps the windows it was given in its own table (`0x20809040`),
+        // and that is a plain read: 48-byte records from +16, the newest one
+        // carrying the window last applied (§二百二十一、§二百二十四). So this
+        // backend can publish a locked window after all -- the stored one -- and
+        // `None` now means either "no records" or a table this build could not
+        // read, which the GET reports as null rather than as a window of zero.
+        self.forget_readout();
+        let report = self.run_op(gpu_index, nvoc_core::ReadMacosRmLockedState)?;
+        Ok(report
+            .stored_window()
+            .map(|(min_khz, max_khz)| (min_khz / 1000, max_khz / 1000)))
     }
 
     fn write_locked_window(

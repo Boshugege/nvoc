@@ -150,6 +150,26 @@ pub struct LockedClockWriteReport {
     pub storage_matches_applied: Option<bool>,
 }
 
+/// What a read of the stored locked-clock table answered.
+///
+/// This is a read of the driver's own table, not a normalisation of a request,
+/// so it can be taken without asking for a window first. Empty records with a
+/// `count_at_4` of zero is the state a fresh boot shows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct LockedStateReport {
+    /// The dword at `+4`: 48 times the number of writes since the driver loaded.
+    pub count_at_4: Option<u32>,
+    /// The 48-byte records, oldest first.
+    pub records: Vec<StateRecord>,
+}
+
+impl LockedStateReport {
+    /// The window in the newest record, in kHz.
+    pub fn stored_window(&self) -> Option<(u32, u32)> {
+        last_stored_window(&self.records)
+    }
+}
+
 /// Bytes one record of the `0x20809040` answer occupies, and where the first
 /// one starts.
 ///
@@ -893,6 +913,17 @@ mod state_count_tests {
         // Nothing on either side is not a pass.
         assert_eq!(storage_matches(&[], &records), None);
         assert_eq!(storage_matches(&[window(1_620_000, 1_800_000)], &[]), None);
+    }
+
+    #[test]
+    fn a_state_report_names_the_window_it_stores() {
+        let block = block_with_records(&[record(1_620_000, 1_800_000)]);
+        let report = LockedStateReport {
+            count_at_4: Some(48),
+            records: parse_state_records(&block),
+        };
+        assert_eq!(report.stored_window(), Some((1_620_000, 1_800_000)));
+        assert_eq!(LockedStateReport::default().stored_window(), None);
     }
 
     #[test]

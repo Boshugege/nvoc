@@ -2072,6 +2072,26 @@ impl Device {
     /// values, so it doubles as the expectation the readback must equal and as the
     /// window to put back: a readback that differs rolls the snapshot back and
     /// re-reads it, and a failed rollback says so instead of reporting success.
+    /// Reads the stored locked-clock table without touching a clock.
+    pub fn locked_state(&self) -> Result<macos_lock::LockedStateReport, Error> {
+        let _snapshot = self.refreshed_snapshot()?;
+        let mut session = MacosRmSession::open()?;
+        let result = (|| {
+            check_lock_identity(&self.info, session.identity())?;
+            let block = session.read_locked_state_block()?;
+            Ok(macos_lock::LockedStateReport {
+                count_at_4: macos_lock::parse_state_count(&block).ok(),
+                records: macos_lock::parse_state_records(&block),
+            })
+        })();
+        let closed = session.close();
+        match (result, closed) {
+            (Ok(report), Ok(())) => Ok(report),
+            (Ok(_), Err(err)) => Err(err),
+            (Err(err), _) => Err(err),
+        }
+    }
+
     pub fn set_locked_clocks(
         &self,
         request: &[macos_lock::LockWindow],
@@ -2392,6 +2412,25 @@ impl crate::GpuOperation for SetMacosRmLockedClocks {
 
     fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
         target.macos_rm()?.set_locked_clocks(&self.request)
+    }
+}
+
+/// Reads the locked-clock table the driver stores (`0x20809040`).
+///
+/// A read, not a query: it needs no request to normalise, which is why the
+/// service can publish a locked window on this backend at all.
+#[derive(Debug, Clone)]
+pub struct ReadMacosRmLockedState;
+
+impl crate::GpuOperation for ReadMacosRmLockedState {
+    type Output = macos_lock::LockedStateReport;
+
+    fn kind(&self) -> crate::OperationKind {
+        crate::OperationKind::QueryGpuStatus
+    }
+
+    fn run(&self, target: &crate::GpuTarget<'_>) -> Result<Self::Output, Error> {
+        target.macos_rm()?.locked_state()
     }
 }
 
