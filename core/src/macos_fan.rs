@@ -29,6 +29,24 @@ pub struct FanControlSettings {
     pub target_percent: f64,
     pub mode: &'static str,
 }
+impl FanControlSettings {
+    /// Whether the tachometer word is a believable reading of this cooler.
+    ///
+    /// The status record's tach field is a plain word with no unit or range
+    /// beside it, and the driver does hand out samples that cannot be a speed:
+    /// while the fan spun up under load the field read `273973` against a
+    /// cooler whose own record publishes `max_rpm = 2800`, and a re-read a
+    /// second later read `1469`. A value above the published maximum is a bad
+    /// sample, not a fast fan, so callers that print or chart it should say so
+    /// instead of passing it on as a speed.
+    ///
+    /// When the record publishes no maximum there is nothing to compare
+    /// against, so the reading is not accused of anything.
+    pub fn rpm_is_plausible(&self) -> bool {
+        self.max_rpm == 0 || self.rpm <= self.max_rpm
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FanControlWriteReport {
     pub slot: u32,
@@ -337,6 +355,29 @@ mod control {
             assert_eq!(s.rpm, 0);
             assert!(s.current_percent > 64.0);
             assert!(s.target_percent < 35.001);
+            // A stopped fan is a plausible reading, not a missing one.
+            assert!(s.rpm_is_plausible());
+        }
+        #[test]
+        fn a_tach_above_the_coolers_own_maximum_is_a_bad_sample() {
+            // Measured on the test card while the fan spun up under load: the
+            // status word read 273973 against max_rpm 2800, then 1469 a second
+            // later. The value is carried verbatim (the record is the record)
+            // but it must not be presented as a speed.
+            let (info, mut status, mut io) = fixture();
+            status[20..24].copy_from_slice(&273973u32.to_le_bytes());
+            io.b[36..40].copy_from_slice(&1u32.to_le_bytes());
+            io.b[40..44].copy_from_slice(&35000u32.to_le_bytes());
+            let bad = settings(&info, &status, &io.b).unwrap();
+            assert_eq!(bad.rpm, 273973);
+            assert!(!bad.rpm_is_plausible());
+            status[20..24].copy_from_slice(&1501u32.to_le_bytes());
+            let good = settings(&info, &status, &io.b).unwrap();
+            assert!(good.rpm_is_plausible());
+            // No published scale means no verdict either way.
+            io.b[32..36].copy_from_slice(&0u32.to_le_bytes());
+            let unscaled = settings(&info, &status, &io.b).unwrap();
+            assert!(unscaled.rpm_is_plausible());
         }
         #[test]
         fn full_scale_feedback_may_overshoot_and_is_clamped_back_to_100() {

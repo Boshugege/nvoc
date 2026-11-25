@@ -1717,7 +1717,17 @@ impl Device {
     /// Metadata identifies a fitted cooler even when its current RPM is zero.
     pub fn fan_report(&self) -> Result<FanReport, Error> {
         let s = self.fan_control_settings()?;
-        let notes=vec!["cooler identity/range come from RM metadata/status; current_percent is rounded driver status feedback, distinct from the requested target_percent. GETs are not atomic. The control record carries a duty percentage only: an rpm request is translated through the cooler max RPM reported here and lands on the nearest duty step.".into()];
+        let mut notes=vec!["cooler identity/range come from RM metadata/status; current_percent is rounded driver status feedback, distinct from the requested target_percent. GETs are not atomic. The control record carries a duty percentage only: an rpm request is translated through the cooler max RPM reported here and lands on the nearest duty step.".into()];
+        if !s.rpm_is_plausible() {
+            // The tach word carries no range of its own and the driver does hand
+            // out samples above the cooler's published maximum while the fan is
+            // spinning up (273973 against max_rpm 2800 on the test card). Say so
+            // rather than letting the number pass as a fan speed.
+            notes.push(format!(
+                "the tach word read {} rpm, above this cooler's own max of {} rpm: treat it as a bad sample and re-read rather than as a fan speed",
+                s.rpm, s.max_rpm
+            ));
+        }
         Ok(FanReport {
             count: 1,
             coolers: vec![FanCoolerReading {
