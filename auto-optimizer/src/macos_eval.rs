@@ -554,7 +554,10 @@ pub fn parse_resume_ledger(text: &str) -> Vec<ResumeEntry> {
         };
         let (Some(target), Some(delta_khz), Some(outcome)) = (
             value.get("target").and_then(Value::as_str),
-            value.get("delta_khz").and_then(Value::as_i64).map(|v| v as i32),
+            value
+                .get("delta_khz")
+                .and_then(Value::as_i64)
+                .map(|v| v as i32),
             value.get("outcome").and_then(Value::as_str),
         ) else {
             continue;
