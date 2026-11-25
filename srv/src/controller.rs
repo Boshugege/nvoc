@@ -185,6 +185,17 @@ pub trait ControlBackend: Send {
     fn read_power_watts(&mut self, gpu_index: usize) -> Option<f32>;
     /// Live core clock (MHz), best effort — `/status` readback for freq loops.
     fn read_core_clock_mhz(&mut self, gpu_index: usize) -> Option<f32>;
+    /// Live core clock (MHz) when the backend already has it from the sampling it
+    /// does every tick, for transports where reading it costs nothing extra.
+    ///
+    /// Separate from [`read_core_clock_mhz`](Self::read_core_clock_mhz) on
+    /// purpose: that one is a *read the loop needs*, in loops that steer on
+    /// frequency. This one only decides whether the dashboard can show a clock at
+    /// all, so a backend that would have to issue an extra query leaves it at the
+    /// default and the field stays null instead of costing a read per second.
+    fn read_observed_clock_mhz(&mut self, _gpu_index: usize) -> Option<f32> {
+        None
+    }
     /// Frequency ceiling (MHz) of the V/F table's current plane (P0 boost
     /// point, offset-inclusive). None = card does not expose the table.
     fn read_freq_ceiling_mhz(&mut self, gpu_index: usize) -> Option<f32>;
@@ -408,7 +419,11 @@ impl GpuController {
 
         self.fan_measured = backend.read_fan(index).and_then(|f| f.percent);
         self.core_clock_mhz = match self.loop_kind {
-            LoopKind::FanTemp => None,
+            // A fan/temperature loop does not steer on frequency, but it still
+            // samples the card every tick. Transports that already have the
+            // clock in hand report it here; ones that would have to query for it
+            // say nothing and the field stays null.
+            LoopKind::FanTemp => backend.read_observed_clock_mhz(index),
             LoopKind::FreqTemp | LoopKind::FreqPower => backend.read_core_clock_mhz(index),
         };
         GpuControlStatus {
@@ -931,6 +946,8 @@ mod tests {
         /// Live core clock reported by read_core_clock_mhz (overrides the
         /// cap-derived default when set).
         clock: Option<f32>,
+        /// Whether this fake transport has the clock for free while sampling.
+        observed_clock: bool,
     }
 
     impl Mock {
@@ -949,6 +966,7 @@ mod tests {
                 freq_restores: 0,
                 ceiling: None,
                 clock: None,
+                observed_clock: false,
             }
         }
     }
@@ -987,6 +1005,9 @@ mod tests {
         fn read_core_clock_mhz(&mut self, _i: usize) -> Option<f32> {
             self.clock
                 .or_else(|| self.freq_caps.last().map(|c| *c as f32 / 1000.0))
+        }
+        fn read_observed_clock_mhz(&mut self, _i: usize) -> Option<f32> {
+            self.observed_clock.then_some(self.clock).flatten()
         }
         fn read_freq_ceiling_mhz(&mut self, _i: usize) -> Option<f32> {
             self.ceiling
@@ -1212,6 +1233,7 @@ mod tests {
             freq_restores: 0,
             ceiling: None,
             clock: None,
+            observed_clock: false,
         };
         let st = tick(&mut c, &mut m, &config);
         assert_eq!(st.failsafe, FailsafeState::Ok);
@@ -1275,6 +1297,7 @@ mod tests {
             freq_restores: 0,
             ceiling: None,
             clock: None,
+            observed_clock: false,
         };
         // Seed: pretend a duty is currently pinned (restore must fire).
         c.last_written = Some(50);
@@ -1318,6 +1341,7 @@ mod tests {
             freq_restores: 0,
             ceiling: None,
             clock: None,
+            observed_clock: false,
         };
         c.last_written = Some(50);
         let st = tick(&mut c, &mut m, &config);
@@ -1425,6 +1449,7 @@ mod tests {
             freq_restores: 0,
             ceiling: None,
             clock: None,
+            observed_clock: false,
         };
         let mut c = GpuController::new(PidController::from_params(&config.pid), config.loop_kind);
         for _ in 0..3 {
@@ -1601,6 +1626,12 @@ mod tests {
         assert_eq!(m.freq_caps.last(), Some(&2100));
     }
 
+    fn fan_temp_cfg() -> RuntimeConfig {
+        let mut config = freq_power_cfg();
+        config.loop_kind = LoopKind::FanTemp;
+        config
+    }
+
     fn freq_auto_cfg() -> RuntimeConfig {
         let mut config = freq_power_cfg();
         config.freq.max_mhz = 0; // auto ceiling
@@ -1644,6 +1675,30 @@ mod tests {
         let st = tick(&mut c, &mut m, &config);
         assert_eq!(m.freq_caps, vec![2292, 2556]);
         assert_eq!(st.cap_mhz, Some(2556));
+    }
+
+    #[test]
+    fn a_fan_temperature_loop_shows_the_clock_only_when_it_is_free() {
+        // The dashboard should not go blind just because the loop does not steer
+        // on frequency -- but it also must not cost a query per tick on a
+        // transport that has to ask.
+        let config = fan_temp_cfg();
+        let mut c = GpuController::new(
+            PidController::from_params(&PidParams::default()),
+            config.loop_kind,
+        );
+        let mut m = Mock::steady(60.0);
+        m.clock = Some(1530.0);
+        assert!(
+            tick(&mut c, &mut m, &config).core_clock_mhz.is_none(),
+            "a transport that has to query says nothing here"
+        );
+        let mut c = GpuController::new(
+            PidController::from_params(&PidParams::default()),
+            config.loop_kind,
+        );
+        m.observed_clock = true;
+        assert_eq!(tick(&mut c, &mut m, &config).core_clock_mhz, Some(1530.0));
     }
 
     #[test]

@@ -253,6 +253,12 @@ impl ControlBackend for MacosRmBackend {
         status.graphics_clock_khz.map(|khz| khz as f32 / 1000.0)
     }
 
+    fn read_observed_clock_mhz(&mut self, gpu_index: usize) -> Option<f32> {
+        // The RM status read this tick already carries the live graphics clock,
+        // so the dashboard can show it without a second query.
+        self.read_core_clock_mhz(gpu_index)
+    }
+
     fn read_freq_ceiling_mhz(&mut self, _gpu_index: usize) -> Option<f32> {
         // No V/F table is readable through this transport (the vfpoints GET
         // is rejected), so there is no ceiling to report.
