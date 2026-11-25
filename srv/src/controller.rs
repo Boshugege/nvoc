@@ -250,6 +250,16 @@ pub trait ControlBackend: Send {
     fn reset_power_limit(&mut self, gpu_index: usize) -> Result<(), String>;
     fn reset_temp_limit(&mut self, gpu_index: usize) -> Result<(), String>;
     fn write_fan_percent(&mut self, gpu_index: usize, percent: u32) -> Result<(), String>;
+    /// The fan plane this backend writes inside: the duty span, the cooler's
+    /// own rpm scale, and the state the driver holds now.
+    ///
+    /// `None` means the backend publishes no such plane, which is different
+    /// from a plane of zeroes — a caller that reads `None` must not invent a
+    /// slider bound from it. `/api/fan` writes a percentage, so the endpoint
+    /// that offers it should be able to say what the driver will accept.
+    fn read_fan_window(&mut self, _gpu_index: usize) -> Option<FanWindow> {
+        None
+    }
     /// Frequency soft wall: lock the graphics clock range to `0..cap_khz`
     /// (one-directional — boost may run anywhere at or below the cap).
     fn write_freq_cap_khz(&mut self, gpu_index: usize, cap_khz: u32) -> Result<(), String>;
@@ -257,6 +267,22 @@ pub trait ControlBackend: Send {
     fn restore_fan_auto(&mut self, gpu_index: usize) -> Result<(), String>;
     /// Clear the frequency lock (undoes the soft wall).
     fn restore_freq_auto(&mut self, gpu_index: usize) -> Result<(), String>;
+}
+
+/// The fan plane as the backend publishes it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FanWindow {
+    pub min_percent: f64,
+    pub max_percent: f64,
+    /// The cooler's calibrated maximum, in rpm. Zero means the record carried
+    /// no scale, so no rpm target can be translated.
+    pub max_rpm: u32,
+    /// `auto` / `manual` / `fanstop`, as the record names it.
+    pub mode: String,
+    /// The duty the driver is holding right now, in percent.
+    pub current_percent: f64,
+    /// The tachometer reading, when it is a believable sample of this cooler.
+    pub rpm: Option<u32>,
 }
 
 /// Control states that override the raw PID output.

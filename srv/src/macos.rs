@@ -41,7 +41,7 @@
 //! pynvoc backend and the `macos-eval` optimizer step do, so all three
 //! consumers report the same numbers for the same tick.
 
-use crate::controller::{ControlBackend, FanReading, SensorBundle};
+use crate::controller::{ControlBackend, FanReading, FanWindow, SensorBundle};
 use crate::monitor::{MonitorSample, OffsetBackend, OffsetDomain};
 use nvoc_core::DeviceStatus;
 use std::borrow::Cow;
@@ -511,6 +511,20 @@ impl ControlBackend for MacosRmBackend {
             },
         )
         .map(|_| ())
+    }
+
+    fn read_fan_window(&mut self, gpu_index: usize) -> Option<FanWindow> {
+        // Straight from the control record the write path uses, so the window a
+        // caller sees is the one the driver will enforce.
+        let fan = self.settings(gpu_index).ok()?.fan_control?;
+        Some(FanWindow {
+            min_percent: fan.min_percent,
+            max_percent: fan.max_percent,
+            max_rpm: fan.max_rpm,
+            mode: fan.mode.to_string(),
+            current_percent: fan.current_percent,
+            rpm: fan.rpm_is_plausible().then_some(fan.rpm),
+        })
     }
 
     fn write_fan_percent(&mut self, gpu_index: usize, percent: u32) -> Result<(), String> {

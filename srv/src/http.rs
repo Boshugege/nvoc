@@ -251,6 +251,7 @@ fn handle_api(
             let temp = backend.read_temp_limit_c(index).ok().flatten();
             let window = backend.read_offset_window_mhz(index);
             let clock = backend.read_core_clock_mhz(index);
+            let fan = backend.read_fan_window(index);
             json_response(
                 request,
                 &serde_json::json!({
@@ -275,6 +276,19 @@ fn handle_api(
                     }),
                     "temp": temp.map(|(min, cur, max)| {
                         serde_json::json!({"min_c": min, "current_c": cur, "max_c": max})
+                    }),
+                    // The plane the write side of this endpoint (`/api/fan`) works
+                    // in. Null when the backend publishes none, so a caller can
+                    // tell "no fan control here" from "a fan window of zero".
+                    "fan": fan.map(|f| {
+                        serde_json::json!({
+                            "min_percent": f.min_percent,
+                            "max_percent": f.max_percent,
+                            "max_rpm": f.max_rpm,
+                            "mode": f.mode,
+                            "current_percent": f.current_percent,
+                            "rpm": f.rpm,
+                        })
                     }),
                 }),
             );
