@@ -157,8 +157,13 @@ fn macos_eval_command() -> Command {
                 .value_name("N")
                 .num_args(1)
                 .value_parser(clap::value_parser!(u64))
-                .default_value("500")
-                .help("Metal load: iterations per thread (ignored by --load-source vulkan)"),
+                .default_value("2000")
+                .help(
+                    "Metal load: iterations per thread (ignored by --load-source vulkan). \
+                     Shorter dispatches raise the per-window spread: 500 iterations measured \
+                     0.24-0.26 percent against 0.04-0.10 percent at 2000, which is enough to \
+                     dilute a one-step gain back into the noise",
+                ),
         )
         .arg(
             Arg::new("cooldown-to-c")
