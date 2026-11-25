@@ -121,6 +121,39 @@ fn macos_eval_command() -> Command {
                 ),
         )
         .arg(
+            Arg::new("load-source")
+                .long("load-source")
+                .value_name("SOURCE")
+                .num_args(1)
+                .value_parser(["vulkan", "metal"])
+                .default_value("vulkan")
+                .help(
+                    "Which bounded load drives the window: `vulkan` reuses the stage-9 \
+                     cli-stressor-cuda-rs --vulkan-only binary (default), `metal` runs the \
+                     macOS-native stress-macos/metal_check --stress with --metal-check as \
+                     its path and the bounded elements/iters below. The Metal source is the \
+                     one that works on a macOS host without the CUDA stressor built",
+                ),
+        )
+        .arg(
+            Arg::new("stress-elements")
+                .long("stress-elements")
+                .value_name("N")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u64))
+                .default_value("65536")
+                .help("Metal load: elements per dispatch (ignored by --load-source vulkan)"),
+        )
+        .arg(
+            Arg::new("stress-iters")
+                .long("stress-iters")
+                .value_name("N")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u64))
+                .default_value("20000")
+                .help("Metal load: iterations per thread (ignored by --load-source vulkan)"),
+        )
+        .arg(
             Arg::new("apply-candidate")
                 .long("apply-candidate")
                 .value_name("TARGET=DELTA")

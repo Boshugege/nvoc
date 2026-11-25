@@ -54,6 +54,12 @@ pub struct StockEvalOptions {
     pub vulkan: VulkanArgs,
     /// Preflight and plan only: no load, no verifier, no writes.
     pub dry_run: bool,
+    /// `true` runs the Metal load through `metal_check` instead of the Vulkan
+    /// stressor, which is the only ready option on a host without the CUDA
+    /// stressor built.
+    pub metal_load: bool,
+    pub stress_elements: u64,
+    pub stress_iters: u64,
     pub plan: Vec<PlanRequest>,
     /// The one candidate to apply, hold and put back; `None` keeps the run
     /// read-only.
@@ -112,6 +118,15 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
             "--apply-candidate writes an offset and cannot be combined with --dry-run;              use --plan to evaluate the same candidate without writing it",
         ));
     }
+    let metal_load = matches
+        .get_one::<String>("load-source")
+        .map(|v| v == "metal")
+        .unwrap_or(false);
+    if metal_load && metal_check.is_none() {
+        return Err(error(
+            "--load-source metal needs --metal-check to point at stress-macos/metal_check",
+        ));
+    }
     Ok(StockEvalOptions {
         duration,
         interval,
@@ -120,6 +135,13 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         out,
         vulkan,
         dry_run,
+        metal_load,
+        stress_elements: *matches
+            .get_one::<u64>("stress-elements")
+            .ok_or_else(|| error("missing --stress-elements"))?,
+        stress_iters: *matches
+            .get_one::<u64>("stress-iters")
+            .ok_or_else(|| error("missing --stress-iters"))?,
         plan: parse_plan_requests(&plan_values)?,
         candidate,
     })
@@ -136,6 +158,26 @@ struct LoadRun {
 }
 
 fn run_bounded_load(gpu: &GpuTarget<'_>, opts: &StockEvalOptions) -> Result<LoadRun, Error> {
+    // The Metal source runs the macOS-native verifier as the load: same bounded
+    // window, same sampling loop, but a binary that exists on a host without the
+    // CUDA stressor built. The Vulkan path stays the default and is unchanged.
+    if opts.metal_load {
+        let path = opts
+            .metal_check
+            .as_ref()
+            .ok_or_else(|| error("--load-source metal needs --metal-check"))?;
+        let mut command = Command::new(path);
+        command
+            .arg("--stress")
+            .arg(opts.duration.to_string())
+            .arg("--elements")
+            .arg(opts.stress_elements.to_string())
+            .arg("--iters")
+            .arg(opts.stress_iters.to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        return sample_while_loaded(command, gpu, opts);
+    }
     // Bounded stock load: the original stage-9 Vulkan path, unmodified.
     let mut command = Command::new(&opts.stressor);
     command
@@ -157,7 +199,15 @@ fn run_bounded_load(gpu: &GpuTarget<'_>, opts: &StockEvalOptions) -> Result<Load
         command.args(["--vulkan-iters", &v.to_string()]);
     }
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    sample_while_loaded(command, gpu, opts)
+}
 
+/// Run one prepared load command and sample the RM telemetry until it exits.
+fn sample_while_loaded(
+    mut command: Command,
+    gpu: &GpuTarget<'_>,
+    opts: &StockEvalOptions,
+) -> Result<LoadRun, Error> {
     let started = Instant::now();
     let mut child = command.spawn().map_err(|e| {
         error(format!(
@@ -399,6 +449,15 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                 "iters": opts.vulkan.iters,
             },
             "dry_run": opts.dry_run,
+            "load_source": if opts.dry_run {
+                Value::Null
+            } else if opts.metal_load {
+                json!("metal")
+            } else {
+                json!("vulkan")
+            },
+            "stress_elements": opts.stress_elements,
+            "stress_iters": opts.stress_iters,
             "plan_requests": opts.plan.len(),
         },
         "settings_written": candidate
