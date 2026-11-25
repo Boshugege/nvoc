@@ -2573,6 +2573,15 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
         { "gc-1d             0x2080901D @32680", 0x2080901du, 32680u, ~0u, 0u, 0u },
         { "gc-1d             0x2080901D @32680 bg=A5", 0x2080901du, 32680u,
           ~0u, 0u, 0xa5a5a5a5u },
+        /* The sibling that has never been read: same 648 B span as the
+         * locked-clock GET (0x20809014), unlike every other member of the
+         * 0x208090xx family (8 / 12 / 16 / 40 / ... / 12336 / 623112).  The
+         * only question this answers is whether it is a second view of the same
+         * state or the write-shaped twin the NVML reset path failed to reach;
+         * one zero-background GET decides that, and it stays last so a latch on
+         * it cannot take the earlier dumps down.  Read-only: it is not a known
+         * SET id and nothing here writes it. */
+        { "sibling          0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u },
     };
 
     if (!c->hSubdevice) {
