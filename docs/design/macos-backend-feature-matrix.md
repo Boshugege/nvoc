@@ -2710,3 +2710,13 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 - 写孪生 `0x2080c52d@1440` 的目标形态仍未在设备上验证过任何一次，**本轮不发**（没有快照可依、没有可解释的回读）。
 
 **④ 纪律偏差（不美化）** ✗：本轮与上一轮**共用同一个 boot**（未重启），累计派发 3 次：1 次写（`0x2080d041`，已知通道）+ **2 次未知 id 只读**（`0x2080902e`、`0x2080852c`）。探针纪律写的是"每个 boot 最多一条未知 id"，这里超了一次。三次都回答 `NV_OK`、没有 `0x62`/`0x65`/`0x3a`，机器无异常，但流程上确实超了。纠正动作：本轮结束前已 `sudo shutdown -r now` 重启，把预算清零；从下一个 boot 起，未知 id 只读严格按一次/启动执行，剩余测点排到后续启动。
+
+## 一百五十六、FanStop 通道在真机上闭环：写 → 回读 → 复位 → 非目标域保持，外加权限门的实测形态
+
+**① 选它的理由** ✔：队列第 3 项要"挑一项有足够协议证据的做成事务闭环"。FanStop 是 fan 族里唯一读、写两端都在本机测过的字段（`0x20808530` 读 / `0x2080c531` 写，980 字节块）；风扇曲线那条的读行本轮实测是能力占位（第一百五十五节），所以先闭环 FanStop。
+
+**② 事务四步（全部有文件）** ✔：`set-fanstop-status on`（块内 mode 2、duty 0）⇒ `Applied Mode: fanstop`、`Readback Verified: yes`、`Other Bytes Preserved: yes`、`Original Mode: auto`；回读 `Mode: fanstop`、`Target Percent 0.0%`、`Max Rpm 2800`；`reset-fan-speed`（写回驱动自己给的默认记录）⇒ `Applied Mode: auto`、`Original Mode: fanstop`、`Readback Verified: yes`；复位后回读 `Mode: auto`，且**非目标域未动**：板卡 `Enforced/Requested Watt 100.0 W`、锁定窗口仍 `graphics vP8 1620/1700`、时钟掩码仍 `0x03FC007F`。
+
+**③ 权限门的实测形态（新，值得记）** ✔：未提权时三条 fan/power/locked-window 读数全部失败为 `nvx: esc 0xc8 (72 bytes) -> kr 0xe00002d8` + `CARD_INFO: 0xffffffff (NV_STATUS_UNKNOWN)`。`0xe00002d8` 是 IOKit 的 `kIOReturnNotPrivileged` ⇒ **fan 族的 GET 和 SET 都在 root 门后面**，非特权路径的 `NV_STATUS_UNKNOWN` 不能被上层反推成"设备不支持"。同一秒 `sudo -S` 重跑同一命令立刻给出 `Mode: auto`、`Max Rpm 2800`。
+
+**④ 边界（不美化）** ✗：`Rpm` 在读前、读后、复位后**都是 0**——这张卡空载时风扇本来就不转。所以本阶段证明的是**模式字段与目标占空比被正确写入并回读验证、且能 exact 复位**，不能证明"满载时风扇被命令停下"；本机没有可用负载源（`stress-macos/metal_check --stress N` = `VK_ERROR_DEVICE_LOST`），10–15 秒负载也不算稳定性结论。设备侧的失败注入/取消回滚未构造（CLI 侧拒绝路径已有单元测试）。证据：`outputs/stage-fanstop-20261125T160602Z/`（`01-snapshot` / `02-write-stop` / `03-readback-stop` / `04-restore` / `05-readback-restored`，带 `SHA256SUMS`）。
