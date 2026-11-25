@@ -239,6 +239,33 @@ def _voltage_text(status: dict) -> str:
     return f"{status.get('voltage_mv', '---')} mV"
 
 
+def locked_state_text(payload: object) -> str | None:
+    """One line for the locked-clock table the macOS RM driver stores.
+
+    ``None`` means "this transport does not say": no payload at all (an older
+    pynvoc, or a failed read) or a payload with no records. An empty table and an
+    unreadable one read the same way on purpose -- the TUI cannot tell a card
+    that keeps nothing from a card it cannot ask, and printing ``0 MHz`` for
+    either would invent a reading.
+    """
+    if not isinstance(payload, dict):
+        return None
+    records = payload.get("records")
+    if not isinstance(records, list) or not records:
+        return None
+    newest = records[-1]
+    if not isinstance(newest, dict):
+        return None
+    min_khz, max_khz = newest.get("min_khz"), newest.get("max_khz")
+    if not isinstance(min_khz, int) or not isinstance(max_khz, int):
+        return None
+    text = f"locked {min_khz / 1000:.1f}-{max_khz / 1000:.1f} MHz"
+    memory = newest.get("memory_khz")
+    if isinstance(memory, int) and memory > 0:
+        text += f" | MEM {memory / 1000:.1f} MHz"
+    return text
+
+
 def _format_metric_lines(status: dict, architecture: str) -> list[str]:
     """Build the dashboard metric lines from a normalized status dict.
 

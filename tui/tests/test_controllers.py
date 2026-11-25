@@ -380,6 +380,52 @@ class FakeNative:
         self.calls.append(("set_vfp_range_delta", gpu, start, end, delta))
 
 
+def test_dashboard_reads_the_stored_locked_window_once_per_gpu() -> None:
+    app = FakeApp()
+    app.overclock_controller = SimpleNamespace(prime_inputs=lambda: None)
+    app.native_service.submit_query = lambda job: job()
+    app.native_service.query_locked_state = lambda gpu: {
+        "count_at_4": 48,
+        "records": [{"offset": 16, "min_khz": 1_620_000, "max_khz": 1_800_000}],
+    }
+    updates: list[str] = []
+    app.widgets["#metrics"] = SimpleNamespace(update=updates.append)
+    controller = DashboardController(app)
+
+    controller.on_info_loaded(0, "", {"arch": "Turing"})
+    controller.update_metrics()
+    controller.on_info_loaded(0, "", {"arch": "Turing"})
+
+    assert any("locked 1620.0-1800.0 MHz" in text for text in updates), updates
+
+
+def test_an_unreadable_stored_window_leaves_the_dashboard_alone() -> None:
+    app = FakeApp()
+    app.overclock_controller = SimpleNamespace(prime_inputs=lambda: None)
+    app.native_service.submit_query = lambda job: job()
+    app.native_service.query_locked_state = lambda gpu: None
+    updates: list[str] = []
+    app.widgets["#metrics"] = SimpleNamespace(update=updates.append)
+    controller = DashboardController(app)
+
+    controller.on_info_loaded(0, "", {"arch": "Turing"})
+
+    assert not any("locked" in text for text in updates), updates
+
+
+def test_a_backend_without_the_locked_state_read_is_skipped() -> None:
+    app = FakeApp()
+    app.overclock_controller = SimpleNamespace(prime_inputs=lambda: None)
+    app.native_service.submit_query = lambda job: job()
+    app.widgets["#metrics"] = SimpleNamespace(update=lambda _value: None)
+    controller = DashboardController(app)
+
+    # The fake native service has no query_locked_state: no line, no crash.
+    controller.on_info_loaded(0, "", {"arch": "Turing"})
+
+    assert controller._locked_state_text is None
+
+
 def test_dashboard_tick_suppresses_status_json_output() -> None:
     app = FakeApp()
 

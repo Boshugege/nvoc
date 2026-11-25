@@ -3,7 +3,7 @@ from __future__ import annotations
 from rich.text import Text
 from textual.widgets import Button, Input, Static
 
-from ..metrics_format import _format_metric_lines
+from ..metrics_format import _format_metric_lines, locked_state_text
 from ..widgets import mnemonic_text
 from .base import PaneController
 
@@ -40,6 +40,9 @@ class DashboardController(PaneController):
         self._rail_poll_inflight = False
         self._rail_poll_failures = 0
         self._rail_poll_disabled = False
+        # The stored locked-clock window, read once per GPU (below).
+        self._locked_state_gpu: str | None = None
+        self._locked_state_text: str | None = None
 
     def set_poll_timer(self, interval: float) -> None:
         interval = max(0.2, min(interval, 60.0))
@@ -134,6 +137,7 @@ class DashboardController(PaneController):
         # Info reloads on GPU switch — drop rail voltages from the previous
         # GPU so the VOLT line can't show another part's rails for a tick.
         self.app.cache.rail_volts = None
+        self._poll_locked_state()
         self.update_metrics()
         self.app.overclock_controller.prime_inputs()
 
@@ -154,6 +158,55 @@ class DashboardController(PaneController):
             # Re-render the GPC live point (status feed) and kick the
             # direct-read poll when the active curve is xbar/host.
             self.app.vfcurve_controller.poll_live()
+
+    def _poll_locked_state(self) -> None:
+        """Read the locked-clock table the macOS RM driver stores, once per GPU.
+
+        Not a telemetry poll: the stored table only changes when something
+        writes it, so this rides the info reload (which is what a GPU switch
+        triggers) instead of every status tick. A backend without the binding
+        (another vendor, an older pynvoc) is skipped silently -- the dashboard
+        then simply has no such line, which is "this transport does not say",
+        not "nothing is locked".
+        """
+        read = getattr(self.app.native_service, "query_locked_state", None)
+        if read is None:
+            return
+        try:
+            gpu = self.app.selected_gpu_target()
+        except Exception:
+            return
+        if gpu is None or gpu == self._locked_state_gpu:
+            return
+        self._locked_state_gpu = gpu
+        # Drop the previous card's window before the new read lands: showing it
+        # against a different GPU would be the wrong card's lock.
+        self._locked_state_text = None
+
+        def worker() -> None:
+            try:
+                payload = read(gpu)
+            except Exception:
+                payload = None
+            try:
+                self.app.call_from_thread(
+                    self._on_locked_state_loaded, locked_state_text(payload), gpu
+                )
+            except Exception:
+                pass
+
+        try:
+            self.app.native_service.submit_query(worker)
+        except Exception:
+            # A display nicety: a broken executor must not take the info
+            # reload down with it.
+            pass
+
+    def _on_locked_state_loaded(self, text: str | None, gpu: str) -> None:
+        if gpu != self._locked_state_gpu:
+            return
+        self._locked_state_text = text
+        self.update_metrics()
 
     def _poll_rail_volts(self) -> None:
         """Piggyback a volt-rails read on the status sweep (worker thread).
@@ -241,6 +294,8 @@ class DashboardController(PaneController):
         if self.app.cache.rail_volts:
             status = {**status, "rail_volts_mv": self.app.cache.rail_volts}
         lines = _format_metric_lines(status, architecture)
+        if self._locked_state_text:
+            lines.append(self._locked_state_text)
         self.app.query_one("#metrics", Static).update("\n".join(lines))
 
     def activate_button(self, button_id: str) -> bool:

@@ -1,4 +1,4 @@
-from nvoc_tui.metrics_format import _format_metric_lines
+from nvoc_tui.metrics_format import _format_metric_lines, locked_state_text
 
 
 def test_format_metric_lines_full() -> None:
@@ -302,3 +302,29 @@ def test_format_metric_lines_multi_cooler_labels() -> None:
     assert "FAN1 1000 RPM @ 30%" in text
     assert "FAN2 2000 RPM @ 50%" in text
     assert "FAN: FAN1" in text
+
+
+def test_locked_state_text_reads_the_newest_record() -> None:
+    payload = {
+        "count_at_4": 96,
+        "records": [
+            {"offset": 16, "min_khz": 1_700_000, "max_khz": 1_700_000},
+            {
+                "offset": 64,
+                "min_khz": 1_620_000,
+                "max_khz": 1_800_000,
+                "memory_khz": 6_000_984,
+            },
+        ],
+    }
+    assert locked_state_text(payload) == "locked 1620.0-1800.0 MHz | MEM 6001.0 MHz"
+
+
+def test_locked_state_text_says_nothing_rather_than_zero() -> None:
+    assert locked_state_text(None) is None
+    assert locked_state_text({}) is None
+    # An empty table and an unreadable one both mean "no readable window".
+    assert locked_state_text({"count_at_4": 0, "records": []}) is None
+    assert (
+        locked_state_text({"records": [{"offset": 16, "min_khz": 1_620_000}]}) is None
+    )
