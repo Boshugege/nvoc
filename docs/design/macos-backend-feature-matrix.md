@@ -3197,3 +3197,24 @@ GET /api/oc?gpu=0          → "power":{"current_w":100,"max_w":100,"min_w":70}
 **④ 诚实边界** ✔：这是**读**的修正，写入口不变（功耗 70–100 W、acoustic 65–87 ℃ 的写入早前已验证）。`max_w = 100` 就是这张卡被 100 W 板卡上限锁死的那个数，**不是**"能放开到更高"的许可。acoustic 65–87 ℃ 是**降噪温度目标**窗口，不是 GPU 温度墙（Shutdown/Slowdown 在本驱动读不到，仍为 null）。
 
 **⑤ 测试** ✔：`cargo test -p nvoc-srv --lib macos` **10 passed**（+2 映射，1 改）；`cargo xtask ci` = `CI_EXIT=0`。
+
+## 一百八十六、TUI 的功耗/温度行接上驱动公布的窗口（并撤掉一对重复键）
+
+**① 先走错了一步，真机把方向纠正了** ✔：本想让 pynvoc 发布 `power_window` / `thermal_window`，真机一跑发现 pynvoc **早就**把同两块数据发布成 `power_limit_min/-max/-current` 与 `acoustic_target_min/-max/-current_c`。同一份数据两个名字就是两条要保持同步的契约，所以新键撤掉（`930087a` 加、`a7f7ce8` 撤，历史不改写），TUI 直接读已有的键。
+
+**② 改法** ✔：`power_window()` / `thermal_window()` 要求两端是 `int` 且 `min <= max`，否则**没有窗口**（半读、倒置都不许套滑条）；`limits_window_error(power, thermal)` 一次点名**所有**越界行、只给与该行有关的那个窗口、不截断不夹取；`prime_inputs` 里 `#thermal-limit` 改锚 `acoustic_target_current_c`（驱动当前）而不是出厂默认；`limits-apply` 在 `run_native_action` **之前**拒绝，一次写都不发。
+
+**③ 真机判定** ✔（`outputs/stage-policy-windows-tui-20261125T210537Z/`，驱动 610.57.04）：
+
+```
+power_limit_min 70 / current 100 / default 100 / max 100   (policy_index 2)
+acoustic_target_min 65 / current 83 / default 83 / max 87
+(100, 83) → None          (70, 65) → None
+(120, 83) → power limit 120 W   … (driver span 70..100 W, running 100 W)
+(100, 95) → thermal limit 95 C  … (driver span 65..87 C, running 83 C)
+(120, 95) → 两行都点名、两个窗口都给出
+```
+
+**④ 诚实边界** ✔：这是**写前拒绝**，窗口数值全来自驱动已公布的两块策略，本轮**没有写任何东西**。`acoustic_target_*` 是**降噪温度目标**窗口，不是 GPU 温度墙（`gpu_max_temperature_c` 88 是独立条目，未混入）。真机探针跑在**控制器层**（真实 `query_settings` 输出喂进 `OverclockController`），不是在 macOS 上点过 TUI 按钮；Textual 绑定由 Linux 上单测覆盖。功耗 70–100 W 的上界就是 100 W 板卡上限锁死的数。
+
+**⑤ 测试** ✔：`pytest -q tui/tests/` **240 passed**（+7）；`cargo test -p pynvoc --no-default-features` **22 passed**；`cargo xtask ci` = `CI_EXIT=0`。
