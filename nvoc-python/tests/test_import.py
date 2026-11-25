@@ -24,10 +24,9 @@ EXPECTED_EXPORTS = [
     "discover_gpus",
     "force_wake",
     "get_clock_domain",
-    "get_gpu_locked_clocks",
-    "set_gpu_locked_clocks",
     "get_core_voltage_control",
     "get_display_list",
+    "get_gpu_locked_clocks",
     "get_oc_scanner_incomplete",
     "get_pmgr_arbiter",
     "get_power_source",
@@ -107,6 +106,7 @@ EXPECTED_EXPORTS = [
     "set_fan_curve",
     "set_fan_rpm",
     "set_fanstop_status",
+    "set_gpu_locked_clocks",
     "set_legacy_clocks",
     "set_legacy_voltage_delta",
     "set_locked_clocks",
@@ -153,6 +153,9 @@ def pynvoc():
 
 def test_all_exports_present(pynvoc):
     assert hasattr(pynvoc, "__all__"), "pynvoc should define __all__"
+    # The list above is sorted, and this comparison is against the sorted
+    # __all__, so a name inserted anywhere but its alphabetical place used to
+    # make this test fail only on a machine that can import the native module.
     assert sorted(pynvoc.__all__) == EXPECTED_EXPORTS
     for name in EXPECTED_EXPORTS:
         assert name in pynvoc.__all__, f"{name} missing from __all__"
