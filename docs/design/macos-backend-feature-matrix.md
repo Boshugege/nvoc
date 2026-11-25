@@ -3403,3 +3403,17 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **④ 下一步（唯一能分辨的）** ✔：跑一次产品 CLI 的 `get-gpu-locked-clocks`，把它的窗口值与"种子里装的就是全 1"对照——若 CLI 报出真实窗口而探针看到 0 change，则 (a)/(b) 成立、探针形态还不够；若 CLI 报出的正是装进去的东西，则 (c) 成立，必须回头审 `read_locked_clocks` 的语义。**本轮已在测试机上跑 CLI 做这一步，结果见汇报。**
 
 **⑤ 边界** ✔：两条都是只读 GET，零写入；这轮没有任何"复活复位通道"的结论。
+
+## 二百〇一、矛盾缩小到一句话：产品 docstring 说是"驱动归一化"，探针说"驱动一个字没改"
+
+**① 已核实的链路** ✔：`core/native/macos_rm.c:695` 的 `nvoc_macos_rm_session_locked_clocks()` 明确只有两个 id——**query `0x20809014`、write `0x2080d041`，尺寸固定 `NVOC_RM_LOCK_BLOCK_BYTES`（648）**，且"Rust 侧两个方向都自己种块，这里只挑 id"。⇒ 我的探针用的 **就是**产品用的 id 和尺寸，不是"形态形似而不同"。
+
+**② 产品自己的口径** ✔：`MacosRmPlatform::locked_clocks()` 的文档写着：*"Reads the locked-clock window **the driver would answer for these keys** … the answer is the driver's own normalisation of the window, **not the active lock on other keys**"*。⇒ `applied: false` 是对的，这个命令**从来不是"读当前锁定状态"**，而是"问驱动：这组键它会归一化成什么"。
+
+**③ 因此第 58 轮的 CLI 观察被解释了一半** ✔：max 三组原样回显 = 归一化不越界就不改；min 变了（100→202.5、1300/900→1620）= 归一化确实动了 min。**但这与探针的 `0/162 dwords differ` 直接冲突**：归一化若真的发生过，块里至少 min/max 两个 dword 必须变。
+
+**④ 尚未解释的部分（不猜）** ✗：为什么同一个 id、同一个尺寸、同一个种子形态，探针看到"零改动"，而 CLI 看到"min 被改成 202.5/1620"。可能是探针种子里的 pstate/domain（全 1）落在驱动不同的分支上，也可能是 CLI 打印的值里有一段并非来自这个块。**在拿到"用 CLI 那组精确请求（vP8 / graphics / min 100 / max 200）构造的探针块"之前，两种都不算成立。**
+
+**⑤ 由此产生的一个必须警惕的后果** ✗：如果 `get-gpu-locked-clocks` 报的 min/max 有任何一段不是驱动答案，那么前几轮"SET 后回读 1620/1700 一致"的验证就有自证成分。**这不是结论，是必须查清的风险点**——下一轮第一件事就是把这条链焊死或推翻。
+
+**⑥ 边界** ✔：本节全部基于源码阅读 + 已跑过的只读探针与读命令，零新增写入。
