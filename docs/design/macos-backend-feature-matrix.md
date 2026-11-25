@@ -3596,3 +3596,21 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **⑤ 边界** ✔：两次写都是完整事务并已回滚（偏移读回 0）；本轮共 3 次写（含一次 1620/1900），都在已验证的写入口上，每次都 restore 并验回。10 秒级窗口不是稳定性结论。
 
 **⑥ 证据** ✔：`outputs/stage-lock-twin-structure-20261126T094500Z/`（`in-place-1620-1700.json`、`in-place-1620-1900.json`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百一十四、服务侧多一个真写入口：`POST /api/oc/locked-clocks`，真机上跑通（含拒绝与回滚）
+
+**① 新增** ✔：`GET /api/oc` 多一个 `locked_window` 字段，`POST /api/oc/locked-clocks?gpu=&min_mhz=&max_mhz=` 通过已验证的 macOS 传输写一个 graphics vP8 窗口。trait 默认实现是"不发布/拒写"，所以别的传输不会被这个入口带出未经证实的写。
+
+**② 真机结果** ✔（hexdump 之外第一次从**服务**走这条写）：
+- `GET /api/oc?gpu=0` → `"locked_window": null`（**不是** 0 窗口：这条传输没有窗口状态读，见 §二百一十三）；
+- `min 1700 > max 1620` → **400**，`min 1700 MHz is above max 1620 MHz; nothing was written`；
+- `min 1620 / max 1700` → **200**，审计行 `OK: oc.locked_clocks gpu 0 1620..1700 MHz`；
+- 写后偏移读回 `Restore kHz: 0`——事务自带回滚；服务用完即停，`srv=0`。
+
+**③ 只校验"请求自身能判定的东西"** ✔：`locked_window_refusal` 只拒 0 边界与 floor>ceiling；**不夹取跨度**，因为 macOS 写路径本来就会拒绝驱动不接受的窗口并**说出它接受的跨度**——夹取会把"驱动拒绝"伪装成"我们帮你调好了"。
+
+**④ 边界** ✔：这是**服务侧写入口**跑通，不是 UI 跑通（GUI/TUI 在 macOS 上仍未点过）；窗口 10 秒级观察不算稳定性。
+
+**⑤ 测试** ✔：`nvoc-srv` 73 + 新增 1 条（0 边界、floor>ceiling 被拒，正常与相等边界通过）全部通过；`cargo xtask ci` = `CI_EXIT=0`。
+
+**⑥ 证据** ✔：`outputs/stage-srv-locked-clocks-20261126T100000Z/`（`post-1620-1700.json`、`srv.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
