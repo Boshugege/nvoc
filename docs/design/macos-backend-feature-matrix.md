@@ -2720,3 +2720,15 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **③ 权限门的实测形态（新，值得记）** ✔：未提权时三条 fan/power/locked-window 读数全部失败为 `nvx: esc 0xc8 (72 bytes) -> kr 0xe00002d8` + `CARD_INFO: 0xffffffff (NV_STATUS_UNKNOWN)`。`0xe00002d8` 是 IOKit 的 `kIOReturnNotPrivileged` ⇒ **fan 族的 GET 和 SET 都在 root 门后面**，非特权路径的 `NV_STATUS_UNKNOWN` 不能被上层反推成"设备不支持"。同一秒 `sudo -S` 重跑同一命令立刻给出 `Mode: auto`、`Max Rpm 2800`。
 
 **④ 边界（不美化）** ✗：`Rpm` 在读前、读后、复位后**都是 0**——这张卡空载时风扇本来就不转。所以本阶段证明的是**模式字段与目标占空比被正确写入并回读验证、且能 exact 复位**，不能证明"满载时风扇被命令停下"；本机没有可用负载源（`stress-macos/metal_check --stress N` = `VK_ERROR_DEVICE_LOST`），10–15 秒负载也不算稳定性结论。设备侧的失败注入/取消回滚未构造（CLI 侧拒绝路径已有单元测试）。证据：`outputs/stage-fanstop-20261125T160602Z/`（`01-snapshot` / `02-write-stop` / `03-readback-stop` / `04-restore` / `05-readback-restored`，带 `SHA256SUMS`）。
+
+## 一百五十七、RPM 目标在真实负载下闭环；顺带更正"负载源不可用"并修掉一个坏采样缺陷
+
+**① 先更正负载源** ✔：此前记录"`stress-macos/metal_check --stress N` 在本机 `VK_ERROR_DEVICE_LOST`，不可用"。本轮换**轻配置** `--stress 45 --elements 65536 --iters 20000`（默认是 2^26 elements / 10^7 iters）重测：`iterations 11 / verified 11 / failures 0 / checked_elements 720896 / elapsed_ms 46839`，零失败、无 device lost，风扇从 0 rpm 升到 **1601 rpm / 57%**。⇒ 能用的是轻配置，之前失败的是重配置。**这仍不是稳定性认证**：45 秒只说明能造出可观测转速。
+
+**② 事务（每一步有文件）** ✔：空载 `auto / 0 rpm / max 2800` → 起载后 `auto / 1601 rpm / 57%` → **唯一一次写** `set-fan-speed 1500 --rpm` ⇒ `manual`、`Target 53.57208251953125%`、`Readback Verified: yes`、`Other Bytes Preserved: yes`、`Original Mode: auto` → 带载回读 **1542/1520/1471/1517/1494**，完整记录 `Rpm 1501`、`Current 54%` → 复位 `reset-fan-speed` ⇒ `auto`、`Original Mode: manual`、`Readback Verified: yes` → 复位后 1540 → 1187 → 0（负载结束固件自停）。非目标域未动：板卡 `100.0 W`（窗口 Min 70.0 W）、锁定窗口 `graphics vP8 1620/1700`、电源 `ac`。
+
+**③ 误差量级** ✔：1500/2800 = 0.535714…，驱动侧收到的正是 `53.57208251953125%`（Q16 = 35106），实测 1471–1542、中位 1501 ⇒ 开环占空比换算在这张卡这一次落在请求 **±2%** 内。开环是本质（驱动只吃 Q16 占空比），±2% 不构成承诺。
+
+**④ 抓到一个真缺陷并已修** ✔：升速途中一次 `get-fan-info` 的转速字段读出 **273973**，一秒后同路径读 1469，而控制记录自己写着 `max_rpm = 2800` ⇒ 不可能是转速，是驱动在风扇更新中途给出的坏采样。新增 `FanControlSettings::rpm_is_plausible()`（`max_rpm == 0` 时不下判断），`get-fan-info` 在该情形加一条 note 明说"高于该冷却器自身上限，当坏采样重读、不要当转速"；读数本身原样保留（记录就是记录），改的是**不许它冒充转速**。单元测试 `a_tach_above_the_coolers_own_maximum_is_a_bad_sample` 覆盖坏采样/正常/无标尺三种情形；`cargo test -p nvoc-core --lib macos_fan` 10/10 通过，`cargo xtask ci` = `CI_EXIT=0`。证据：`outputs/stage-fan-rpm-20261125T160903Z/`（9 个文件 + `SHA256SUMS`）。
+
+**⑤ 边界** ✗：只写 cooler 0；45 秒负载不等于稳定性；设备侧失败注入未构造（CLI 侧拒绝路径有单元测试）。
