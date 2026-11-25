@@ -168,13 +168,24 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                 }
                 Command::SetPstateGlobalFreqOffset | Command::ResetPstateGlobalFreqOffset => {
                     let (domain, khz) = write.ok_or_else(|| CliError::new("missing clock write request"))?;
+                    // What the driver says it accepts, read before the write.
+                    // The parse-time wall is a fixed ±18 750 kHz; this is the
+                    // live window, so a driver that narrows or widens it is
+                    // followed instead of contradicted. The read is read-only,
+                    // and an unreadable window refuses nothing.
+                    let window = published_offset_window(&target)?;
+                    if let Some(reason) = offset_window_refusal(khz, window) {
+                        return Err(CliError::new(reason));
+                    }
                     let report = run(&target, nvoc_core::SetMacosRmClockOffset {
                         domain, khz, cancelled: &interrupted,
                     })?.output;
                     json!({"applied": true, "backend": "macos-rm", "mode": "domain-offset",
                         "domain": domain_label(domain), "offset_mhz": f64::from(report.applied_khz)/1000.0,
                         "offset_khz": report.applied_khz, "original_offset_khz": report.original_khz,
-                        "readback_verified": report.readback_verified, "other_bytes_preserved": report.other_bytes_preserved})
+                        "readback_verified": report.readback_verified, "other_bytes_preserved": report.other_bytes_preserved,
+                        "window_checked": window.is_some(),
+                        "window_min_khz": window.map(|(min, _)| min), "window_max_khz": window.map(|(_, max)| max)})
                 }
                 Command::GetGpuLockedClocks => {
                     let request = lock_write
@@ -596,6 +607,31 @@ fn power_write_request(
         nvoc_core::PowerLimitTarget::Milliwatts(nvoc_core::validate_macos_power_limit_watts(watts)?)
     };
     Ok(Some(target))
+}
+
+/// The pre-write verdict on an offset against the published span, or `None` to
+/// let the write run. `window` is (min kHz, max kHz); `None` published no span.
+fn offset_window_refusal(khz: i32, window: Option<(i32, i32)>) -> Option<String> {
+    let (min_khz, max_khz) = window?;
+    nvoc_core::offset_verdict(khz, min_khz, max_khz)
+        .reason
+        .map(|reason| format!("offset refused, nothing was written: {reason}"))
+}
+
+/// The offset span the driver published, in kHz, or `None` when it published none.
+///
+/// Read-only, and deliberately tolerant: a window that could not be read leaves
+/// the parse-time wall as the only bound, which is the same state this command
+/// was in before the window existed. It never invents an end.
+fn published_offset_window(target: &nvoc_core::GpuTarget<'_>) -> CliResult<Option<(i32, i32)>> {
+    let settings = run(target, nvoc_core::QueryMacosRmSettings)
+        .map(|result| result.output)
+        .map_err(CliError::from)?;
+    let limits = match settings.clock_offset_limits_khz {
+        Some(limits) => limits,
+        None => return Ok(None),
+    };
+    Ok(Some((limits.min_khz, limits.max_khz)))
 }
 
 fn clock_write_request(
@@ -1032,6 +1068,40 @@ mod tests {
                 invocation.command
             );
         }
+    }
+
+    #[test]
+    fn the_write_path_refuses_an_offset_outside_the_published_window() {
+        // +19 MHz clears the parse-time wall (±18 750 kHz) and still sits
+        // outside what the driver says it accepts, so the live window is what
+        // must stop it — before any SET is issued.
+        let window = Some((-18_750, 18_750));
+        let refusal = offset_window_refusal(19_000, window).expect("refused");
+        assert!(
+            refusal.starts_with("offset refused, nothing was written:"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("+19 MHz"), "{refusal}");
+        assert!(refusal.contains("-18.75 .. +18.75 MHz"), "{refusal}");
+        // Inside the window (both ends, both signs) the write runs.
+        assert_eq!(offset_window_refusal(18_000, window), None);
+        assert_eq!(offset_window_refusal(-18_000, window), None);
+        assert_eq!(offset_window_refusal(0, window), None);
+    }
+
+    #[test]
+    fn an_unread_window_does_not_stop_the_write() {
+        // No published span: the parse-time wall is the only bound, which is
+        // the state this command was in before the window existed.
+        assert_eq!(offset_window_refusal(19_000, None), None);
+    }
+
+    #[test]
+    fn the_write_path_judges_a_lopsided_window_end_by_end() {
+        let window = Some((-8_000, 18_750));
+        assert!(offset_window_refusal(-12_000, window).is_some());
+        assert_eq!(offset_window_refusal(-8_000, window), None);
+        assert!(offset_window_refusal(19_000, window).is_some());
     }
 
     #[test]
