@@ -3308,3 +3308,13 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **⑤ 测试** ✔：`cargo test -p nvoc-srv --lib` **73 passed**（新增 4 条：rpm 目标按 rpm 而非百分比下发、stop 是独立钉、无面后端被点名而非被给百分比、`rpm=0` 配置被拒）；`cargo xtask ci` = `CI_EXIT=0`（期间修掉 clippy `type_complexity` 与 `field_reassign_with_default` 两处，做法是把"取形态再执行"改成直接 match，而不是 `Box<dyn FnOnce>`）。
 
 **⑥ 保护项复核** ✔：风扇 `auto`/`max_rpm 2800`、板卡 100 W（窗口 70–100）、电源 `ac`、偏移 `Restore kHz: 0`、`nvoc-srv` 进程 0。
+
+## 一百九十三、GUI/TUI 的风扇策略补上"固件零转"：0 % 钉住与"请固件停转"是两件事
+
+**① 选择依据** ✔：两个前端在 macOS 上只能"钉一个百分比"或"交回驱动"，而 `pynvoc.set_fanstop_status`（macOS 分支写控制记录的 mode 2）与 core 的 `FanControlTarget::Stop` 早已存在且第 47 轮在真机上跑过。缺的是前端的那个选项——阶段 11 第 5 项"不能后端可用而入口一律拒绝/可点但无实现"的第三面：**能做、有入口、但面板上没有**。
+
+**② 改法** ✔：`fan_policy_options(macos=True)` 增加 `fanstop`（GUI 侧 `MACOS_FAN_POLICIES`、TUI 侧 `platform.py` 各一份，两侧映射表都加 `"fanstop": "fanstop"`）；应用时走 `native.set_fanstop_status(gpu, True, 0)`，**不转发 level 输入框**——把 0 当成"停转"是把两种请求混为一谈，而框里那个数字可能是上一次钉的值。返回话术明说"zero-RPM mode；0 percent pin is a different request"。
+
+**③ 测试** ✔：`pytest -q gui/tests/` **321 passed / 13 skipped**（新增 GUI 后端用例：policy=fanstop 只调 `set_fanstop_status`、不调 `set_fan`；两条原预期改为三选项）；`pytest -q tui/tests/` **243 passed**（新增控制器用例两条：fanstop 只走停转路径且不转发 level、百分比仍走 `set_fan`）；`cargo xtask ci` = `CI_EXIT=0`。
+
+**④ 诚实边界** ✔：GUI/TUI 依然**没有在 macOS 上被点击过**，验证停在控制器/后端这一层（项目既有口径）；真机上的 mode 2 写入与恢复来自第 47 轮的 `/fan?mode=stop` 四步证据（`outputs/stage-fan-forms-20261125T215920Z`），不是本轮新增。
