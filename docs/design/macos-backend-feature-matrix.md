@@ -3001,3 +3001,24 @@ potential: window -18.75..18.75 MHz at clock 1530.0 MHz -> -1.225 % .. 1.225 %
 **④ 服务面未接（说清原因）** ✗：`srv` 的 `/oc` 还没接这个块。该后端按设计拒绝"按名字取单域偏移"——时钟文档（`0x20809061`）的域位没有全部映射到 core/mem 名称，所以每域窗口读不出来；要接通得先解决域位映射，而不是把窗口硬塞进 `/oc`。
 
 **⑤ 证据** ✔：`outputs/stage-cli-offsetpotential-20261125T201727Z/`（3 文件 + `SHA256SUMS`）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
+
+## 一百七十七、服务面读出 macOS 的偏移、窗口和时钟
+
+**① 过严的拒绝被纠正** ✔：`srv` 的 macOS 后端原来对 `read_offset_mhz` 直接拒绝，理由是"时钟文档的域位没有全部映射到 core/mem 名称"。这个理由站不住：core 早就按"记录公布的频率 == 该公开域的实时时钟"给记录命名（`DeviceSettings::clock_offset_view`，附 `corroboration`）。现在后端按名字取 `graphics`/`memory` 的记录，只在本轮读面没能印证时拒绝，且拒绝信息里带原因。
+
+**② 真机验证** ✔（短生命周期实例，`GET /api/oc?gpu=0`）：
+
+```json
+{"core_offset_mhz":0,"mem_offset_mhz":0,
+ "offset_window":{"max_mhz":18.75,"min_mhz":-18.75,
+   "potential":{"clock_mhz":1530.0,"max_percent":1.225,"min_percent":-1.225, ...}},
+ "power":null,"temp":null}
+```
+
+`offset_window` 里的 `potential` 与 CLI 条目是**同一个 core 函数**，两处不会漂。
+
+**③ 仪表盘时钟** ✔：`tick()` 原本 `LoopKind::FanTemp => None`，风扇/温度环**故意不报时钟**，于是 macOS 仪表盘没有时钟——尽管每 tick 的 RM status 本来就带着它。新增默认返回 `None` 的 `read_observed_clock_mhz()`，由"手上正好有"的传输覆盖；需要额外查询的传输保持默认，`null` 仍是"不知道"。真机 `GET /api/status` 现在给出 `"core_clock_mhz":1530.0`（此前为 `null`）。新增 controller 单测覆盖两种语义。
+
+**④ 仍然空着的（不美化）** ✗：`/api/oc` 的 `power`/`temp` 仍为 `null`（板卡 min/max 与温度墙窗口在本驱动读不到）；OC 表单的温度滑条在 macOS 上仍应只读。
+
+**⑤ 证据** ✔：`outputs/stage-srv-oc-readback-20261125T202411Z/`（4 文件）与 `outputs/stage-srv-oc-readback-20261125T202800Z/`（4 文件），各有 `SHA256SUMS`；服务实例每次只活约 6 秒，收尾确认无残留进程；风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
