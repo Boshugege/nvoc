@@ -3614,3 +3614,20 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **⑤ 测试** ✔：`nvoc-srv` 73 + 新增 1 条（0 边界、floor>ceiling 被拒，正常与相等边界通过）全部通过；`cargo xtask ci` = `CI_EXIT=0`。
 
 **⑥ 证据** ✔：`outputs/stage-srv-locked-clocks-20261126T100000Z/`（`post-1620-1700.json`、`srv.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百一十五、macOS 侧回归复核：Rust 全绿（563 项），门禁卡在"这台机器没装 uv"
+
+**① 在测试机上跑 `cargo xtask ci`** ✔：fmt、clippy（含 `--no-default-features` 的压力器）、aarch64-linux 交叉检查**全部通过**，然后在 `ruff format` 这一步停下：
+
+```
+xtask: failed to spawn `uv run ... ruff format . --check`:
+No such file or directory (os error 2)
+```
+
+**② 这是环境缺工具，不是树的问题** ✔：没有为了让它绿而改门禁（那等于把"没跑"说成"通过"）。
+
+**③ 补跑 Rust 测试** ✔：`cargo test --workspace --exclude pynvoc`（pynvoc 需要 Python 才编）→ **`TEST_EXIT=0`，25 个测试二进制、563 项全过、0 失败**。这是**第一次在 macOS 上编译并测试新代码**：locked-clock 孪生读（`cfg(target_os = "macos")`）与 `/api/oc/locked-clocks` 服务路由都在这份结果里。
+
+**④ 没覆盖的** ✗：门禁的 Python 部分（ruff / pytest）与 pynvoc 扩展构建在本机跑不了。
+
+**⑤ 证据** ✔：`outputs/stage12-macos-recheck-20261126T101500Z/`（`xtask-ci.log`、`workspace-tests.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
