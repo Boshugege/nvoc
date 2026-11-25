@@ -185,6 +185,7 @@ static void usage(void)
         "                   instead of assumed.  Known-wedge ids are refused\n"
         "                   and a 0x65/0x62 answer aborts the rest.\n"
         "  --clkctl-hex    full-byte hex dump of every read-only clock block\n"
+        "                  (NVX_CLKCTL_ONLY=<substr> runs only matching cases)\n"
         "                   (0x2080901b@2108 with its +4 mask, 0x208090a2\n"
         "                   @524, 0x2080901d@32680, 0x20809025@7188,\n"
         "                   0x20809019@12336); the first case re-runs\n"

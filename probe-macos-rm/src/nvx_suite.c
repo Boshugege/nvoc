@@ -2661,9 +2661,18 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
         return -1;
     }
 
+    /* Discipline is one unknown id per boot, so a battery that carries twenty
+     * of them is only usable in full when the whole set has already answered.
+     * NVX_CLKCTL_ONLY=<substr> runs just the cases whose name contains it; the
+     * filter is a substring, not a regex, so what runs is auditable from the
+     * emitted names.  Unset means the whole battery, exactly as before. */
+    const char *clkctl_only = getenv("NVX_CLKCTL_ONLY");
+
     for (unsigned i = 0; i < sizeof cases / sizeof cases[0]; ++i) {
         const char *name = cases[i].name;
         unsigned size = cases[i].size;
+
+        if (clkctl_only && !strstr(name, clkctl_only)) continue;
 
         if (nvx_id_is_known_set(cases[i].cmd)) {
             nvx_emit(c, "V2.clkctl", name, 0, NVX_V_HARD,
