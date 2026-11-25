@@ -710,6 +710,53 @@ static void item_legacy_probes(nvx_ctx *c)
     item_tierb_reads(c);
 }
 
+/* One explicit read-only GET (--raw-read ID SIZE).
+ *
+ * The id and the size both come from the corrected method table, so this is a
+ * measurement of a named row, not a sweep.  A refusal is printed with its
+ * status and the caller is expected to stop there; a 0x65/0x62 answer aborts.
+ * Nothing is written, and no second size is ever tried for the same id. */
+int nvx_stage2_raw_read(nvx_ctx *c, NvU32 cmd, unsigned size)
+{
+    static uint8_t buf[64 * 1024];
+    if (!c->hSubdevice) {
+        nvx_emit(c, "V2.raw", "raw-read", 0, NVX_V_SKIP, "RM chain not open");
+        return -1;
+    }
+    if (size == 0 || size > sizeof buf) {
+        nvx_emit(c, "V2.raw", "raw-read", 0, NVX_V_SKIP,
+                 "paramSize %u is outside 1..%zu", size, sizeof buf);
+        return -1;
+    }
+    memset(buf, 0, size);
+    NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice, cmd, buf, size);
+    if (st != 0) {
+        nvx_emit(c, "V2.raw", "raw-read", st, NVX_V_REJECTED,
+                 "cmd 0x%08x at paramSize %u -> 0x%08x (%s)", cmd, size, st,
+                 nvx_status_name(st));
+        return 0;
+    }
+    unsigned nz = 0;
+    for (unsigned off = 0; off + 4 <= size; off += 4) {
+        unsigned v;
+        memcpy(&v, buf + off, 4);
+        if (v) ++nz;
+    }
+    nvx_emit(c, "V2.raw", "raw-read", st, NVX_V_OK,
+             "cmd 0x%08x at paramSize %u accepted, %u/%u dwords non-zero",
+             cmd, size, nz, size / 4);
+    /* Hex dump in 16-byte rows so a record boundary is visible. */
+    for (unsigned off = 0; off < size; off += 16) {
+        char line[80];
+        int n = snprintf(line, sizeof line, "  +0x%04x ", off);
+        for (unsigned k = 0; k < 16 && off + k < size && n > 0 &&
+                             (size_t)n < sizeof line; ++k)
+            n += snprintf(line + n, sizeof line - n, "%02x ", buf[off + k]);
+        nvx_emit(c, "V2.raw", "raw-read-bytes", st, NVX_V_SKIP, "%s", line);
+    }
+    return 0;
+}
+
 int nvx_stage2_tierb_read(nvx_ctx *c)
 {
     if (!c->hSubdevice) {

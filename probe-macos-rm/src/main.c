@@ -249,6 +249,9 @@ int main(int argc, char **argv)
     int thermal_read = 0, pm_read = 0, perf_read = 0, reg_read = 0;
     int fan_read = 0, hwfs_read = 0;
     int anchor_read = 0;
+    int raw_read = 0;
+    NvU32 raw_cmd = 0;
+    unsigned raw_size = 0;
     int clklevel_read = 0, clkdom_read = 0, clkctl_read = 0, clkctl_hex = 0;
     int clkctl_offsweep = 0, clkvf_read = 0;
     int clkdoc_read = 0;
@@ -277,6 +280,11 @@ int main(int argc, char **argv)
             explicit_gpu = 1;
         }
         else if (!strcmp(argv[i], "--tierb-read")) tierb_read = 1;
+        else if (!strcmp(argv[i], "--raw-read") && i + 2 < argc) {
+            raw_read = 1;
+            raw_cmd = (NvU32)strtoul(argv[++i], NULL, 0);
+            raw_size = (unsigned)strtoul(argv[++i], NULL, 0);
+        }
         else if (!strcmp(argv[i], "--rated-tdp-read")) rated_tdp_read = 1;
         else if (!strcmp(argv[i], "--anchor-read")) anchor_read = 1;
         else if (!strcmp(argv[i], "--thermal-read")) thermal_read = 1;
@@ -425,6 +433,11 @@ int main(int argc, char **argv)
             fprintf(stderr, "unknown stage '%c'\n", *p);
             return 2;
         }
+    }
+
+    if (raw_read) {
+        if (ensure_chain(gpuId, explicit_gpu) != 0) { rc = 1; goto out; }
+        if (nvx_stage2_raw_read(&g_ctx, raw_cmd, raw_size) != 0) rc = 1;
     }
 
     if (tierb_read) {
