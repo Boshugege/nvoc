@@ -3499,3 +3499,15 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **④ 边界** ✔：证明的是**机制**（展开、上限、pending 报告、账本续跑），**不是**自动编排——reboot 与"下个 boot 自动跑"仍需人工/外层调度；10 s 窗口**不是**稳定性结论；本轮只发生**一次**受控写（`graphics=0`，等价无偏移，仍走完整事务）。
 
 **⑤ 证据** ✔：`outputs/stage-optimizer-sweep-20261126T083000Z/`（`run1.json`、`run1.log`、`ev66-ledger.jsonl`、`README.md`、`SHA256SUMS`）。
+
+## 二百〇八、跨 boot 编排落地：宿主侧驱动脚本，账本是唯一状态，"没 pending"也要查账
+
+**① 为什么驱动脚本放在宿主而不是 Mac 上** ✔：纪律是**一 boot 一次未知写**，所以扫描天然是一串 boot。把驱动放在宿主（我们这台）用 ssh 轮转，Mac 上不装守护进程、不写 launchd、不动系统配置——重启这件事保持在人的手里（默认**不重启**，`--reboot` 才重启）。
+
+**② 脚本做什么** ✔（`auto-optimizer/tools/macos-sweep-ssh.sh`）：跑一次 `--sweep-max-per-boot 1`，从报告里读出 `still pending` 的数量，为 0 才结束；否则打印**下一条该跑的命令**（或 `--reboot` 时自己重启、等 ssh 回来再继续）。**脚本不保存任何自己的状态**——状态就是 Mac 上那份 resume ledger。
+
+**③ 一个必须的自我怀疑** ✔：某次 boot 报告"没有 pending 行"其实意味着"这一轮没有剩下要写的"，但那是**运行的自述**，不是证明。所以脚本此时会**自己数**：用 awk 从 grid 算出期望点数、数账本里 `"outcome":"ok"` 的行数，两者一致才说 `sweep finished: the ledger covers the whole grid`，不一致就**判失败而不是宣称完成**。实测输出：`grid expects 2 candidate(s); the ledger records 2 as ok` → `sweep finished`。
+
+**④ 实测路径** ✔：单点 grid `graphics=15000..15000:1` 被工具本身拒绝（`START equals STOP`），脚本如实报 `the boot failed; the ledger still says what is done, so re-running is safe`；两点 grid `graphics=-15000..0:15000`（账本已有一行）跑掉剩下的 0 kHz 候选，`settled=true`、`restored_khz=0`，跑完读回 **`Restore kHz: 0`**，账本两行，脚本判定覆盖完成。
+
+**⑤ 边界** ✔：`--reboot` 路径**本轮没有真跑**（不想为一次机制验证重启整机）；崩溃后续跑靠"账本 + 重跑同一条命令"，没有 boot 计数器。10 s 窗口不是稳定性结论。
