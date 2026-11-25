@@ -3511,3 +3511,17 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **④ 实测路径** ✔：单点 grid `graphics=15000..15000:1` 被工具本身拒绝（`START equals STOP`），脚本如实报 `the boot failed; the ledger still says what is done, so re-running is safe`；两点 grid `graphics=-15000..0:15000`（账本已有一行）跑掉剩下的 0 kHz 候选，`settled=true`、`restored_khz=0`，跑完读回 **`Restore kHz: 0`**，账本两行，脚本判定覆盖完成。
 
 **⑤ 边界** ✔：`--reboot` 路径**本轮没有真跑**（不想为一次机制验证重启整机）；崩溃后续跑靠"账本 + 重跑同一条命令"，没有 boot 计数器。10 s 窗口不是稳定性结论。
+
+## 二百〇九、真机跨 boot 续跑：重启之后账本还在，驱动只写没做过的那个候选，并且**自己数账**才说完成
+
+**① 做法（一次真重启）** ✔：账本从 `/tmp` 移到 `~/nvoc-sweep-ledger.jsonl`（`/tmp` 在 macOS 上不保证跨 boot），记着 `graphics -15000` 与 `graphics 0` 两行；`sudo reboot`；等机器回来（同地址 `10.253.254.142`，`uptime` 1 min 起算），账本**两行不变**。
+
+**② 重启后的续跑** ✔：`--grid graphics=-15000..15000:15000`（3 点）。驱动**跳过**已记录的两个候选，只写了 `15000` 一个；账本变三行；跑完偏移读回 **`Restore kHz: 0`**。
+
+**③ 完成判定靠算，不靠运行自述** ✔：驱动自己把 grid 期望点数与账本 `"outcome":"ok"` 行数对上——`grid expects 3 candidate(s); the ledger records 3 as ok` → `sweep finished: the ledger covers the whole grid`。上一轮我写"没 pending 也要查账"，这一轮它在真重启之后兑现了。
+
+**④ 一个被我自己的脚本抓到的证据错误** ✔：第一次封证据时 `SHA256SUMS` 里写了带目录前缀的路径、却在该目录内做 `shasum -c`，于是 `FAILED open or read`。已重新在目录内生成并验证通过。**证据文件的名字对不上就是证据本身的问题**，不是排版问题。
+
+**⑤ 边界** ✔：证明的是**跨 boot 续跑**（账本 + 跳过 + 计数完成），不是自动编排（reboot 仍由人发起）；每次写仍是完整 apply/hold/verify/restore 事务；每个窗口 10 s，**不是稳定性结论**。
+
+**⑥ 证据** ✔：`outputs/stage-optimizer-crossboot-20261126T084500Z/`（`ledger.jsonl`、`uptime.txt`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
