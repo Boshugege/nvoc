@@ -3651,3 +3651,21 @@ No such file or directory (os error 2)
 **⑤ 下一步（明确）** ✖：在那台机器上重建 pynvoc 扩展；把 GUI 风扇相关测试改成**声明自己假设哪种传输**，而不是假设宿主机的那种。
 
 **⑥ 证据** ✔：`outputs/stage12-macos-python-20261126T103000Z/`（`python-steps.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百一十七、GUI 的 14 项失败修好了：让测试**说出**它描述的是哪种传输，而不是继承宿主机
+
+**① 根因** ✔：`gui/tests/test_fan_control.py`、`test_fan_curve.py` 和 `test_the_nvapi_path_is_untouched` 描述的是 **NVAPI/NVML** 风扇传输，但它们通过 `src.platform.is_macos()`（即 `sys.platform == "darwin"`）读宿主机。于是**在 macOS 上一个都过不了**——失败的是"宿主"不是"代码"。Linux 上一直绿，所以从没暴露。
+
+**② 修法** ✔：新增 `non_macos_host` fixture（`monkeypatch.setattr(sys, "platform", "linux")`），由这两个模块与那一条测试显式声明使用。在 Linux 上是**空操作**，所以常年在跑的那条路不受影响。
+
+**③ 修后实测** ✔（同一台 macOS）：
+| 套件 | 修前 | 修后 |
+| --- | --- | --- |
+| `gui/tests` | 14 failed / 310 passed / 13 skipped | **324 passed / 13 skipped / 0 failed** |
+| `tui/tests` | 245 passed | **245 passed** |
+
+**④ 没有做的** ✗：没有在那台机器上重建 pynvoc 扩展，所以 `nvoc-python` 那 1 项仍因**旧构建**失败（导出缺失是陈旧二进制造成的，不是缺功能）。
+
+**⑤ 教训** ✔：一套测试只在**它不描述的平台**上跑绿，等于没测。这类"宿主假设"应该**写进测试**，让它到哪台机器上都表达同一件事。
+
+**⑥ 证据** ✔：`outputs/stage-gui-host-assumption-20261126T104500Z/`（`python-tests.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。宿主机 `cargo xtask ci` = `CI_EXIT=0`。
