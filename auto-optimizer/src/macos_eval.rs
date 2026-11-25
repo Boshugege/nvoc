@@ -21,9 +21,10 @@
 
 use clap::ArgMatches;
 use nvoc_core::{
-    ClockDomain, DeviceStatus, Error, GpuTarget, OffsetStepTarget, PlanRequest, QueryMacosRmInfo,
-    QueryMacosRmSettings, QueryMacosRmStatus, SetMacosRmClockOffset, candidate_outcome, fps_tail,
-    load_summary, parse_plan_requests, plan_document, run,
+    ClockDomain, DeviceStatus, Error, GpuTarget, LoadThroughput, OffsetStepTarget, PlanRequest,
+    QueryMacosRmInfo, QueryMacosRmSettings, QueryMacosRmStatus, SetMacosRmClockOffset,
+    candidate_outcome, fps_tail, load_summary, metal_throughput, parse_plan_requests,
+    plan_document, run, throughput_delta,
 };
 use serde_json::{Value, json};
 use std::io::Write;
@@ -155,6 +156,8 @@ struct LoadRun {
     stressor: Value,
     post: Value,
     exit_code: Option<i32>,
+    /// The verified Metal window's own throughput, when the load printed one.
+    throughput: Option<LoadThroughput>,
 }
 
 fn run_bounded_load(gpu: &GpuTarget<'_>, opts: &StockEvalOptions) -> Result<LoadRun, Error> {
@@ -244,6 +247,7 @@ fn sample_while_loaded(
         .map_err(|e| error(format!("failed to serialise the load summary: {e}")))?;
 
     Ok(LoadRun {
+        throughput: metal_throughput(&output.stdout),
         under_load: under_load_report,
         stressor: json!({
             "exit_code": output.status.code(),
@@ -292,6 +296,7 @@ fn run_verifier(path: Option<&PathBuf>, dry_run: bool) -> Result<Value, Error> {
 /// What the write half produced: the held load, its verifier, and the two write
 /// reports the round trip is judged on.
 struct CandidateRun {
+    throughput: Option<LoadThroughput>,
     applied: nvoc_core::ClockOffsetWriteReport,
     restored: Option<nvoc_core::ClockOffsetWriteReport>,
     under_load: Value,
@@ -363,6 +368,7 @@ fn run_candidate(
         .unwrap_or(Value::Null);
     let (load, verifier) = held?;
     Ok(CandidateRun {
+        throughput: load.throughput.clone(),
         applied,
         restored,
         under_load: load.under_load,
@@ -403,6 +409,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             stressor: Value::Null,
             post: Value::Null,
             exit_code: Some(0),
+            throughput: None,
         }
     } else {
         run_bounded_load(gpu, &opts)?
@@ -486,6 +493,15 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         "under_load": load.under_load,
         "post": load.post,
         "stressor": load.stressor,
+        "under_load_throughput": load.throughput,
+        "candidate_throughput": candidate.as_ref().and_then(|run| run.throughput.clone()),
+        "candidate_comparison": match (&load.throughput, candidate.as_ref()) {
+            (Some(baseline), Some(run)) => run
+                .throughput
+                .as_ref()
+                .and_then(|candidate| throughput_delta(baseline, candidate)),
+            _ => None,
+        },
         "verifier": verifier,
         "candidate": candidate.as_ref().map(|run| candidate_outcome(
             opts.candidate.as_ref().map_or(0, |request| request.delta_khz),

@@ -245,6 +245,92 @@ pub fn load_summary(samples: &[DeviceStatus]) -> LoadSummary {
     }
 }
 
+/// What a verified Metal load actually got through, so two windows can be
+/// compared on one number instead of on impressions.
+///
+/// The Vulkan stressor prints rolling `fps` lines; the Metal verifier prints one
+/// JSON line with the dispatches it launched, the ones it verified and the
+/// elapsed time. Throughput is derived from those, never from a separate clock,
+/// so a window cannot look faster merely because it was sampled differently.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LoadThroughput {
+    pub mode: String,
+    pub iterations: u64,
+    pub verified: u64,
+    pub failures: u64,
+    pub elapsed_ms: u64,
+    pub iterations_per_second: f64,
+    pub verified_full_buffer: bool,
+    pub stopped_by_signal: bool,
+}
+
+/// Read one `"key": <value>` field out of the verifier's single-line report.
+/// The emitter is one process writing one line with a fixed key set; a scanner
+/// is enough, and it keeps `core` free of a JSON dependency.
+fn json_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\":");
+    let start = line.find(&needle)? + needle.len();
+    let rest = line[start..].trim_start();
+    let end = rest.find([',', '}']).unwrap_or(rest.len());
+    Some(rest[..end].trim().trim_matches('"'))
+}
+
+/// The last verifier report in a load's stdout, or `None` when the process
+/// printed none (the Vulkan stressor does not, and a crashed load prints nothing).
+pub fn metal_throughput(stdout: &[u8]) -> Option<LoadThroughput> {
+    let text = String::from_utf8_lossy(stdout);
+    let line = text
+        .lines()
+        .rev()
+        .find(|line| line.contains("\"schema\":\"nvoc/macos-metal-check/1\""))?;
+    let elapsed_ms = json_field(line, "elapsed_ms")?.parse::<u64>().ok()?;
+    let iterations = json_field(line, "iterations")?.parse::<u64>().ok()?;
+    if elapsed_ms == 0 {
+        return None;
+    }
+    Some(LoadThroughput {
+        mode: json_field(line, "mode")?.to_owned(),
+        iterations,
+        verified: json_field(line, "verified")?.parse().ok()?,
+        failures: json_field(line, "failures")?.parse().ok()?,
+        elapsed_ms,
+        iterations_per_second: iterations as f64 * 1000.0 / elapsed_ms as f64,
+        verified_full_buffer: json_field(line, "verified_full_buffer")? == "true",
+        stopped_by_signal: json_field(line, "stopped_by_signal")? == "true",
+    })
+}
+
+pub const THROUGHPUT_NOTE: &str = "Throughput is the verifier's own dispatched-and-verified \
+count divided by its own elapsed time. A delta between two windows is reported as a \
+comparison, not as a verdict: the windows are separate short runs on a power-limited \
+card, so a difference inside the run-to-run spread is noise, and matching numbers on a \
+power-capped window do not mean a candidate had no effect.";
+
+/// The two windows on one number, or `None` when there is nothing to divide by.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ThroughputDelta {
+    pub baseline_per_second: f64,
+    pub candidate_per_second: f64,
+    pub percent: f64,
+    pub note: &'static str,
+}
+
+pub fn throughput_delta(
+    baseline: &LoadThroughput,
+    candidate: &LoadThroughput,
+) -> Option<ThroughputDelta> {
+    if baseline.iterations_per_second <= 0.0 {
+        return None;
+    }
+    Some(ThroughputDelta {
+        baseline_per_second: baseline.iterations_per_second,
+        candidate_per_second: candidate.iterations_per_second,
+        percent: (candidate.iterations_per_second - baseline.iterations_per_second) * 100.0
+            / baseline.iterations_per_second,
+        note: THROUGHPUT_NOTE,
+    })
+}
+
 /// Keep the stressor's rolling FPS footer for the report without dumping the
 /// whole log; the last few `[VKGFX-H]` lines carry the final rates.
 pub fn fps_tail(stdout: &[u8]) -> Vec<String> {
@@ -569,5 +655,49 @@ mod tests {
         );
         assert_eq!(value["settled"], json!(true));
         assert_eq!(value["domain"], json!("graphics"));
+    }
+
+    const ONE_LINE: &str = r#"{"schema":"nvoc/macos-metal-check/1","device":"NVIDIA GeForce GTX 1650 SUPER","backend":"metal","mode":"stress","elements":65536,"iters_per_thread":20000,"verify_sample":65536,"verified_full_buffer":true,"iterations":11,"verified":11,"failures":0,"checked_elements":720896,"mismatched_elements":0,"first_bad_index":0,"first_bad_got":0,"first_bad_want":0,"elapsed_ms":46839,"stopped_by_signal":false}"#;
+
+    #[test]
+    fn a_verified_window_yields_its_own_throughput() {
+        let stdout = format!("banner line\n{ONE_LINE}\n");
+        let t = metal_throughput(stdout.as_bytes()).expect("parsed");
+        assert_eq!(t.mode, "stress");
+        assert_eq!(t.iterations, 11);
+        assert_eq!(t.verified, 11);
+        assert_eq!(t.failures, 0);
+        assert!(t.verified_full_buffer);
+        assert!(!t.stopped_by_signal);
+        assert!((t.iterations_per_second - 11.0 * 1000.0 / 46839.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_window_without_a_verifier_line_has_no_throughput() {
+        // The Vulkan stressor prints fps lines, not this schema, and a crashed
+        // load prints nothing: both must report "no throughput", never zero.
+        assert_eq!(metal_throughput(b"fps 61.2\nfps 59.8\n"), None);
+        assert_eq!(metal_throughput(b""), None);
+        // A zero elapsed window is not a rate.
+        let zero = ONE_LINE.replace("\"elapsed_ms\":46839", "\"elapsed_ms\":0");
+        assert_eq!(metal_throughput(zero.as_bytes()), None);
+    }
+
+    #[test]
+    fn the_two_windows_are_compared_on_one_number_or_not_at_all() {
+        let baseline = metal_throughput(ONE_LINE.as_bytes()).expect("parsed");
+        let faster = ONE_LINE.replace("\"iterations\":11", "\"iterations\":22");
+        let candidate = metal_throughput(faster.as_bytes()).expect("parsed");
+        let delta = throughput_delta(&baseline, &candidate).expect("delta");
+        assert!((delta.percent - 100.0).abs() < 1e-9);
+        // The note has to say a delta is a comparison, so a reader cannot read
+        // the number as a performance verdict.
+        assert!(delta.note.contains("not as a verdict"));
+        // Nothing to divide by: no comparison rather than an infinite gain.
+        let dead = LoadThroughput {
+            iterations_per_second: 0.0,
+            ..baseline.clone()
+        };
+        assert_eq!(throughput_delta(&dead, &candidate), None);
     }
 }
