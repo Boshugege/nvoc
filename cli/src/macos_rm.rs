@@ -203,6 +203,10 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                     // reading, not a refusal.
                     json!({"backend": "macos-rm", "mode": "locked-state",
                         "count_at_4": report.count_at_4,
+                        // Null when the table and the counter agree. A reader
+                        // that only sees records cannot tell a short table from
+                        // a counter that ran ahead of it.
+                        "anomaly": report.table_anomaly(),
                         "stored_window_khz": report.stored_window().map(|(min, max)| json!({"min_khz": min, "max_khz": max})),
                         "records": report.records.iter().map(|record| json!({
                             "offset": record.offset,

@@ -168,6 +168,45 @@ impl LockedStateReport {
     pub fn stored_window(&self) -> Option<(u32, u32)> {
         last_stored_window(&self.records)
     }
+
+    /// What about this answer does not fit the layout the dumps established.
+    ///
+    /// The parse is deliberately forgiving -- a table is still worth reading
+    /// when one record will not decode -- so the reader has to be told when the
+    /// answer it is looking at disagrees with itself. One boot answered
+    /// `+4 = 288` with only two records in the block, which is six writes by
+    /// the counter and two by the records; nothing in this program noticed, and
+    /// a reader had to spot it by hand. `None` means "nothing to report", which
+    /// includes an unknown counter: not knowing the count is not an anomaly.
+    pub fn table_anomaly(&self) -> Option<String> {
+        if let Some(count) = self.count_at_4 {
+            if count % STATE_RECORD_BYTES as u32 != 0 {
+                return Some(format!(
+                    "+4 reads {count}, which is not a multiple of {STATE_RECORD_BYTES}: the dword \
+                     counts writes only if it steps by {STATE_RECORD_BYTES}"
+                ));
+            }
+            let writes = count / STATE_RECORD_BYTES as u32;
+            if writes != self.records.len() as u32 {
+                return Some(format!(
+                    "+4 reads {count}, which is {writes} writes of {STATE_RECORD_BYTES}, but the \
+                     block holds {} record(s); the table and the counter disagree",
+                    self.records.len()
+                ));
+            }
+        }
+        for (index, record) in self.records.iter().enumerate() {
+            let expected = STATE_RECORD_BASE + index * STATE_RECORD_BYTES;
+            if record.offset != expected {
+                return Some(format!(
+                    "record {index} sits at {:#x}, not {expected:#x}: the parse walks \
+                     {STATE_RECORD_BYTES}-byte records from {STATE_RECORD_BASE:#x}",
+                    record.offset
+                ));
+            }
+        }
+        None
+    }
 }
 
 /// Bytes one record of the `0x20809040` answer occupies, and where the first
@@ -574,6 +613,90 @@ pub fn first_stable_difference(
 
 #[cfg(test)]
 mod tests {
+
+    fn record_at(offset: usize) -> StateRecord {
+        StateRecord {
+            offset,
+            words: [
+                0x0100_0002,
+                1,
+                1_620_000,
+                1_800_000,
+                0,
+                0,
+                16,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+        }
+    }
+
+    #[test]
+    fn a_table_that_agrees_with_itself_has_nothing_to_report() {
+        let report = LockedStateReport {
+            count_at_4: Some(96),
+            records: vec![
+                record_at(STATE_RECORD_BASE),
+                record_at(STATE_RECORD_BASE + 48),
+            ],
+        };
+        assert_eq!(report.table_anomaly(), None);
+        // A fresh boot: nothing stored, nothing to say.
+        assert_eq!(LockedStateReport::default().table_anomaly(), None);
+    }
+
+    #[test]
+    fn a_counter_that_disagrees_with_the_records_is_reported() {
+        // The boot that answered 288 with two records: six writes by the
+        // counter, two by the block.
+        let report = LockedStateReport {
+            count_at_4: Some(288),
+            records: vec![
+                record_at(STATE_RECORD_BASE),
+                record_at(STATE_RECORD_BASE + 48),
+            ],
+        };
+        let anomaly = report.table_anomaly().expect("anomaly");
+        assert!(anomaly.contains("288"), "{anomaly}");
+        assert!(anomaly.contains("6 writes"), "{anomaly}");
+        assert!(anomaly.contains("2 record(s)"), "{anomaly}");
+    }
+
+    #[test]
+    fn a_counter_that_is_not_a_multiple_of_the_stride_is_reported() {
+        let report = LockedStateReport {
+            count_at_4: Some(50),
+            records: vec![record_at(STATE_RECORD_BASE)],
+        };
+        let anomaly = report.table_anomaly().expect("anomaly");
+        assert!(anomaly.contains("not a multiple"), "{anomaly}");
+    }
+
+    #[test]
+    fn an_unknown_counter_is_not_an_anomaly() {
+        // Not knowing the count says nothing about the records.
+        let report = LockedStateReport {
+            count_at_4: None,
+            records: vec![record_at(STATE_RECORD_BASE)],
+        };
+        assert_eq!(report.table_anomaly(), None);
+    }
+
+    #[test]
+    fn a_record_off_the_stride_is_reported() {
+        let report = LockedStateReport {
+            count_at_4: None,
+            records: vec![
+                record_at(STATE_RECORD_BASE),
+                record_at(STATE_RECORD_BASE + 52),
+            ],
+        };
+        let anomaly = report.table_anomaly().expect("anomaly");
+        assert!(anomaly.contains("record 1"), "{anomaly}");
+    }
     use super::*;
 
     fn graphics(min_khz: u32, max_khz: u32) -> LockWindow {

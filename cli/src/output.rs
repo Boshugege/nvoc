@@ -292,6 +292,12 @@ pub(super) fn format_locked_state(output: &Value) -> Vec<String> {
     if let Some(count) = output.get("count_at_4").and_then(Value::as_u64) {
         lines.push(format!("count at +4: {count}"));
     }
+    // Said before the table, because it reframes every row under it: a table
+    // whose own counter disagrees with it is still worth printing, but not
+    // silently.
+    if let Some(anomaly) = output.get("anomaly").and_then(Value::as_str) {
+        lines.push(format!("table does not add up: {anomaly}"));
+    }
     let records: &[Value] = output
         .get("records")
         .and_then(Value::as_array)
@@ -3758,6 +3764,25 @@ mod tests {
         assert!(lines[2].contains("1620.000"), "{lines:?}");
         assert!(lines[2].contains("1800.000"), "{lines:?}");
         assert!(lines[2].contains("6000.984"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_table_that_does_not_add_up_is_said_before_its_rows() {
+        // The boot that answered 288 with two records: printing the rows alone
+        // would let a reader believe the counter.
+        let lines = format_locked_state(&json!({
+            "count_at_4": 288,
+            "anomaly": "+4 reads 288, which is 6 writes of 48, but the block holds 2 record(s)",
+            "records": [
+                {"offset": 16, "min_khz": 1_620_000u64, "max_khz": 1_800_000u64},
+                {"offset": 64, "min_khz": 1_700_000u64, "max_khz": 1_700_000u64},
+            ],
+        }));
+        assert_eq!(lines[0], "count at +4: 288");
+        assert!(lines[1].starts_with("table does not add up:"), "{lines:?}");
+        assert!(lines[1].contains("6 writes"), "{lines:?}");
+        // The rows still print: a suspicious table is evidence, not a refusal.
+        assert!(lines[3].contains("1620.000"), "{lines:?}");
     }
 
     #[test]
