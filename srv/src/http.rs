@@ -773,7 +773,12 @@ fn handle_request(
                 cfg.mode = ControlMode::Manual;
                 cfg.manual_fan = ManualFan::Stop;
                 info!("manual fan stop (firmware zero-rpm mode) via HTTP");
-                return text_response(request, 200, "OK: manual fanstop");
+                return text_response(
+                    request,
+                    200,
+                    "Recorded: manual fanstop; the control loop applies it on its next tick \
+                     (the device is not written by this request)",
+                );
             }
             if rpm {
                 match params.get("rpm").and_then(|s| s.parse::<u32>().ok()) {
@@ -783,7 +788,14 @@ fn handle_request(
                         cfg.manual_fan = ManualFan::Rpm;
                         cfg.manual_rpm = value;
                         info!("manual fan target {value} rpm via HTTP");
-                        text_response(request, 200, format!("OK: manual {value} rpm"));
+                        text_response(
+                            request,
+                            200,
+                            format!(
+                                "Recorded: manual {value} rpm; the control loop applies it on its \
+                                 next tick (the device is not written by this request)"
+                            ),
+                        );
                     }
                     _ => text_response(request, 400, "Bad request: 'rpm' must be non-zero"),
                 }
@@ -795,7 +807,14 @@ fn handle_request(
                         cfg.manual_fan = ManualFan::Percent;
                         cfg.manual_percent = p;
                         info!("manual fan duty {p}% via HTTP");
-                        text_response(request, 200, format!("OK: manual {p}%"));
+                        text_response(
+                            request,
+                            200,
+                            format!(
+                                "Recorded: manual {p}%; the control loop applies it on its next \
+                                 tick (the device is not written by this request)"
+                            ),
+                        );
                     }
                     _ => text_response(request, 400, "Bad request: 'percent' must be 0–100"),
                 }
