@@ -3318,3 +3318,15 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **③ 测试** ✔：`pytest -q gui/tests/` **321 passed / 13 skipped**（新增 GUI 后端用例：policy=fanstop 只调 `set_fanstop_status`、不调 `set_fan`；两条原预期改为三选项）；`pytest -q tui/tests/` **243 passed**（新增控制器用例两条：fanstop 只走停转路径且不转发 level、百分比仍走 `set_fan`）；`cargo xtask ci` = `CI_EXIT=0`。
 
 **④ 诚实边界** ✔：GUI/TUI 依然**没有在 macOS 上被点击过**，验证停在控制器/后端这一层（项目既有口径）；真机上的 mode 2 写入与恢复来自第 47 轮的 `/fan?mode=stop` 四步证据（`outputs/stage-fan-forms-20261125T215920Z`），不是本轮新增。
+
+## 一百九十四、把 rpm 目标接进两个面板：滑块变成"cooler 刻度的几分之几"，数字框收 rpm
+
+**① 选择依据** ✔：上一轮把 `fanstop` 接进面板后，风扇这一族在前端只剩一种后端做得出、面板没有的形态——**rpm 目标**（core 经 cooler 自报刻度换算，第 45/47/48 轮已实测）。
+
+**② 数字框的语义问题与解法** ✔：面板只有一个 0–100 的数字框和一个 0–100 的滑块，而 rpm 到不了 1400。解法不是加一个新控件，而是**让这个框按策略换单位**：策略为 `rpm` 时，滑块解释成"cooler 刻度的百分比"（50 % × 2800 = 1400 rpm），数字框的上下界改成 `0..max_rpm`；策略为 `manual` 时一切照旧 0–100。`max_rpm` 来自风扇表面本身（记录自报的刻度），为 0 表示没有刻度，此时 rpm 目标无处换算。
+
+**③ 下发路径** ✔：GUI `apply_fan_settings` 与 TUI `apply_fan` 在 `policy == "rpm"` 时调用 `native.set_fan_rpm(gpu, level)`，**不经过百分比通道**；越界仍由 core 在 SET 之前拒绝并点名 `0 .. max_rpm rpm`。
+
+**④ 测试** ✔：`pytest -q gui/tests/` **324 passed / 13 skipped**（新增 3 条：rpm 策略走 `set_fan_rpm` 且不调 `set_fan`；滑块按刻度换算、越界按刻度封顶而不是按 100；百分比策略仍封 100）；`pytest -q tui/tests/` **245 passed**（新增 1 条同形用例）；`cargo xtask ci` = `CI_EXIT=0`。
+
+**⑤ 诚实边界** ✔：两个面板依旧**没有在 macOS 上被点击过**；本轮的验证是控制器/后端层单测 + 第 45/47 轮的真机 rpm 证据，不是 UI 验收。
