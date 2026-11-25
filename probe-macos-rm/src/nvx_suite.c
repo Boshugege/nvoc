@@ -2524,6 +2524,14 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
      * non-zero value dword -- that dword is a live field of this handler and
      * the first such one is the current-offset candidate G1 has been missing.
      */
+    static const NvU32 lock_request[6][2] = {
+        { 0u, 1u },        /* +0  FORMAT_WORD */
+        { 4u, 1u },        /* +4  entry count */
+        { 8u, 8u },        /* +8  byte 0 = vPstate 8 */
+        { 12u, 1u },       /* +12 domain bit 0 (graphics) */
+        { 16u, 100000u },  /* +16 min kHz */
+        { 20u, 200000u },  /* +20 max kHz */
+    };
     static const struct {
         const char *name;
         NvU32 cmd;
@@ -2542,6 +2550,12 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
          * 00000000.  Only 0x2080901b has this licence: 0x20809026 latched the
          * session-wide wedge when it was fed 0xA5, so it is refused outright. */
         NvU32 prefill;
+        /* Optional per-dword seed, applied after prefill and mask.  This is how a
+         * case reproduces a *real* request block: the locked-clock query takes
+         * format word, entry count and a 20-byte entry (vPstate byte, domain
+         * bit, min kHz, max kHz), which one mask dword cannot express. */
+        const NvU32 (*seed_words)[2];
+        unsigned nseed;
     } cases[] = {
         { "domains-get-control 0x2080901B @2108 in@4=0xFF bg=A5", 0x2080901bu, 2108u,
           4u, 0x000000ffu, 0xa5a5a5a5u },
@@ -2595,6 +2609,14 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
          * 1, single entry with the single-bit domain 0x1 and non-zero bounds);
          * the driver is expected to overwrite it with the live window.  These
          * two cases are what make the 014-vs-02E comparison meaningful. */
+        /* The product's own query, byte for byte: macos_lock::build_block with
+         * vPstate 8, the graphics domain bit, and the window the CLI was asked
+         * for (100 MHz .. 200 MHz).  If the driver normalises anything, this is
+         * the shape that shows it. */
+        { "lock-query vP8 100/200 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 0u,
+          lock_request, 6u },
+        { "lock-query vP8 100/200 0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u,
+          lock_request, 6u },
         { "lock-read seed1 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 1u },
         { "sibling  seed1  0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 1u },
     };
@@ -2631,6 +2653,11 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
                 memcpy(buf + 4 * d, &cases[i].prefill, 4);
         if (cases[i].mask_off != ~0u)
             memcpy(buf + cases[i].mask_off, &cases[i].mask, 4);
+        for (unsigned w = 0; w < cases[i].nseed; ++w) {
+            unsigned off = cases[i].seed_words[w][0];
+            if (off + 4 <= size)
+                memcpy(buf + off, &cases[i].seed_words[w][1], 4);
+        }
         memcpy(seed, buf, size);
 
         NvU32 st = nvx_rm_control(c->ctl_fd, c->hClient, c->hSubdevice,
