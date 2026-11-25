@@ -61,10 +61,11 @@ pub mod macos_rm;
 pub use macos_eval::{
     CANDIDATE_NOTE, CandidateOutcome, LOAD_CLOCK_LIFT_MHZ, LOAD_EVIDENCE_NOTE,
     LOAD_TEMPERATURE_RISE_C, LOAD_UTILIZATION_PERCENT, LoadEvidence, LoadSummary, LoadThroughput,
-    NoiseFloor, PLAN_NOTE, PlanDocument, PlanRequest, SWEEP_IDLE_NOTE, SWEEP_NOTE, Stats,
-    SweepVerdict, THROUGHPUT_NOTE, ThrottleSummary, ThroughputDelta, candidate_outcome, fps_tail,
-    load_evidence, load_summary, metal_throughput, noise_floor, parse_plan_requests, plan_document,
-    rank_sweep, stats, throttle_summary, throughput_delta,
+    NoiseFloor, PLAN_NOTE, PlanDocument, PlanRequest, REPEAT_NOTE, ReproducedVerdict,
+    SWEEP_IDLE_NOTE, SWEEP_NOTE, Stats, SweepVerdict, THROUGHPUT_NOTE, ThrottleSummary,
+    ThroughputDelta, candidate_outcome, fps_tail, load_evidence, load_summary, metal_throughput,
+    noise_floor, parse_plan_requests, plan_document, rank_sweep, reproduce_sweeps, stats,
+    throttle_summary, throughput_delta,
 };
 pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{

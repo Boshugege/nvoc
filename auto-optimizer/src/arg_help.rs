@@ -157,6 +157,20 @@ fn macos_eval_command() -> Command {
                 .help("Metal load: iterations per thread (ignored by --load-source vulkan)"),
         )
         .arg(
+            Arg::new("candidate-rounds")
+                .long("candidate-rounds")
+                .value_name("N")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u32))
+                .default_value("1")
+                .help(
+                    "Repeat the whole candidate sweep N times (1-4). Each round measures its own \
+                     baseline repeat and its own noise floor, and a candidate is reported as \
+                     reproduced only when every round cleared its own threshold. One round can \
+                     promote a candidate on one lucky window",
+                ),
+        )
+        .arg(
             Arg::new("stress-verify-sample")
                 .long("stress-verify-sample")
                 .value_name("N")

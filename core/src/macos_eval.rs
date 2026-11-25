@@ -491,6 +491,114 @@ pub struct SweepVerdict {
     pub beats_noise: bool,
 }
 
+fn gaps_as_null<S: serde::Serializer>(values: &[f64], serializer: S) -> Result<S::Ok, S::Error> {
+    use serde::ser::SerializeSeq;
+    let mut seq = serializer.serialize_seq(Some(values.len()))?;
+    for value in values {
+        seq.serialize_element(&gap_as_null_value(*value))?;
+    }
+    seq.end()
+}
+
+fn gap_as_null_value(value: f64) -> Option<f64> {
+    if value.is_nan() { None } else { Some(value) }
+}
+
+fn gap_as_null<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    match gap_as_null_value(*value) {
+        Some(value) => serializer.serialize_f64(value),
+        None => serializer.serialize_none(),
+    }
+}
+
+/// One candidate seen across several independent rounds of the same sweep.
+///
+/// A single round can promote a candidate on one lucky window. Repeating the
+/// whole sweep and requiring each round to clear its own threshold is the
+/// cheapest way to ask a second question: does it happen again?
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ReproducedVerdict {
+    pub target: String,
+    pub requested_khz: i32,
+    /// One percentage per round, in the order the rounds ran. A null is a round
+    /// that did not measure this candidate -- kept as a null, not as a zero,
+    /// so the gap cannot be mistaken for a flat result.
+    #[serde(serialize_with = "gaps_as_null")]
+    pub percent_per_round: Vec<f64>,
+    /// The headline number: the mean of the rounds that ran.
+    #[serde(serialize_with = "gap_as_null")]
+    pub percent_mean: f64,
+    pub rounds_beating_noise: usize,
+    pub rounds: usize,
+    /// True only when every round carried the candidate *and* cleared its own
+    /// threshold. A candidate that needed pooling to clear the floor, or that
+    /// was only measured once out of three rounds, is not reproduced.
+    pub reproduced: bool,
+}
+
+/// Folds per-round verdicts into one reproduced verdict per candidate.
+///
+/// Candidates are matched by (target, requested offset), because the rounds are
+/// separate runs and the order inside a round is a ranking, not an identity.
+pub fn reproduce_sweeps(rounds: &[Vec<SweepVerdict>]) -> Vec<ReproducedVerdict> {
+    let mut out: Vec<ReproducedVerdict> = Vec::new();
+    for (index, round) in rounds.iter().enumerate() {
+        for verdict in round {
+            let slot = out.iter().position(|v| {
+                v.target == verdict.target && v.requested_khz == verdict.requested_khz
+            });
+            let slot = match slot {
+                Some(slot) => slot,
+                None => {
+                    out.push(ReproducedVerdict {
+                        target: verdict.target.clone(),
+                        requested_khz: verdict.requested_khz,
+                        percent_per_round: Vec::new(),
+                        percent_mean: 0.0,
+                        rounds_beating_noise: 0,
+                        rounds: rounds.len(),
+                        reproduced: false,
+                    });
+                    out.len() - 1
+                }
+            };
+            // Keep the per-round list aligned with the round index so a gap
+            // stays a gap: a missing measurement must not shift the columns.
+            while out[slot].percent_per_round.len() < index {
+                out[slot].percent_per_round.push(f64::NAN);
+            }
+            out[slot].percent_per_round.push(verdict.percent);
+            if verdict.beats_noise {
+                out[slot].rounds_beating_noise += 1;
+            }
+        }
+    }
+    for verdict in &mut out {
+        let measured: Vec<f64> = verdict
+            .percent_per_round
+            .iter()
+            .copied()
+            .filter(|p| !p.is_nan())
+            .collect();
+        verdict.percent_mean = if measured.is_empty() {
+            f64::NAN
+        } else {
+            measured.iter().sum::<f64>() / measured.len() as f64
+        };
+        verdict.reproduced = verdict.rounds > 0
+            && measured.len() == verdict.rounds
+            && verdict.rounds_beating_noise == verdict.rounds;
+    }
+    out.sort_by(|a, b| b.percent_mean.total_cmp(&a.percent_mean));
+    out
+}
+
+pub const REPEAT_NOTE: &str = "Every round is a complete sweep: its own baseline repeat, its \
+own noise floor, and the same candidate list. A candidate is reproduced only when each \
+round carried it and each round cleared that round's threshold -- the rounds are not pooled \
+into one number to clear the bar, because a result that needs pooling has not repeated. \
+The per-round percentages are kept so a reader can see the disagreement.";
+
 pub const SWEEP_NOTE: &str = "Candidates are ranked against a baseline repeat, not against \
 a single window. The threshold is the wider of the measured spread and half a \
 percent, because two lucky windows understate the real run-to-run noise; \
@@ -669,6 +777,106 @@ mod tests {
         assert_eq!(evidence.utilization_percent, None);
         assert_eq!(evidence.clock_lift_mhz, None);
         assert_eq!(evidence.temperature_rise_c, None);
+    }
+
+    fn verdict(target: &str, khz: i32, percent: f64, beats_noise: bool) -> SweepVerdict {
+        SweepVerdict {
+            target: target.to_owned(),
+            requested_khz: khz,
+            percent,
+            beats_noise,
+        }
+    }
+
+    #[test]
+    fn a_candidate_that_clears_every_round_is_reproduced() {
+        let rounds = vec![
+            vec![
+                verdict("graphics", 15000, 0.68, true),
+                verdict("graphics", 8000, 0.15, false),
+            ],
+            vec![
+                verdict("graphics", 15000, 0.68, true),
+                verdict("graphics", 8000, 0.31, false),
+            ],
+        ];
+        let out = reproduce_sweeps(&rounds);
+        assert_eq!(out[0].requested_khz, 15000);
+        assert!(out[0].reproduced);
+        assert_eq!(out[0].rounds_beating_noise, 2);
+        assert!((out[0].percent_mean - 0.68).abs() < 1e-9);
+        assert!(!out[1].reproduced);
+    }
+
+    #[test]
+    fn a_candidate_that_wins_one_round_and_loses_the_next_is_not_reproduced() {
+        let rounds = vec![
+            vec![verdict("graphics", 15000, 0.68, true)],
+            vec![verdict("graphics", 15000, 0.12, false)],
+        ];
+        let out = reproduce_sweeps(&rounds);
+        assert!(!out[0].reproduced);
+        assert_eq!(out[0].rounds_beating_noise, 1);
+        assert!((out[0].percent_mean - 0.40).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_candidate_missing_from_a_round_is_not_reproduced() {
+        let rounds = vec![
+            vec![verdict("graphics", 15000, 0.68, true)],
+            vec![verdict("graphics", 8000, 0.31, false)],
+        ];
+        let out = reproduce_sweeps(&rounds);
+        let missing = out.iter().find(|v| v.requested_khz == 15000).unwrap();
+        assert!(!missing.reproduced, "one round is not a reproduction");
+        assert_eq!(missing.rounds, 2);
+        assert_eq!(missing.rounds_beating_noise, 1);
+    }
+
+    #[test]
+    fn a_gap_in_the_rounds_keeps_the_columns_aligned() {
+        let rounds = vec![
+            vec![verdict("graphics", 8000, 0.10, false)],
+            vec![verdict("graphics", 15000, 0.68, true)],
+            vec![
+                verdict("graphics", 8000, 0.20, false),
+                verdict("graphics", 15000, 0.70, true),
+            ],
+        ];
+        let out = reproduce_sweeps(&rounds);
+        let eight = out.iter().find(|v| v.requested_khz == 8000).unwrap();
+        assert_eq!(eight.percent_per_round.len(), 3);
+        assert!(
+            eight.percent_per_round[1].is_nan(),
+            "round 1 has no measurement"
+        );
+        assert!(!eight.reproduced);
+        let fifteen = out.iter().find(|v| v.requested_khz == 15000).unwrap();
+        assert_eq!(fifteen.percent_per_round.len(), 3);
+        assert!(fifteen.percent_per_round[0].is_nan());
+        // Measured in two rounds out of three is not a reproduction either: the
+        // rounds that ran, ran without it.
+        assert!(!fifteen.reproduced);
+        assert_eq!(fifteen.rounds_beating_noise, 2);
+    }
+
+    #[test]
+    fn a_round_that_did_not_measure_a_candidate_serialises_as_a_gap_not_a_zero() {
+        let rounds = vec![
+            vec![verdict("graphics", 8000, 0.10, false)],
+            vec![verdict("graphics", 15000, 0.68, true)],
+        ];
+        let out = reproduce_sweeps(&rounds);
+        let fifteen = out.iter().find(|v| v.requested_khz == 15000).unwrap();
+        let text = serde_json::to_string(fifteen).unwrap();
+        assert!(text.contains("\"percent_per_round\":[null,0.68]"), "{text}");
+        assert!(!text.contains("NaN"), "{text}");
+    }
+
+    #[test]
+    fn the_repeat_note_says_pooling_is_not_reproduction() {
+        assert!(REPEAT_NOTE.contains("not pooled"));
+        assert!(REPEAT_NOTE.contains("each round cleared that round's threshold"));
     }
 
     #[test]

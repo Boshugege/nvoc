@@ -69,6 +69,10 @@ pub struct StockEvalOptions {
     /// the CPU the bottleneck (see the option's help), so the load samples it;
     /// the correctness window keeps verifying every element.
     pub stress_verify_sample: u64,
+    /// How many times the whole candidate sweep is repeated. One round can
+    /// promote a candidate on one lucky window; more than one asks whether it
+    /// happens again.
+    pub candidate_rounds: u32,
     pub plan: Vec<PlanRequest>,
     /// One candidate applies a write half and puts it back; two or three make a
     /// sweep, which additionally repeats the baseline window so the run can
@@ -157,6 +161,9 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         stress_verify_sample: *matches
             .get_one::<u64>("stress-verify-sample")
             .ok_or_else(|| error("missing --stress-verify-sample"))?,
+        candidate_rounds: *matches
+            .get_one::<u32>("candidate-rounds")
+            .ok_or_else(|| error("missing --candidate-rounds"))?,
         plan: parse_plan_requests(&plan_values)?,
         candidates,
     })
@@ -321,6 +328,7 @@ fn run_verifier(path: Option<&PathBuf>, dry_run: bool) -> Result<Value, Error> {
 
 /// What the write half produced: the held load, its verifier, and the two write
 /// reports the round trip is judged on.
+#[derive(Clone)]
 struct CandidateRun {
     evidence: nvoc_core::LoadEvidence,
     throughput: Option<LoadThroughput>,
@@ -456,36 +464,48 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
     // The write half, when asked for: candidates applied one at a time after the
     // stock measurement, each held for its own bounded load, verified under load
     // and restored before the next one starts.
-    let mut runs: Vec<(PlanRequest, CandidateRun)> = Vec::new();
-    for request in &opts.candidates {
-        let run = run_candidate(gpu, &opts, request)?;
-        // Stop the moment a restore is not read back: the next candidate would
-        // otherwise be stacked on top of an offset nobody verified was undone.
-        if run.restored.is_none() {
-            return Err(error(format!(
-                "candidate {} was applied but its restore was not read back; stopping instead of \
-                 applying another candidate on top",
-                target_label(&request.target)
-            )));
+    let rounds_wanted = opts.candidate_rounds.clamp(1, 4);
+    let mut round_runs: Vec<Vec<(PlanRequest, CandidateRun)>> = Vec::new();
+    let mut round_repeats: Vec<Option<LoadRun>> = Vec::new();
+    for _round in 0..rounds_wanted {
+        let mut this_round: Vec<(PlanRequest, CandidateRun)> = Vec::new();
+        for request in &opts.candidates {
+            let run = run_candidate(gpu, &opts, request)?;
+            // Stop the moment a restore is not read back: the next candidate
+            // would otherwise be stacked on top of an offset nobody verified was
+            // undone.
+            if run.restored.is_none() {
+                return Err(error(format!(
+                    "candidate {} was applied but its restore was not read back; stopping instead \
+                     of applying another candidate on top",
+                    target_label(&request.target)
+                )));
+            }
+            if run.exit_code != Some(0) {
+                return Err(error(format!(
+                    "the load exited with {:?} while candidate {} was held",
+                    run.exit_code,
+                    target_label(&request.target)
+                )));
+            }
+            this_round.push((request.clone(), run));
         }
-        if run.exit_code != Some(0) {
-            return Err(error(format!(
-                "the load exited with {:?} while candidate {} was held",
-                run.exit_code,
-                target_label(&request.target)
-            )));
-        }
-        runs.push((request.clone(), run));
+        // A sweep also repeats the stock window, because a ranking against a
+        // single baseline window cannot tell a gain from the baseline's own
+        // wander. Each round takes its own repeat, so each round carries its own
+        // floor instead of inheriting one from an earlier round.
+        let repeat = if this_round.len() > 1 {
+            Some(run_bounded_load(gpu, &opts)?)
+        } else {
+            None
+        };
+        round_repeats.push(repeat);
+        round_runs.push(this_round);
     }
+    let runs: Vec<(PlanRequest, CandidateRun)> = round_runs.first().cloned().unwrap_or_default();
     let candidate = runs.first().map(|(_, run)| run);
-    // A sweep also repeats the stock window, because a ranking against a single
-    // baseline window cannot tell a gain from the baseline's own wander.
-    let baseline_repeat = if runs.len() > 1 {
-        Some(run_bounded_load(gpu, &opts)?)
-    } else {
-        None
-    };
-    let sweep = if runs.len() > 1 {
+    let baseline_repeat = round_repeats.first().and_then(|r| r.as_ref());
+    let mut sweep = if runs.len() > 1 {
         let mut windows: Vec<nvoc_core::LoadThroughput> = Vec::new();
         windows.extend(load.throughput.clone());
         windows.extend(
@@ -550,6 +570,59 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
     } else {
         None
     };
+    // Stage 12: more than one round asks the only question a single round cannot
+    // answer -- does the winner happen again? Each round is folded with its own
+    // baseline repeat, and the fold refuses to pool rounds to clear the bar.
+    let repeat = if rounds_wanted > 1 && runs.len() > 1 {
+        let mut per_round: Vec<Vec<nvoc_core::SweepVerdict>> = Vec::new();
+        for (index, round) in round_runs.iter().enumerate() {
+            let repeat_run = round_repeats.get(index).and_then(|run| run.as_ref());
+            let mut windows: Vec<nvoc_core::LoadThroughput> = Vec::new();
+            windows.extend(load.throughput.clone());
+            windows.extend(repeat_run.and_then(|run| run.throughput.clone()));
+            let Some(floor) = nvoc_core::noise_floor(&windows) else {
+                continue;
+            };
+            let measured: Vec<(String, i32, nvoc_core::LoadThroughput)> = round
+                .iter()
+                .filter_map(|(request, run)| {
+                    run.throughput.as_ref().map(|throughput| {
+                        (
+                            target_label(&request.target),
+                            request.delta_khz,
+                            throughput.clone(),
+                        )
+                    })
+                })
+                .collect();
+            if measured.is_empty() {
+                continue;
+            }
+            per_round.push(nvoc_core::rank_sweep(&floor, &measured));
+        }
+        let verdicts = nvoc_core::reproduce_sweeps(&per_round);
+        let winner = verdicts.iter().find(|verdict| verdict.reproduced);
+        Some(json!({
+            "schema": "nvoc/macos-repeat/1",
+            "rounds_requested": rounds_wanted,
+            "rounds_measured": per_round.len(),
+            "verdicts": verdicts,
+            "winner": winner,
+            "note": nvoc_core::REPEAT_NOTE,
+        }))
+    } else {
+        None
+    };
+    // In a repeated sweep the promotion comes from the fold, not from round one:
+    // a round-one winner that did not repeat must not stand as the winner.
+    if let Some(doc) = &repeat
+        && let Some(Value::Object(map)) = &mut sweep
+    {
+        map.insert("winner".to_owned(), doc["winner"].clone());
+        map.insert("winner_source".to_owned(), json!("repeat"));
+        map.insert("rounds".to_owned(), json!(rounds_wanted));
+    }
+
     // A `--plan` request is evaluated against the snapshot read above, whether
     // or not a load follows it: the plan is about the state, not the load. In a
     // dry run the section is always present, so an empty request list reads as
@@ -594,6 +667,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
             "stress_elements": opts.stress_elements,
             "stress_iters": opts.stress_iters,
             "stress_verify_sample": opts.stress_verify_sample,
+            "candidate_rounds": rounds_wanted,
             "plan_requests": opts.plan.len(),
         },
         "mode": if opts.dry_run {
@@ -605,11 +679,13 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
         } else {
             "stock-load"
         },
-        "settings_written": runs
+        "settings_written": round_runs
             .iter()
+            .flatten()
             .all(|(_, run)| run.applied.readback_verified && run.restored.is_some())
-            && !runs.is_empty(),
+            && round_runs.iter().flatten().next().is_some(),
         "sweep": sweep,
+        "repeat": repeat,
         "write_gate": match &candidate {
             Some(run) => if run.restored.is_some() {
                 "write: one candidate offset was applied to one clock domain through \
