@@ -3669,3 +3669,22 @@ No such file or directory (os error 2)
 **⑤ 教训** ✔：一套测试只在**它不描述的平台**上跑绿，等于没测。这类"宿主假设"应该**写进测试**，让它到哪台机器上都表达同一件事。
 
 **⑥ 证据** ✔：`outputs/stage-gui-host-assumption-20261126T104500Z/`（`python-tests.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。宿主机 `cargo xtask ci` = `CI_EXIT=0`。
+
+## 二百一十八、重建 pynvoc 扩展之后，最后那 1 项失败原来是**测试自己写错了顺序**
+
+**① 在测试机上重建扩展** ✔：`maturin develop` 在这个 `.venv` 里跑不了（uv 建的 venv 没有 pip，机器上也没有 uv），改用 `maturin build --release` 出 wheel，把 `_native.abi3.so` 覆盖到 `nvoc-python/python/pynvoc/`（`.pth` 本来就指向那里），旧 `.so` 留在 `/tmp/ev77-old-native.so`。
+
+**② 换了新扩展，那 1 项**仍然**失败** ✔（说明它不是旧构建问题）：`EXPECTED_EXPORTS` 里两个 locked-clock 名字被插在 `get_clock_domain` 旁边，而测试比的是 **`sorted(pynvoc.__all__)`**。在**导不进原生模块的机器上这条测试是 skip**，所以错位只在"真能导入"的机器上暴露——也就是这台。
+
+**③ 修法** ✔：把那份期望列表按字母序排好，并在断言上写清"这份列表是排过序的，和 sorted 结果比"。**产品代码没动**，改的只是测试里一个列表的顺序。
+
+**④ 修后实测** ✔（同一台 macOS）：
+| 套件 | 结果 |
+| --- | --- |
+| `nvoc-python/tests` | **61 passed / 10 skipped / 0 failed** |
+| `gui/tests` | **324 passed / 13 skipped** |
+| `tui/tests` | **245 passed** |
+
+**⑤ 教训** ✔：一条永远 skip 的测试，等于一条永远没跑过的测试。它"绿"着的时候，谁也不知道里面写的顺序是错的。
+
+**⑥ 证据** ✔：`outputs/stage-pynvoc-rebuild-20261126T110000Z/`（`python-tests.log`、`maturin-build.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。宿主机 `cargo xtask ci` = `CI_EXIT=0`。
