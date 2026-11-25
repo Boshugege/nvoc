@@ -2587,6 +2587,16 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
          * dumps and the two can be compared byte for byte. */
         { "lock-read        0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 0u },
         { "sibling          0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u },
+        /* The product never reads these zero-background: macos_lock::build_block
+         * writes FORMAT_WORD (1) at +0 and the entry count at +4 before the
+         * transfer, so a zeroed buffer is format 0 / count 0 -- which is exactly
+         * the 0x1f the unseeded case above returns.  prefill=1 makes every dword
+         * 1, which is a valid block by the product's own rules (format 1, count
+         * 1, single entry with the single-bit domain 0x1 and non-zero bounds);
+         * the driver is expected to overwrite it with the live window.  These
+         * two cases are what make the 014-vs-02E comparison meaningful. */
+        { "lock-read seed1 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 1u },
+        { "sibling  seed1  0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 1u },
     };
 
     if (!c->hSubdevice) {
