@@ -153,3 +153,19 @@ uv run pytest
 ```bash
 uv sync --reinstall-package pillow
 ```
+
+#### macOS：`cargo test -p pynvoc` 链接失败，`ld: library 'python3.9' not found`
+
+pyo3 默认找系统里的 Python；在装有 Xcode 命令行工具的 macOS 上那会是 3.9，而这台机器没有对应的
+`libpython3.9`，于是链接阶段失败（错误里能看到 `-lpython3.9` 和
+`Python3.framework/Versions/3.9/lib` 找不到）。
+
+**修复方法：** 把 `PYO3_PYTHON` 指向仓库自己的虚拟环境解释器，再跑同样的命令：
+
+```bash
+PYO3_PYTHON="$PWD/.venv/bin/python" cargo xtask ci
+```
+
+`cargo xtask ci` 的 Python 步骤在没有 `uv` 的机器上会退回使用 `.venv/bin/ruff` 与 `.venv/bin/pytest`
+（同样的二进制、同样的参数，并会把这件事打印出来）；`PYO3_PYTHON` 仍需自己设，因为那是 pyo3 的
+选择，不是门禁的选择。
