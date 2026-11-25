@@ -60,6 +60,7 @@ def test_macos_fan_policies_are_the_three_that_exist():
     assert fan_policy_options(True) == [
         ("manual", "manual"),
         ("fanstop", "fanstop"),
+        ("rpm", "rpm"),
         ("auto", "auto"),
     ]
     assert fan_policy_default(True) == "manual"
@@ -84,6 +85,7 @@ def test_the_curve_editor_has_nothing_to_talk_to_on_macos():
         # name, so it keeps working rather than becoming an error.
         ("continuous", "manual"),
         ("fanstop", "fanstop"),
+        ("rpm", "rpm"),
         ("auto", "auto"),
         (None, "manual"),
         ("MANUAL", "manual"),
@@ -193,6 +195,7 @@ def test_the_macos_surface_seeds_the_pane_from_the_drivers_duty():
     assert widgets["#fan-policy"].options == [
         ("manual", "manual"),
         ("fanstop", "fanstop"),
+        ("rpm", "rpm"),
         ("auto", "auto"),
     ]
     assert widgets["#fan-policy"].value == "manual"

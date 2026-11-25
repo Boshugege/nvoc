@@ -66,7 +66,12 @@ def fan_policy_options(macos: bool | None = None) -> list[tuple[str, str]]:
         # ``fanstop`` is the firmware's own zero-RPM mode (control-record mode
         # 2), which is a different request from pinning 0 percent: one asks the
         # cooler to stop, the other pins a duty of zero.
-        return [("manual", "manual"), ("fanstop", "fanstop"), ("auto", "auto")]
+        return [
+            ("manual", "manual"),
+            ("fanstop", "fanstop"),
+            ("rpm", "rpm"),
+            ("auto", "auto"),
+        ]
     return [("contin.", "continuous"), ("curve", "curve")]
 
 
@@ -83,6 +88,7 @@ _MACOS_POLICY_REQUEST = {
     "manual": "manual",
     "continuous": "manual",
     "fanstop": "fanstop",
+    "rpm": "rpm",
     "auto": "auto",
 }
 

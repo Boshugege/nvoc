@@ -51,10 +51,10 @@ def test_the_dropdown_label_maps_onto_a_real_backend(selection, macos, expected)
     assert backend_for_selection(selection, macos) == expected
 
 
-def test_macos_fan_policies_are_the_three_the_driver_has():
-    # fanstop is the firmware's zero-RPM mode, which is a different request from
-    # pinning 0 percent: one asks the cooler to stop, the other pins a duty.
-    assert fan_policy_options(True) == ["manual", "fanstop", "auto"]
+def test_macos_fan_policies_are_the_four_the_driver_has():
+    # fanstop is the firmware's zero-RPM mode (not a 0 percent pin), and rpm is a
+    # physical target translated through the cooler's own scale.
+    assert fan_policy_options(True) == ["manual", "fanstop", "rpm", "auto"]
     assert fan_policy_default(True) == "manual"
     assert fan_policy_options(False) == ["continuous", "curve"]
     assert fan_curve_available(True) is False
@@ -135,7 +135,7 @@ def test_the_macos_dropdown_no_longer_offers_a_policy_it_cannot_apply(
 
     controller.on_backend_change()
 
-    assert pane.policy_values == ["manual", "fanstop", "auto"]
+    assert pane.policy_values == ["manual", "fanstop", "rpm", "auto"]
     # A stale "continuous" selection is normalized onto a real one, not sent.
     assert pane.policy == "manual"
 

@@ -4,6 +4,9 @@ from src.backend.base import FanSettings
 from src.tabs.dashboard.sections.fan import FanControlController
 
 
+from src.platform import MACOS_BACKEND
+
+
 class FakePane:
     def __init__(
         self,
@@ -206,3 +209,40 @@ def test_legacy_nvapi_restricts_policy_to_default_manual() -> None:
     assert pane.policy_values == ["default", "manual"]
     assert pane.policy == "manual"
     assert controller.settings().policy == "manual"
+
+
+def test_an_rpm_policy_makes_the_slider_a_fraction_of_the_coolers_scale(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.tabs.dashboard.sections.fan.backend_for_selection",
+        lambda selection: MACOS_BACKEND,
+    )
+    pane = FakePane(api="RM", fan_id="Fan 1", policy="rpm", level=1400)
+    controller = FanControlController(pane, backend=FakeBackend())
+    controller.fan_max_rpm = 2800
+
+    controller.on_slider_change(50.0)
+    assert pane.level == 1400, "half the cooler's scale is 1400 of 2800 rpm"
+
+    # Typing an rpm is bounded by that scale, not by 100 percent.
+    pane.level_entry = "2400"
+    controller.on_entry_change()
+    assert pane.level == 2400
+    pane.level_entry = "999999"
+    controller.on_entry_change()
+    assert pane.level == 2800, "a target past the scale is bounded by it, not by 100"
+
+
+def test_a_percent_policy_keeps_the_box_at_0_100(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.tabs.dashboard.sections.fan.backend_for_selection",
+        lambda selection: MACOS_BACKEND,
+    )
+    pane = FakePane(api="RM", fan_id="Fan 1", policy="manual", level=40)
+    controller = FanControlController(pane, backend=FakeBackend())
+    controller.fan_max_rpm = 2800
+
+    pane.level_entry = "150"
+    controller.on_entry_change()
+    assert pane.level == 100

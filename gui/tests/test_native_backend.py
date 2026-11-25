@@ -47,6 +47,9 @@ class FakeNative:
     def set_fanstop_status(self, gpu, enable, curve_index=0):
         self.calls.append(("set_fanstop_status", gpu, enable, curve_index))
 
+    def set_fan_rpm(self, gpu, rpm):
+        self.calls.append(("set_fan_rpm", gpu, rpm))
+
 
 class RejectingSubmitApp(FakeApp):
     def run_background(self, _name: str, _task) -> None:
@@ -204,6 +207,18 @@ def test_the_fanstop_policy_asks_the_firmware_to_stop_the_fan() -> None:
     # forwarded, so a stale number in the box cannot become the request.
     assert app.native.calls == [("set_fanstop_status", "0x0000", True, 0)]
     assert "zero-RPM" in app.actions[0][1]
+
+
+def test_the_rpm_policy_asks_for_an_rpm_target_not_a_percentage() -> None:
+    app = FakeApp()
+    backend = NativeBackend(app)
+
+    backend.apply_fan_settings(
+        FanSettings(backend="macos-rm", fan_id="1", policy="rpm", level=1400)
+    )
+
+    assert app.native.calls == [("set_fan_rpm", "0x0000", 1400)]
+    assert "1400 rpm" in app.actions[0][1]
 
 
 def test_run_action_rejects_overlapping_action() -> None:

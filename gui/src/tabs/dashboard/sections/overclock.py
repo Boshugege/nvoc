@@ -2114,6 +2114,12 @@ class OverclockTab:
         self.fan_section.set_fan_choices(
             ["All"] + [f"Fan {i}" for i in range(1, count + 1)]
         )
+        # The cooler's own scale, so an rpm policy can bound its box and the
+        # slider can mean a fraction of it. Zero means the record published no
+        # scale, and then an rpm target has nothing to be translated through.
+        scale = data.get("max_rpm")
+        if isinstance(scale, int) and not isinstance(scale, bool):
+            self.fan_section.fan_max_rpm = scale
         duty = macos_duty_seed(data)
         if duty is not None:
             self.fan_section.set_level(max(0, min(100, duty)))

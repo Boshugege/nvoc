@@ -267,6 +267,10 @@ class FakeNative:
         self.calls.append(("set_fanstop_status", gpu, enable, curve_index))
         return {"applied": True}
 
+    def set_fan_rpm(self, gpu, rpm):
+        self.calls.append(("set_fan_rpm", gpu, rpm))
+        return {"applied": True}
+
     def clk_vf_delta_for_target_mhz(self, def_mhz, delta_mhz, class_name):
         # Mirrors the call semantics used by the GUI/TUI raw-converted path:
         # the 3rd argument is the desired MHz offset (not an absolute
@@ -3014,6 +3018,18 @@ def _overclock_controller_with_fan_panes() -> tuple[OverclockController, FakeApp
     app.widgets["#fan-controls"] = fan_controls
     app.widgets["#fan-actions"] = fan_actions
     return OverclockController(app), app
+
+
+def test_the_rpm_policy_asks_for_an_rpm_target_not_a_percentage() -> None:
+    controller, app = _overclock_controller_with_fan_panes()
+
+    message = controller.apply_fan(
+        app.native, "0x0000", "macos-rm", "0", False, "rpm", 1400
+    )
+
+    assert ("set_fan_rpm", "0x0000", 1400) in app.native.calls
+    assert not [c for c in app.native.calls if c[0] == "set_fan"]
+    assert "1400 rpm" in message
 
 
 def test_the_fanstop_policy_asks_the_firmware_to_stop_the_fan() -> None:

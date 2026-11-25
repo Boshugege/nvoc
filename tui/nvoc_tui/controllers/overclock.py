@@ -2404,6 +2404,12 @@ class OverclockController(PaneController):
         if reset:
             native.set_fan(gpu, backend, fan_id, "auto", 0)
             return "Successfully reset fan control."
+        if request == "rpm":
+            # The number in the level box is rpm under this policy; the core
+            # translates it through the cooler's own scale and refuses a target
+            # past it, naming the span.
+            native.set_fan_rpm(gpu, level)
+            return f"Successfully asked for {level} rpm on fan {fan_id}."
         if request == "fanstop":
             # The firmware's zero-RPM stop mode, not a 0 percent pin: the level
             # box is not consulted, because a duty is not the request here.

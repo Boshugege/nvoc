@@ -81,6 +81,9 @@ class FanControlController:
         # Legacy GPUs (≤ Kepler): modern NVAPI CoolerPolicy types are rejected
         # by the old driver; restrict the policy dropdown to manual/default.
         self.legacy_nvapi = False
+        # The cooler's published rpm scale, when the transport publishes one.
+        # Zero means there is no scale, so an rpm target cannot be translated.
+        self.fan_max_rpm = 0
 
     def selected_backend(self) -> str:
         # On macOS the dropdown holds the single RM label; every write is
@@ -149,6 +152,12 @@ class FanControlController:
         self.normalize_policy()
 
     def on_slider_change(self, value: float) -> None:
+        if self.normalize_policy() == "rpm":
+            # Under an rpm policy the slider keeps meaning "how far up the
+            # cooler's own scale", and the box shows the rpm that implies.
+            scale = max(1, self.fan_max_rpm)
+            self.pane.set_level(int(round(value * scale / 100.0)))
+            return
         self.pane.set_level(int(value))
 
     def on_entry_change(self) -> None:
@@ -159,7 +168,8 @@ class FanControlController:
             level = int(text)
         except ValueError:
             return
-        self.pane.set_level(max(0, min(100, level)))
+        ceiling = self.fan_max_rpm if self.normalize_policy() == "rpm" else 100
+        self.pane.set_level(max(0, min(max(1, ceiling), level)))
 
     def set_preset(self, level: int) -> None:
         # "manual" is what the level pin is called on the RM transport; asking

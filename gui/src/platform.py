@@ -35,7 +35,9 @@ MACOS_FAN_POLICY_REASON = (
 #: ``fanstop`` is the firmware's own zero-RPM mode (control-record mode 2),
 #: which is a different request from pinning 0 percent: one asks the cooler to
 #: stop, the other pins a duty of zero.
-MACOS_FAN_POLICIES = ["manual", "fanstop", "auto"]
+#: ``rpm`` is a physical target, translated through the cooler's published
+#: scale; the pane's number box carries rpm instead of percent under it.
+MACOS_FAN_POLICIES = ["manual", "fanstop", "rpm", "auto"]
 
 #: Pane policy -> the macOS request it means. ``continuous`` is the manual
 #: level under another name (the NVAPI cooler family's TemperatureContinuous
@@ -44,6 +46,7 @@ _MACOS_POLICY_REQUEST = {
     "manual": "manual",
     "continuous": "manual",
     "fanstop": "fanstop",
+    "rpm": "rpm",
     "auto": "auto",
 }
 

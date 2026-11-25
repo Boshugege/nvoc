@@ -465,6 +465,12 @@ class NativeBackend:
             return
 
         def apply(native: Any, gpu: str = gpu, settings: FanSettings = settings) -> str:
+            if settings.policy == "rpm":
+                # The number in the level box is rpm under this policy, and the
+                # core translates it through the cooler's own scale; a target
+                # past that scale is refused there, naming the span.
+                native.set_fan_rpm(gpu, settings.level)
+                return f"Successfully asked for {settings.level} rpm."
             if settings.policy == "fanstop":
                 # The firmware's zero-RPM mode, not a 0 percent pin: the level
                 # box is not forwarded, so a stale number there cannot become
