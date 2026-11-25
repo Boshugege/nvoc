@@ -9,6 +9,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from src.platform import macos_duty_seed
 from src.tabs.dashboard.sections.fan import FanControlPane
 from src.widgets.lightweight_controls import (
     ct_button_font,
@@ -1889,11 +1890,24 @@ class OverclockTab:
         self._fan_surface_load_in_flight = True
         self._fan_surface_gpu = gpu
 
+        # The NVAPI cooler family does not exist on the RM transport, so it is
+        # not asked there at all: a refusal that is known in advance would only
+        # put a misleading "no coolers" answer into the legacy-NVAPI verdict.
+        ask_cooler = not self._fan_surface_is_rm()
+
         def worker():
             try:
                 data = backend.query_fan_info(gpu)
             except Exception:
                 data = None
+            if not ask_cooler:
+                try:
+                    self.frame.after(
+                        0, lambda: self._fan_surface_loaded(gpu, data, None)
+                    )
+                except Exception:
+                    self._fan_surface_load_in_flight = False
+                return
             try:
                 cooler = backend.query_cooler_info(gpu)
             except Exception:
@@ -1922,6 +1936,15 @@ class OverclockTab:
         try:
             count = data.get("count")
             count = count if isinstance(count, int) else 0
+
+            if self._fan_surface_is_rm():
+                # The RM fan report is the whole surface here: one cooler, a
+                # duty the driver holds and the firmware's rpm. There is no
+                # curve table and no software continuous policy to verdict, so
+                # the legacy-NVAPI heuristic below does not apply at all.
+                self._adapt_rm_fan_surface(gpu, data, count)
+                return
+
             current = data.get("current_percent")
             current = current if isinstance(current, int) else None
 
@@ -1960,6 +1983,36 @@ class OverclockTab:
                 self.fan_section.set_supported(False)
         except Exception:
             pass
+
+    def _fan_surface_is_rm(self) -> bool:
+        """Whether the fan pane is addressed to the native RM transport."""
+        try:
+            return self.fan_section.selected_backend() == "macos-rm"
+        except Exception:
+            return False
+
+    def _adapt_rm_fan_surface(self, gpu: str, data: dict, count: int) -> None:
+        """Shape the fan section for the native RM transport.
+
+        Everything here mirrors a measured capability: cooler0 percent and
+        firmware auto exist, the curve table and the software continuous policy
+        do not, and the duty the slider should show is the one the driver holds
+        (``target_percent``), not an rpm-derived guess.
+        """
+        if count < 1:
+            self._fanless_gpus.add(gpu)
+            self._fanned_gpus.discard(gpu)
+            self.fan_section.set_supported(False)
+            return
+        self._fanless_gpus.discard(gpu)
+        self._fanned_gpus.add(gpu)
+        self.fan_section.set_supported(True)
+        self.fan_section.set_fan_choices(
+            ["All"] + [f"Fan {i}" for i in range(1, count + 1)]
+        )
+        duty = macos_duty_seed(data)
+        if duty is not None:
+            self.fan_section.set_level(max(0, min(100, duty)))
 
     @staticmethod
     def _normalize_pstate_label(value: Any) -> Optional[str]:

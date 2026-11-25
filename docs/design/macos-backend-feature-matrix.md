@@ -2801,3 +2801,13 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **③ 物理证据** ✔：40% 钉住让风扇从 **0 rpm** 转到 **1285–1327 rpm**（+5 s 起转、+7 s 到量），复位成 `auto` 后**回到 0 rpm**——这台机器在该温度下固件自己就停风扇，所以"回到 0"本身就是固件重新接管的证据。控制记录侧 `target_percent 39.9994 / mode manual` → `0.0 / auto`。
 
 **④ 边界** ✗：`current_percent` 是取整状态反馈（40% 请求读到 45–47%），权威值是 `target_percent`；转速对模式切换有约 5 s 滞后，故"写入是否生效"看控制记录、"风扇是否动了"看几秒后的转速；本轮在 TUI 代码路径上验证的是**风扇一族**，oc/power 面板共用同一套选择器但其写入链只有 CLI/pynvoc 真机证据；Textual 控件绑定由 Linux 上 15 条单测覆盖，不是在 macOS 上点出来的；曲线编辑器隐藏的根据是"本驱动没有温度→转速表"的判死结论。证据：`outputs/stage-tui-macos-fan-20261125T170936Z/`（6 文件 + `SHA256SUMS`）。
+
+## 一百六十四、GUI 写入口：同一个决定点，另一套壳
+
+**① 之前** ✗：GUI 的 API 下拉同样只给 `NVAPI`/`NVML`，策略下拉给 `continuous`/`curve`，曲线编辑器按钮照常弹出——在 macOS 上这三样都指向不存在的通道与不存在的表；选定哪个传输**就是**写入被寻址去哪条通道，所以这不是纯外观问题：它把"这张卡没有这个面"包装成"应用时报驱动故障"。另外 `query_cooler_info`（NVAPI 私有 cooler family）在 RM 传输上每轮都会被问一次，明知必被拒的答案会污染"legacy NVAPI"判定。
+
+**② 现在** ✔：新增 `gui/src/platform.py`（纯函数，与 TUI 的 `nvoc_tui/platform.py` 刻意互为镜像，都照同样的实测事实写），GUI 侧改动：`selected_backend()` 走 `backend_for_selection()`（macOS 恒为 `macos-rm`）、`allowed_policies()` 在 RM 上只给 `manual`/`auto`、`settings()` 对 RM 做**一次**策略映射（`continuous`→`manual`，`curve` **抛错并给出理由**）、`set_preset` 用 `manual`、API 下拉的 values/默认值来自 `api_labels()/api_label_default()`、策略下拉来自 `fan_policy_options()`、曲线按钮仅在 `fan_curve_available()` 时 pack、`_load_fan_surface` 在 RM 上**不再发** NVAPI cooler 查询、新增 `_adapt_rm_fan_surface()`（按 `count` 决定禁用、按驱动持有的 `target_percent` 预填，无则退到 `current_percent`）。
+
+**③ 验证** ✔（仅单测，见边界）：`gui/tests/test_platform_macos.py` 新增 **17 条**，覆盖单传输标签与后端映射（含"下拉写 NVML 也只能落到 RM"）、两项策略、`curve` 抛错含完整理由、占空比预填五种形态（含布尔与 auto/0）、`apply`/`reset` 发出的 `FanSettings`（`manual`/`auto` + level 0）、`on_backend_change` 把游离的 `continuous` 归一成 `manual`、NVAPI 路径不受影响；`cd gui && uv run pytest tests` → **298 passed / 13 skipped**；`cargo xtask ci` → `CI_EXIT=0`。
+
+**④ 边界** ✗：**GUI 没有跑过**。tkinter 需要窗口服务器，而测试机是 SSH 进的 headless 会话，起不了 Aqua——所以本轮没有 GUI 的真机证据。底层 pynvoc 调用（`set_fan(gpu,"macos-rm","all","manual",40)` → 回读 39.9994/manual → 复位 auto/0，转速 0→1285–1327→0）已在 `outputs/stage-tui-macos-fan-20261125T170936Z/` 实测过，GUI 现在发出的正是这些实参；两者之间只差 GUI 自己的壳。这条差距写在文档里而不是含糊过去：**"代码路径与实参相同"不等于"GUI 在 macOS 上被点过"**。

@@ -13,6 +13,16 @@ from typing import Callable, Optional, Protocol, Sequence
 import customtkinter as ctk
 
 from src.backend.base import FanSettings, GuiBackend
+from src.platform import (
+    api_label_default,
+    api_labels,
+    backend_for_selection,
+    fan_curve_available,
+    fan_policy_default,
+    fan_policy_options,
+    macos_fan_request,
+    is_macos,
+)
 from src.widgets.lightweight_controls import (
     ct_button_font,
     LiteButton,
@@ -73,10 +83,15 @@ class FanControlController:
         self.legacy_nvapi = False
 
     def selected_backend(self) -> str:
-        selected = self.pane.selected_api().strip().upper()
-        return "nvml-cooler" if selected == "NVML" else "nvapi-cooler"
+        # On macOS the dropdown holds the single RM label; every write is
+        # addressed to that one transport, so the mapping lives in one place.
+        return backend_for_selection(self.pane.selected_api())
 
     def allowed_policies(self) -> list[str]:
+        if self.selected_backend() == "macos-rm":
+            # manual (pin the percent) and auto (firmware control). The
+            # software continuous policy and the curve table do not exist.
+            return fan_policy_options(True)
         if self.selected_backend() == "nvml-cooler":
             return list(NVML_POLICIES)
         if self.legacy_nvapi:
@@ -115,10 +130,17 @@ class FanControlController:
         return parts[1] if len(parts) > 1 else None
 
     def settings(self, *, reset: bool = False) -> FanSettings:
+        backend = self.selected_backend()
+        policy = "auto" if reset else self.normalize_policy()
+        if backend == "macos-rm":
+            # One mapping, here: "continuous" is the manual level under
+            # another name, and "curve" raises with the reason instead of
+            # being applied as whatever the level control happens to hold.
+            policy = macos_fan_request(policy)
         return FanSettings(
-            backend=self.selected_backend(),
+            backend=backend,
             fan_id=self.fan_id(),
-            policy="auto" if reset else self.normalize_policy(),
+            policy=policy,
             level=0 if reset else self.pane.fan_level(),
         )
 
@@ -140,7 +162,9 @@ class FanControlController:
         self.pane.set_level(max(0, min(100, level)))
 
     def set_preset(self, level: int) -> None:
-        self.pane.set_policy("continuous")
+        # "manual" is what the level pin is called on the RM transport; asking
+        # for "continuous" there would be a policy the dropdown no longer holds.
+        self.pane.set_policy("manual" if is_macos() else "continuous")
         self.pane.set_level(level)
         self.apply()
 
@@ -440,11 +464,14 @@ class FanControlPane:
         tk.Label(
             r0_right, text="%", font=_FONT_BODY, bg=_PANE_BG, fg=_TEXT_FG_DIM
         ).pack(side="left", padx=(0, 10))
-        self.cooler_api_var = ctk.StringVar(value="NVAPI")
+        # macOS: one transport (the native RM backend). NVAPI/NVML would be two
+        # choices whose only outcome is a failure at apply time -- see
+        # src/platform.py for why the selector is not cosmetic.
+        self.cooler_api_var = ctk.StringVar(value=api_label_default())
         self.cooler_api_menu = ctk.CTkOptionMenu(
             r0_right,
             variable=self.cooler_api_var,
-            values=["NVAPI", "NVML"],
+            values=api_labels(),
             width=84,
             anchor="center",
             command=lambda _: self.controller.on_backend_change(),
@@ -462,7 +489,8 @@ class FanControlPane:
             width=84,
             command=self.controller.open_curve_editor,
         )
-        self.btn_curve_editor.pack(side="right", padx=(0, 8))
+        if fan_curve_available():
+            self.btn_curve_editor.pack(side="right", padx=(0, 8))
         self._interactive_widgets.append(self.btn_curve_editor)
 
         self.level_var.trace_add("write", lambda *_: self.controller.on_entry_change())
@@ -478,11 +506,11 @@ class FanControlPane:
             bg=_PANE_BG,
             fg=_TEXT_FG,
         ).grid(row=0, column=0, sticky="w")
-        self.policy_var = ctk.StringVar(value="continuous")
+        self.policy_var = ctk.StringVar(value=fan_policy_default())
         self.policy_menu = ctk.CTkOptionMenu(
             r1_left,
             variable=self.policy_var,
-            values=NVAPI_POLICIES,
+            values=fan_policy_options(),
             width=1,  # grid stretches it to fill the third
             anchor="center",
             font=ct_button_font(r1_left),
@@ -557,8 +585,8 @@ class FanControlPane:
             self.fan_id_var.set(new_values[0])
 
     def set_backend(self, backend: str) -> None:
-        """Preselect the NVAPI/NVML dropdown (e.g. force NVML on legacy GPUs
-        where the private NVAPI cooler family reports zero fans)."""
+        """Preselect the API dropdown (e.g. force NVML on legacy GPUs where
+        the private NVAPI cooler family reports zero fans)."""
         if backend in ("NVAPI", "NVML"):
             self.cooler_api_var.set(backend)
 
