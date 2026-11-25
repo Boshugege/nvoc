@@ -3976,3 +3976,22 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **④ 边界（必须说清）** ✖：这个守卫**还没有被任何调用方接上**——`auto-optimizer` 的 `--apply-candidate` 目前只做**偏移**通道（`SetMacosRmClockOffset`），锁定窗口的候选轮次尚未接线。本轮交付的是"接线上必须先满足的条件"，不是已接好的轮次。
 
 **⑤ 未硬件验证** ✖：测试机第 10 轮失联。守卫本身纯函数、不碰设备，所以它的正确性不依赖硬件；依赖硬件的是"真机上第一次用它时，存储窗口确实能被写回"。
+
+## 二百三十六、优化器接上了锁定窗口的候选轮次：`--apply-locked-window MIN:MAX`
+
+**① 上一轮留的坑补上了** ✔：§二百三十五 的守卫当时**没有调用方**；本轮 `auto-optimizer macos-eval --apply-locked-window 1620:1800` 把它接在写通道前面。
+
+**② 一次候选的完整动作** ✔：读 `0x20809040` 取驱动已存窗口 → **守卫**（无窗口 / 与请求相同都拒绝，写前）→ 写候选（`0x2080d041`，648 字节块，内部快照+回读+失败回滚）→ 有界负载 + 验证器 → **把已存窗口写回** → **再读一次表** → `locked_candidate_outcome`。
+
+**③ 几条刻意的设计** ✔：
+- **不与偏移候选同 boot**：`--apply-locked-window` 与 `--apply-candidate` 同时给出直接拒绝（一个 round trip 的还原正被持有的时候，另一个通道不该开写）。
+- **`--dry-run` 也拒绝**：它不写，但会让人误以为看过了"要还原成什么"，而那个只有读真表才知道。
+- **`stored_after_khz` 单列**：还原的**写报告**回答的是"写进去没有"，**再读一次表**才回答"回来了没有"。两者都发，不合并。
+- **`settings_written` 现在把锁定通道算进去**：`Some(run) => run.restored.is_some()`，否则偏移通道的旧判据。之前锁定候选跑完它会是 `true`（因为偏移轮次为空），那是错的。
+- **`mode` 新增 `locked-candidate`**，`write_gate` 也单列一段，还原没发生时写的是"不知道回去了没有，先重读表"，不是"已还原"。
+
+**④ 参数拒绝** ✔（4 条测试）：`0:` 零下界拒绝（驱动回 `0xd` 而不是当作无限）、MIN>MAX 拒绝、缺 `:` 与非法数字各自点名、`1700:1700` 合法（min==max 驱动接受）。`nvoc-auto-optimizer` **73 → 77 passed**；`cargo xtask ci` → `CI_EXIT=0`。
+
+**⑤ 边界（不掩饰）** ✖：**`run_locked_candidate` 本身没有单元测试，也没有在真机上跑过**——它每一步都要设备。本轮被 CI 证明的只有参数解析、`settings_written` 的判据、以及 §二百三十四/二百三十五 的纯函数。真机第一次跑时最该看的两件事：`restored.storage_matches_applied` 是否为 `true`、`stored_after_khz` 是否等于 `restore_target_khz`。
+
+**⑥ 未硬件验证** ✖：测试机第 11 轮失联。
