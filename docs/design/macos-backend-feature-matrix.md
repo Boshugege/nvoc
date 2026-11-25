@@ -3912,3 +3912,26 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **④ 测试** ✔：`test_controllers.py` 三条（一次读只发一次并渲染出窗口／`None` 不加行／后端无该方法不崩且文本为 `None`）+ `test_metrics_format.py` 两条（取最新记录含 MEM／`None`、空表、缺字段一律 `None`）；TUI 全套 **245 → 250 passed**；`cargo xtask ci` → `CI_EXIT=0`。
 
 **⑤ 未硬件验证** ✖：测试机第 7 轮失联，屏幕上这一行**没有**真机证据；TUI 与 GUI 两处显示接线目前都只有单测背书。
+
+## 二百三十三、服务把**整张**存下来的锁定表发出来：`/api/oc` 新增 `locked_history`
+
+**① 动机** ✔：`locked_window` 只说"现在锁的是什么"，说不出"这个驱动被吩咐过什么"。而 §二百二十三 已测：表里每条记录 = 一次 SET 的落点、`+4` = 48 × 载入以来 SET 次数。把它发出去，客户端不必先写一次就能看到历史，也能看出"写了但没落表"。
+
+**② 形状** ✔：
+```json
+"locked_window":  {"min_mhz": 1620, "max_mhz": 1800} | null,
+"locked_history": {"count_at_4": 96, "windows": [{"min_mhz":1700,"max_mhz":1700},
+                                                {"min_mhz":1620,"max_mhz":1800}]} | null
+```
+`null` 而非空数组：**"这张卡不留表"与"留了一张空表"必须能分开**（刚开机的那次读就是空表）。`count_at_4` 单独可为 `null`（保留"有表但没有计数"的后端）。
+
+**③ 接口分层** ✔：`ControlBackend` 新增 `read_locked_history()` 默认 `Ok(None)`（其它传输不实现即"不留表"），不做成 `read_locked_window()` 的返回值——两个问题不同：**一个是现在锁什么，一个是驱动被吩咐过什么**。新增 `controller::LockedHistory { count_at_4, windows }`。
+
+**④ 测试（本轮唯一带"合成表"的真实校验）** ✔：
+- `srv/src/macos.rs`：手工构造 4808 字节块（`+4 = 96`、两条 48 字节记录：`1700/1700` 与 `1620/1800`），走 `parse_state_records` → `locked_history()`，断言顺序与 kHz→MHz 投影；空表断言为 `None`（不是空 history）。
+- `srv/src/http.rs`：`locked_history_json` / `locked_window_json` 的 `null`、无计数、两端输出。
+- `nvoc-srv` lib **76 → 80 passed**；`cargo xtask ci` → `CI_EXIT=0`。
+
+**⑤ 意义** ✖→✔：这是本轮少数**能被本地测试证明**的 macOS 路径——块布局来自真机 dump（§二百二十一），解析与投影现在在 CI 里跑；但**块本身来自真机、本次没有真机**，所以"服务在真机上发出的 JSON"仍是待验证项。
+
+**⑥ 未硬件验证** ✖：测试机第 8 轮失联。
