@@ -3865,3 +3865,24 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **④ 未做** ✖：GUI 界面上**还没有**显示这一行（只做到后端与纯函数），TUI 同样未接。这是本轮**刻意停在的边界**：先让"能读到、能解析"这两层有测试，界面接线留到能上机验证的一轮。
 
 **⑤ 未硬件验证** ✖：测试机仍失联（第 4 轮），全部改动只有编译/单测/CI 证据。
+
+## 二百三十、服务写入口不再拿"写完就 OK"当结论：回读驱动存下来的窗口并如实分三种情形
+
+**① 问题** ✗：`POST /api/oc/locked-clocks` 原本只要写路径返回 `Ok` 就回 `OK: oc.locked_clocks gpu 0 1620..1800 MHz`。而写路径的 `readback_verified` 比较的是驱动对**同一请求**的归一化，§二百一十三 已判定那不是状态读。⇒ 客户端看到的"OK"里，**没有任何一比特**来自"驱动把窗口存下来了"。
+
+**② 改法** ✔：写成功后由服务**再读一次** `0x20809040`（§二百二十九 起服务已能读），把结果作为响应第二行回给客户端，分三种、互不混淆：
+| 回读 | 响应 |
+| --- | --- |
+| 等于请求 | `stored window: 1620..1800 MHz (matches the request)` |
+| 不等于请求 | `stored window: 1620..1700 MHz (differs from the 1620..1800 MHz request)` |
+| 后端没有状态读（`Ok(None)`） | `stored window: none readable (this backend cannot report stored state)` |
+| 读失败（`Err`） | `stored window: read failed (<原因>)` |
+
+后两种**绝不**写成"matches"：说不出来的就是说不出来，与 §二百二十九 GUI 侧"空表不报 0 MHz"同一原则。
+
+**③ 实现要点** ✔：`audited_write` 拆出 `audited_write_reported(..., report)`，`report` 只在**成功时**运行，且为了避开同一后端的两处可变借用，写先执行、报告后执行（闭包里捕获的是 `Result`，不是后端）。审计记录行不变。
+
+**④ 测试** ✔：`stored_window_note` 四条断言（匹配／不一致／后端不可读／读失败，且后两条断言文本里**不含** `matches`）；`nvoc-srv` lib 76 passed；`cargo xtask ci` → `CI_EXIT=0`。
+（另：本条 commit 首次提交时正文里混入了一个中文字，已 amend 成全英文——约束是英文正文，不改历史而是修掉未推送前的错误。）
+
+**⑤ 未硬件验证** ✖：测试机第 5 轮仍失联，响应文本**没有**真机样本；上机后第一批要抓的就是这一行，二、三两种情形哪个出现直接决定 `0x20809040` 是否可信。
