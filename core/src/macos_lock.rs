@@ -143,6 +143,11 @@ pub struct LockedClockWriteReport {
     /// readback of the request, which is why it is reported next to it and not
     /// instead of it.
     pub twin_records: Vec<StateRecord>,
+    /// Whether the newest stored record carries the window that was applied.
+    ///
+    /// `None` when the answer had no records. `Some(false)` is a real finding:
+    /// the driver stored something other than what it said it applied.
+    pub storage_matches_applied: Option<bool>,
 }
 
 /// Bytes one record of the `0x20809040` answer occupies, and where the first
@@ -200,6 +205,21 @@ impl StateRecord {
             _ => None,
         }
     }
+}
+
+/// The window in the newest record of a `0x20809040` answer.
+///
+/// This is what the driver has *stored*, which is the only thing here that is
+/// independent of the request: `readback_verified` compares the driver's answer
+/// with the driver's own normalisation of the same request, while this compares
+/// a stored record with the window that was meant to be applied. It says nothing
+/// about the clock itself, and nothing about a record the driver may append for
+/// a different domain, so it is reported as its own field and never folded into
+/// `readback_verified`.
+pub fn last_stored_window(records: &[StateRecord]) -> Option<(u32, u32)> {
+    records
+        .last()
+        .map(|record| (record.min_khz(), record.max_khz()))
 }
 
 /// Walk the records out of a `0x20809040` answer.
@@ -822,6 +842,17 @@ mod state_count_tests {
             parse_state_records(&block_with_records(&[zeroed]))[0].memory_khz(),
             None
         );
+    }
+
+    #[test]
+    fn the_newest_record_is_the_one_compared_with_the_applied_window() {
+        let block =
+            block_with_records(&[record(1_700_000, 1_700_000), record(1_620_000, 1_800_000)]);
+        assert_eq!(
+            last_stored_window(&parse_state_records(&block)),
+            Some((1_620_000, 1_800_000))
+        );
+        assert_eq!(last_stored_window(&[]), None);
     }
 
     #[test]

@@ -246,6 +246,10 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                                 "words": record.words,
                             })
                         }).collect::<Vec<_>>(),
+                        // Stored state against the applied window. Kept apart from
+                        // readback_verified, which only compares the driver's
+                        // answer with its own normalisation of the same request.
+                        "storage_matches_applied": report.storage_matches_applied,
                         "floor_note": "the driver keeps the highest floor it has seen; a lower request is accepted and not applied",
                         "readback_verified": true, "restored_on_mismatch": true})
                 }
