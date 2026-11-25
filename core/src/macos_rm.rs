@@ -1648,15 +1648,106 @@ impl Device {
     pub fn acoustic_target_write_supported(&self) -> bool {
         offset_writes_supported(&self.info)
     }
+    /// Every read a settings projection needs, on one control session.
+    ///
+    /// A session per read was the whole cost of `settings()`: each open waits
+    /// for the driver's polled sections to advance, so four reads meant four
+    /// waits for one projection. The reads stay individually fallible — a
+    /// policy the driver refuses still lands in `notes`/`unavailable` — so
+    /// merging them changes only what it costs, not what a failure means.
+    #[allow(clippy::type_complexity)]
+    fn settings_reads(
+        &self,
+    ) -> (
+        Result<macos_offset::OffsetChannelSnapshot, Error>,
+        Result<crate::PowerPolicySettings, Error>,
+        Result<crate::ThermalPolicySettings, Error>,
+        Result<crate::FanControlSettings, Error>,
+    ) {
+        #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+        {
+            self.with_validated_control_session(&|| false, |session| {
+                let channel = session.read_offset_channel();
+                let power = self.power_policy_in_session(session);
+                let thermal = self.thermal_policy_in_session(session);
+                let fan = self.fan_control_in_session(session);
+                Ok((channel, power, thermal, fan))
+            })
+            .unwrap_or_else(|error| {
+                let message = error.to_string();
+                (
+                    Err(Error::Custom(message.clone())),
+                    Err(Error::Custom(message.clone())),
+                    Err(Error::Custom(message.clone())),
+                    Err(Error::Custom(message)),
+                )
+            })
+        }
+        #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+        {
+            let unsupported = || {
+                Error::Custom(
+                    "macOS RM settings reads require x86_64 macOS with the NullMoth driver".into(),
+                )
+            };
+            (
+                Err(unsupported()),
+                Err(unsupported()),
+                Err(unsupported()),
+                Err(unsupported()),
+            )
+        }
+    }
+
+    /// The board power policy as read on an already-open control session.
+    ///
+    /// Split out so a caller that needs several of these reads pays for the
+    /// session — and its settle wait — once. Each `open` here costs the
+    /// driver's initial-fresh budget, and `get-settings` used to open five.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    fn power_policy_in_session(
+        &self,
+        session: &mut MacosRmSession,
+    ) -> Result<crate::PowerPolicySettings, Error> {
+        let _guard = lock_transport()?;
+        let mut io = NativePowerControl(session.handle);
+        let mut policy = io.info()?;
+        let current = crate::macos_control_transaction::ControlBlock::get(&mut io)?;
+        policy.current_mw = crate::macos_power::current(&current)?;
+        Ok(policy)
+    }
+
+    /// The acoustic/GPU-Max thermal policy on an already-open session.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    fn thermal_policy_in_session(
+        &self,
+        session: &mut MacosRmSession,
+    ) -> Result<crate::ThermalPolicySettings, Error> {
+        let _guard = lock_transport()?;
+        let mut io = NativeThermalPolicy(session.handle);
+        let info = io.info()?;
+        let current = crate::macos_control_transaction::ControlBlock::get(&mut io)?;
+        crate::macos_thermal_policy::settings(&info, &current)
+    }
+
+    /// The fan policy and current cooler state on an already-open session.
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    fn fan_control_in_session(
+        &self,
+        session: &mut MacosRmSession,
+    ) -> Result<crate::FanControlSettings, Error> {
+        let _guard = lock_transport()?;
+        let mut io = NativeFanControl(session.handle);
+        let (info, status) = io.info_status()?;
+        let current = crate::macos_control_transaction::ControlBlock::get(&mut io)?;
+        crate::macos_fan::settings(&info, &status, &current)
+    }
+
     pub fn thermal_policy_settings(&self) -> Result<crate::ThermalPolicySettings, Error> {
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         {
             self.with_validated_control_session(&|| false, |session| {
-                let _guard = lock_transport()?;
-                let mut io = NativeThermalPolicy(session.handle);
-                let info = io.info()?;
-                let current = crate::macos_control_transaction::ControlBlock::get(&mut io)?;
-                crate::macos_thermal_policy::settings(&info, &current)
+                self.thermal_policy_in_session(session)
             })
         }
         #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
@@ -1700,11 +1791,7 @@ impl Device {
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         {
             self.with_validated_control_session(&|| false, |session| {
-                let _guard = lock_transport()?;
-                let mut io = NativeFanControl(session.handle);
-                let (info, status) = io.info_status()?;
-                let current = crate::macos_control_transaction::ControlBlock::get(&mut io)?;
-                crate::macos_fan::settings(&info, &status, &current)
+                self.fan_control_in_session(session)
             })
         }
         #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
@@ -1775,12 +1862,7 @@ impl Device {
         #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
         {
             self.with_validated_control_session(&|| false, |session| {
-                let _guard = lock_transport()?;
-                let mut io = NativePowerControl(session.handle);
-                let mut policy = io.info()?;
-                let current = crate::macos_control_transaction::ControlBlock::get(&mut io)?;
-                policy.current_mw = crate::macos_power::current(&current)?;
-                Ok(policy)
+                self.power_policy_in_session(session)
             })
         }
         #[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
@@ -2065,26 +2147,11 @@ impl Device {
         let mut settings = settings_from(&info, &status);
         // The offset channel is only reachable through a session, and it is the
         // one part of this read the GSP can refuse on its own (a wedge answers
-        // 0x62 per block). Neither may fail the settings read: both land in the
+        // 0x62 per block). It must not fail the settings read: it lands in the
         // notes as evidence instead of turning into a value.
-        let offset_channel = MacosRmSession::open().and_then(|mut session| {
-            if session.identity()
-                != (
-                    self.info.pci_address.clone(),
-                    self.info.device_id,
-                    self.info.rm_gpu_id,
-                )
-            {
-                session.close()?;
-                return Err(Error::Custom(
-                    "macOS RM offset session device changed; rediscover GPUs".into(),
-                ));
-            }
-            let channel = session.read_offset_channel();
-            session.close()?;
-            channel
-        });
-        match offset_channel {
+        //
+        let (channel, power_read, thermal_read, fan_read) = self.settings_reads();
+        match channel {
             Ok(channel) => apply_offset_channel(&mut settings, &channel),
             Err(error) => settings
                 .notes
@@ -2094,7 +2161,7 @@ impl Device {
         // live clocks of *this* snapshot, so it has to run here and not inside
         // the block fold, which has no status.
         corroborate_named_offsets(&mut settings, &status);
-        match self.power_policy_settings() {
+        match power_read {
             Ok(policy) => {
                 settings.power_limit_policy = Some(policy);
                 settings.unavailable.remove("power_limit_write");
@@ -2103,7 +2170,7 @@ impl Device {
                 .notes
                 .push(format!("board power policy: not read ({error})")),
         }
-        match self.thermal_policy_settings() {
+        match thermal_read {
             Ok(policy) => {
                 settings.thermal_policy = Some(policy);
                 settings.unavailable.remove("thermal_limit");
@@ -2116,7 +2183,7 @@ impl Device {
                 );
             }
         }
-        match self.fan_control_settings() {
+        match fan_read {
             Ok(fan) => {
                 settings.fan_control = Some(fan);
                 settings.unavailable.remove("fan_control");
