@@ -208,8 +208,8 @@ pub fn run_control_loop(handles: LoopHandles) -> Result<(), String> {
     );
     if backend_floor_ms > cfg0.interval_ms {
         warn!(
-            "{backend_kind} reads cost more than {} ms per tick on this transport \
-             (floor {backend_floor_ms} ms is the measured cost of one readout); ticking at \
+            "the configured {} ms tick is shorter than one readout on this transport \
+             (floor {backend_floor_ms} ms is the measured cost of a tick); ticking at \
              {backend_floor_ms} ms instead of {} ms, because a tick longer than its interval \
              never yields the backend and every HTTP request would queue behind it",
             cfg0.interval_ms, cfg0.interval_ms
