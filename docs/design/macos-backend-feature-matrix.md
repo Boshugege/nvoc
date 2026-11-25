@@ -3330,3 +3330,11 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **④ 测试** ✔：`pytest -q gui/tests/` **324 passed / 13 skipped**（新增 3 条：rpm 策略走 `set_fan_rpm` 且不调 `set_fan`；滑块按刻度换算、越界按刻度封顶而不是按 100；百分比策略仍封 100）；`pytest -q tui/tests/` **245 passed**（新增 1 条同形用例）；`cargo xtask ci` = `CI_EXIT=0`。
 
 **⑤ 诚实边界** ✔：两个面板依旧**没有在 macOS 上被点击过**；本轮的验证是控制器/后端层单测 + 第 45/47 轮的真机 rpm 证据，不是 UI 验收。
+
+## 一百九十五、`/fan` 的 200 现在说的是"记下了"，不是"风扇已经在那个速度上"
+
+**① 真问题** ✔：`POST /fan?percent=40` 返回 `OK: manual 40%`，而这条路由只改配置——设备写由控制循环下一拍完成，且**可能被拒绝**（第 47 轮实测：`rpm=6000` 配置被记下、写入被 core 在 SET 前拒掉、风扇保持 auto）。把"配置变了"读成"风扇到了 40 %"是这条路由自己给的误会。
+
+**② 改法** ✔：三种形态（percent / rpm / stop）的响应文本都改成 `Recorded: …; the control loop applies it on its next tick (the device is not written by this request)`。**状态码仍是 200**，因为语义确实是"请求已受理"；没有改成 202/409，因为那会把配置面和执行面的界线往后挪，而这条路由的历史行为如此——要改语义应当单独决策，本轮只把话说准。
+
+**③ 测试** ✔：`cargo test -p nvoc-srv --lib` **73 passed**；`cargo xtask ci` = `CI_EXIT=0`。
