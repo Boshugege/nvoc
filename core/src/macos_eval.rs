@@ -171,6 +171,43 @@ candidate whose stored table could not be read keeps `storage_matches_applied: \
 null`: the missing witness is named, not assumed good, and it does not by itself \
 make the round trip unsettled.";
 
+/// What a locked-window candidate needs to be undoable, or why it is not.
+///
+/// A locked window is the one write on this backend with **no reset channel**:
+/// the reset entry NVML exposes does not work against this driver (§一百五十、
+/// §二百三十二), so the only way out of a window is to write the previous one
+/// back. Two states cannot be undone and are therefore refused up front, before
+/// any write:
+///
+/// * the driver stores no window at all -- there is nothing to put back, and the
+///   only escape left would be a reboot;
+/// * the driver already stores exactly the requested window -- the write would
+///   append a record and change nothing (§二百二十五: a repeated identical
+///   write still appends), so the round trip would prove nothing while still
+///   costing a write.
+///
+/// Returns the window the caller must restore afterwards, in kHz.
+pub fn locked_candidate_guard(
+    stored: Option<(u32, u32)>,
+    requested: (u32, u32),
+) -> Result<(u32, u32), String> {
+    match stored {
+        None => Err(
+            "the driver stores no locked window, so a candidate has nothing to put back: the \
+             reset entry does not work against this driver (0x1f for every count=0 payload), and \
+             the only way out of a lock is a reboot. Refusing to write a window that cannot be \
+             undone"
+                .to_string(),
+        ),
+        Some(window) if window == requested => Err(format!(
+            "the driver already stores exactly {}..{} kHz; a repeated identical write still \
+             appends a stored record, so this candidate would cost a write and prove nothing",
+            requested.0, requested.1
+        )),
+        Some(window) => Ok(window),
+    }
+}
+
 /// Reduce the apply and restore reports into a locked-candidate outcome.
 pub fn locked_candidate_outcome(
     applied: &crate::macos_lock::LockedClockWriteReport,
@@ -1655,6 +1692,31 @@ mod tests {
             twin_records: records,
             storage_matches_applied: stored.map(|(min, max)| (min, max) == applied),
         }
+    }
+
+    #[test]
+    fn a_candidate_with_nothing_to_restore_is_refused_before_it_writes() {
+        // The one state that cannot be undone: no stored window, no reset
+        // channel, and a reboot as the only way out.
+        let refused = locked_candidate_guard(None, (1_620_000, 1_800_000)).unwrap_err();
+        assert!(refused.contains("nothing to put back"), "{refused}");
+        assert!(refused.contains("reboot"), "{refused}");
+    }
+
+    #[test]
+    fn a_candidate_equal_to_the_stored_window_is_refused() {
+        let refused = locked_candidate_guard(Some((1_620_000, 1_800_000)), (1_620_000, 1_800_000))
+            .unwrap_err();
+        assert!(refused.contains("already stores"), "{refused}");
+        assert!(refused.contains("appends"), "{refused}");
+    }
+
+    #[test]
+    fn a_candidate_with_a_different_stored_window_returns_the_window_to_put_back() {
+        assert_eq!(
+            locked_candidate_guard(Some((1_700_000, 1_700_000)), (1_620_000, 1_800_000)),
+            Ok((1_700_000, 1_700_000))
+        );
     }
 
     #[test]
