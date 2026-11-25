@@ -3688,3 +3688,17 @@ No such file or directory (os error 2)
 **⑤ 教训** ✔：一条永远 skip 的测试，等于一条永远没跑过的测试。它"绿"着的时候，谁也不知道里面写的顺序是错的。
 
 **⑥ 证据** ✔：`outputs/stage-pynvoc-rebuild-20261126T110000Z/`（`python-tests.log`、`maturin-build.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。宿主机 `cargo xtask ci` = `CI_EXIT=0`。
+
+## 二百一十九、门禁第一次在 macOS 上跑完并全绿：`MAC_CI_EXIT=0`
+
+**① 树里的改动（一处）** ✔：`uv` 不在机器上时，`xtask` 用 `.venv/bin/<tool>` **同样的二进制、同样的参数**跑那一步，并**把这件事打印出来**（`uv is not installed here; running …`）。**不跳过任何步骤**；有 `uv` 的机器上行为完全不变（宿主机 `CI_EXIT=0` 复验过）。
+
+**② 环境的事（不是树的错，但必须写下来）** ✔：pyo3 默认挑系统 Python，而带 Xcode 命令行工具的 macOS 上是 **3.9**，没有 `libpython3.9` 可链 → `cargo test -p pynvoc` 在链接阶段失败（`ld: library 'python3.9' not found`）。设 `PYO3_PYTHON="$PWD/.venv/bin/python"` 即可。这属于 **pyo3 的选择**，不是门禁的选择，所以它留在调用方，并写进了 `nvoc-python/README.md`。
+
+**③ 结果** ✔：`cargo xtask ci` → **`MAC_CI_EXIT=0`**。即在这台 macOS 上，fmt、clippy（含 `--no-default-features`）、aarch64-linux 交叉检查、`ruff format`、`ruff check`、三个 Python 套件（TUI 245 / GUI 324 / pynvoc 61 passed、10 skipped）**全部通过**。
+
+**④ 为什么值得记** ✔：之前"macOS 上只跑了 Rust 部分"是这台机器的常态；现在同一条门禁可以在这里跑完，**平台差异不再靠人肉补跑**。
+
+**⑤ 边界** ✔：这不是 Windows 门禁的替代；`uv` 存在时仍走 `uv run --locked`，锁文件语义未被绕过。
+
+**⑥ 证据** ✔：`outputs/stage12-macos-gate-green-20261126T111500Z/`（`xtask-ci.log`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
