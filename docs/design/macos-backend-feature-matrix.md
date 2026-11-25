@@ -2821,3 +2821,22 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **③ 真机复核** ✔：`--duration 20` + 两个 candidate 的 sweep → `windows_loaded=false`、`winner=null`、`demonstrated=false / signals=[]`、`util_max=2 % / clock_max=1530 MHz / power_max=11.49 W / temp_rise=1.28 ℃`，`settings_written=true`（两次写都回读且已复位），收尾保护项全绿。证据：`outputs/stage-eval-loadgate-20261125T173418Z/`（4 文件 + `SHA256SUMS`）。
 
 **④ 边界** ✗：本机此刻**没有真实 GPU 负载可用**——`--load-source vulkan` 需要 `cli-stressor-cuda-rs`，`target/release/` 里没有该二进制；`demonstrated=false` 只说明"没测到工作证据"，不等于"没有工作"；`throttle_reasons` 在本机**空闲与负载下都全 false**，故"没有限频"这一结论目前**无法成立**（该字段在本传输上不携带信息）；本目录 0.238 it/s 与早前 sweep 的 2.38 it/s 节奏不同（`--iters` 20000 vs 2000），跨报告比吞吐前必须先对齐该参数。
+
+## 一百六十六、负载窗口原来卡在 CPU 上；修好后第一次在真负载下量出偏移效果
+
+**① 根因** ✗：`metal_check` 每校验一个元素就在 **CPU** 上重算一遍哈希（`compare_one(..., iters)`），而每 dispatch 的 GPU 侧工作量与之同阶但快三个数量级 ⇒ 全量校验时 **CPU 是瓶颈、GPU 几乎全程空闲**。实测：`--elements 65536 --iters 20000` 全量校验 60 s 只跑 143 次 dispatch，同期遥测停在空闲时钟 1530 MHz、空闲功耗 11.4 W、利用率 0 %。把 elements 提到 4 M/64 M 无效（等待时间仍花在逐元素比对）。⇒ 上一阶段的 `load_evidence` 判 `demonstrated=false` 的**不是卡不行，是负载构造错了**。
+
+**② 修复** ✔：`--stress-verify-sample N`（默认 **256**，只作用于**负载窗口**）：CPU 只比对 N 个均匀采样元素，时间交还 GPU。同参数下单窗口从 **0.238 it/s** 变成 **33.48 it/s**，遥测变为 `clock 1965 MHz / power 13.03 W / util 峰值 42 % / 温升 +8.2 ℃`，`load_evidence.demonstrated=true`（`signals=["temperature","clock"]`）。**正确性不受影响**：同一命令里独立的 `verifier` 段仍跑全量 bit-exact（本例 passed=true），且负载窗口自带 `verified_full_buffer=false`，`THROUGHPUT_NOTE` 已写明"抽样校验的窗口度量负载，正确性由 verifier 段证明"。
+
+**③ 第一次真负载下的 A/B** ✔（同一卡、同一负载、20 s 窗口、每候选两次独立运行）：
+
+| 候选 | 运行 1 | 运行 2 | 基线 spread / 门槛 |
+| --- | --- | --- | --- |
+| `graphics=+15mhz` | **+0.679 %**（winner） | **+0.682 %**（winner） | 0.155 / 0.152 %，门槛 0.5 % |
+| `graphics=+8mhz` | +0.150 %（false） | +0.312 %（false） | 同上 |
+| `graphics=-8mhz` | −0.631 % | — | 0.040 %，门槛 0.5 % |
+| `graphics=-15mhz` | −0.303 % | — | 同上 |
+
+方向自洽：负偏移给出负号、正偏移给出正号，+15 MHz 两次都越过门槛且在两次运行间复现（0.679/0.682）。**两个负向候选的 `winner=null` 现在是"没测出提升"，而不是上一阶段那种"没测到负载"**；三窗 `evidence.demonstrated` 全为 true。
+
+**④ 边界** ✗：20 s 窗口、单卡、单一负载形状（65536 元素 × 20000 内层迭代、抽样校验）；`+0.68 %` 是这条负载上的吞吐变化，**不是稳定性认证**，也不外推到别的负载或别的卡；负载窗口抽样校验、正确性靠同次独立全量 verifier 段；偏移写入与复位两次都回读（`settings_written=true`），板卡 100 W/70–100 窗口与电源 ac 未被改动。证据：`outputs/stage-eval-realload-20261125T174237Z/`、`…-pos-20261125T174505Z/`、`…-pos-rep-20261125T174731Z/`（各 4 文件 + `SHA256SUMS`）。
