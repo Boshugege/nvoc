@@ -258,6 +258,15 @@ class TestMacosFanValidation:
         with pytest.raises(ValueError, match="slot 0 only"):
             pynvoc.set_fanstop_status("not-a-gpu", True, 2)
 
+    @pytest.mark.skipif(
+        __import__("sys").platform != "darwin", reason="macOS fan-stop route"
+    )
+    def test_reset_fan_speed_refuses_a_cooler_it_has_no_record_for(self, pynvoc):
+        # The macOS reset now returns the write report instead of None; the
+        # validation in front of the device must still come first.
+        with pytest.raises(RuntimeError, match="cooler 0 only"):
+            pynvoc.reset_fan_speed("not-a-gpu", 1)
+
 
 class TestMacosThermalValidation:
     @pytest.mark.skipif(

@@ -497,6 +497,35 @@ fn value_object(entries: impl IntoIterator<Item = (impl Into<String>, Value)>) -
     Value::Object(map)
 }
 
+/// One shape for every macOS fan write, because all three of them return the
+/// same `FanControlWriteReport` and used to publish different slices of it:
+/// `set_fanstop_status` hid the slot and the duty, `set_fan_rpm` hid the
+/// original mode and the preserved-bytes flag, and `reset_fan_speed` threw the
+/// report away entirely -- so a caller could not tell a verified restore from a
+/// silent one. The NVML/NVAPI routes keep their own shapes; this mapper is
+/// compiled everywhere so the `cfg!` guards at the call sites stay simple.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_fan_write_value(report: &nvoc_core::FanControlWriteReport) -> Value {
+    value_object([
+        ("slot", Value::from(report.slot)),
+        ("original_mode", Value::from(report.original_mode)),
+        (
+            "original_target_percent",
+            Value::from(report.original_target_percent),
+        ),
+        ("applied_mode", Value::from(report.applied_mode)),
+        (
+            "applied_target_percent",
+            Value::from(report.applied_target_percent),
+        ),
+        ("readback_verified", Value::from(report.readback_verified)),
+        (
+            "other_bytes_preserved",
+            Value::from(report.other_bytes_preserved),
+        ),
+    ])
+}
+
 fn py_value(py: Python, value: &Value) -> PyResult<Py<PyAny>> {
     match value {
         Value::Null => Ok(py.None()),
@@ -5061,13 +5090,13 @@ fn with_nvml_fan_recovery<T>(op: impl Fn(&SyncInventory) -> PyResult<T>) -> PyRe
 }
 
 #[pyfunction]
-fn reset_fan_speed(py: Python<'_>, gpu: &str, fan_index: u32) -> PyResult<()> {
+fn reset_fan_speed(py: Python<'_>, gpu: &str, fan_index: u32) -> PyResult<Py<PyAny>> {
     if cfg!(target_os = "macos") {
         nvoc_core::validate_macos_fan_request(fan_index, nvoc_core::FanControlTarget::Auto)
             .map_err(to_py_err)?;
-        return py.detach(|| {
+        let value = py.detach(|| {
             with_target(gpu, "macos-rm", |target| {
-                run(
+                let report = run(
                     target,
                     nvoc_core::SetMacosRmFanControl {
                         slot: fan_index,
@@ -5075,11 +5104,12 @@ fn reset_fan_speed(py: Python<'_>, gpu: &str, fan_index: u32) -> PyResult<()> {
                         cancelled: &|| Python::attach(|py| py.check_signals().is_err()),
                     },
                 )
-                .map_err(to_py_err)?;
-                Ok(Value::Null)
-            })?;
-            Ok(())
-        });
+                .map_err(to_py_err)?
+                .output;
+                Ok(macos_fan_write_value(&report))
+            })
+        })?;
+        return py_value(py, &value);
     }
     let gpu_own = gpu.to_string();
     py.detach(|| {
@@ -5088,7 +5118,9 @@ fn reset_fan_speed(py: Python<'_>, gpu: &str, fan_index: u32) -> PyResult<()> {
             run(&target, ResetFanSpeed { fan_index }).map_err(to_py_err)?;
             Ok(())
         })
-    })
+    })?;
+    // NVML's reset has no per-write report; None says so instead of inventing one.
+    Ok(py.None())
 }
 
 #[pyfunction]
@@ -6051,17 +6083,12 @@ fn set_fanstop_status(
                 )
                 .map_err(to_py_err)?
                 .output;
-                Ok(value_object([
-                    ("applied", Value::from(true)),
-                    ("fan_stop", Value::from(enable)),
-                    ("original_mode", Value::from(report.original_mode)),
-                    ("applied_mode", Value::from(report.applied_mode)),
-                    ("readback_verified", Value::from(report.readback_verified)),
-                    (
-                        "other_bytes_preserved",
-                        Value::from(report.other_bytes_preserved),
-                    ),
-                ]))
+                let mut value = macos_fan_write_value(&report);
+                if let Value::Object(map) = &mut value {
+                    map.insert("applied".into(), Value::from(true));
+                    map.insert("fan_stop".into(), Value::from(enable));
+                }
+                Ok(value)
             })
         }
         #[cfg(not(target_os = "macos"))]
@@ -6111,16 +6138,11 @@ fn set_fan_rpm(
                 )
                 .map_err(to_py_err)?
                 .output;
-                Ok(value_object([
-                    ("applied", Value::from(true)),
-                    ("slot", Value::from(report.slot)),
-                    ("applied_mode", Value::from(report.applied_mode)),
-                    (
-                        "applied_target_percent",
-                        Value::from(report.applied_target_percent),
-                    ),
-                    ("readback_verified", Value::from(report.readback_verified)),
-                ]))
+                let mut value = macos_fan_write_value(&report);
+                if let Value::Object(map) = &mut value {
+                    map.insert("applied".into(), Value::from(true));
+                }
+                Ok(value)
             })
         })?;
         return py_value(py, &value);
