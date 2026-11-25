@@ -2533,6 +2533,19 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
         { 0u, 1u },        /* +0  FORMAT_WORD */
         { 4u, 0u },        /* +4  entry count zero */
     };
+    /* The same entry, far outside the card's clock range.  Read back to back
+     * with the 100..200 case it answers one question about 0x2080902E: does the
+     * block it fills depend on what was put in (a request-shaped query, like
+     * 0x20809014) or not (a pure state read)?  Identical answers mean it ignores
+     * the input. */
+    static const NvU32 lock_request_wide[6][2] = {
+        { 0u, 1u },        /* +0  FORMAT_WORD */
+        { 4u, 1u },        /* +4  entry count */
+        { 8u, 8u },        /* +8  byte 0 = vPstate 8 */
+        { 12u, 1u },       /* +12 domain bit 0 (graphics) */
+        { 16u, 300000u },  /* +16 min kHz */
+        { 20u, 400000u },  /* +20 max kHz */
+    };
     static const NvU32 lock_request[6][2] = {
         { 0u, 1u },        /* +0  FORMAT_WORD */
         { 4u, 1u },        /* +4  entry count */
@@ -2628,6 +2641,8 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
           lock_request, 6u },
         { "lock-query vP8 100/200 0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u,
           lock_request, 6u },
+        { "lock-query vP8 300/400 0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u,
+          lock_request_wide, 6u },
         { "lock-read seed1 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 1u },
         { "sibling  seed1  0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 1u },
     };
