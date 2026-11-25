@@ -3900,3 +3900,15 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **⑤ 边界** ✖：只写进控制台（不新增控件），且 `update_limits` 这个调用点**未在测试里被直接驱动**——测试走的是被调用方法本身（`make_tab` 夹具缺 `plimit_entry` 等控件，`update_limits` 在这套夹具下不可用）。这一点不掩饰。
 
 **⑥ 未硬件验证** ✖：测试机第 6 轮失联，界面上这一行**没有**真机截图证据。
+
+## 二百三十二、TUI 仪表盘也显示"驱动存下来的窗口"（每 GPU 一次）
+
+**① 接法** ✔：`DashboardController._poll_locked_state()` 挂在 **info 重载**（GPU 切换就是它触发的）而不是每次状态轮询——存下来的表只在写的时候变，按 1 Hz 轮询等于每秒一次 escape 去读一个不变的值。读在 `native_service.submit_query` 的工作队列上跑，结果经 `call_from_thread` 回主线程；切换半路返回的旧卡结果由 `gpu == self._locked_state_gpu` 丢弃，且切换时**先清空旧文本**再读，绝不让上一张卡的窗口留在屏幕上。
+
+**② 展示** ✔：`metrics_format.locked_state_text(payload)` 取最新一条记录渲染成 `locked 1620.0-1800.0 MHz | MEM 6001.0 MHz`，`update_metrics` 里作为最后一行追加；没有文本就不加行。
+
+**③ 三种"不说"** ✔：后端没有 `query_locked_state`（别的厂商、旧 pynvoc）→ 静默跳过；读失败 `None` → 不加行；空表 → 不加行。与 GUI（§二百三十一）同一原则：**静默 = 这条传输不说，不是"没锁"**。
+
+**④ 测试** ✔：`test_controllers.py` 三条（一次读只发一次并渲染出窗口／`None` 不加行／后端无该方法不崩且文本为 `None`）+ `test_metrics_format.py` 两条（取最新记录含 MEM／`None`、空表、缺字段一律 `None`）；TUI 全套 **245 → 250 passed**；`cargo xtask ci` → `CI_EXIT=0`。
+
+**⑤ 未硬件验证** ✖：测试机第 7 轮失联，屏幕上这一行**没有**真机证据；TUI 与 GUI 两处显示接线目前都只有单测背书。
