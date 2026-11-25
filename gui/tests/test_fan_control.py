@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import pytest
+
 from src.backend.base import FanSettings
 from src.tabs.dashboard.sections.fan import FanControlController
 
 
 from src.platform import MACOS_BACKEND
+
+# These describe the NVAPI/NVML fan transports, which this tree only offers off
+# macOS; say so instead of inheriting whatever host runs the suite.
+pytestmark = pytest.mark.usefixtures("non_macos_host")
 
 
 class FakePane:

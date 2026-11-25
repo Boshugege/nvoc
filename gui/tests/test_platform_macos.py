@@ -140,6 +140,7 @@ def test_the_macos_dropdown_no_longer_offers_a_policy_it_cannot_apply(
     assert pane.policy == "manual"
 
 
+@pytest.mark.usefixtures("non_macos_host")
 def test_the_nvapi_path_is_untouched():
     pane = FakePane(api="NVAPI", fan_id="Fan 1", policy="curve", level=70)
     backend = FakeBackend()

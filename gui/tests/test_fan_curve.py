@@ -4,6 +4,8 @@ the NativeBackend activate path (editor state → driver write)."""
 
 from __future__ import annotations
 
+import pytest
+
 from types import SimpleNamespace
 
 from src.backend.base import FanSettings
@@ -16,6 +18,10 @@ from src.widgets.fan_curve_editor import (
     rpm_to_percent,
 )
 from tests.test_fan_control import FakeBackend, FakePane
+
+# These describe the NVAPI/NVML fan transports, which this tree only offers off
+# macOS; say so instead of inheriting whatever host runs the suite.
+pytestmark = pytest.mark.usefixtures("non_macos_host")
 
 
 class _CurveFakeBackend(FakeBackend):
