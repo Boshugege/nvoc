@@ -3232,3 +3232,17 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **④ 诚实边界** ✔：**GUI 没有在 macOS 上点过**——tkinter 需要窗口服务器，测试机是 headless SSH 会话。本轮真机证据是"真实 `query_settings` 输出喂进真实 GUI 代码（纯函数 + 未挂窗口的 tab 方法）"，**不是**"在 Aqua 里点了按钮"。探针没有写任何东西。
 
 **⑤ 测试** ✔：`pytest -q gui/tests/` **320 passed / 13 skipped**（+11）；`pytest -q tui/tests/` **240 passed**；`cargo xtask ci` = `CI_EXIT=0`。
+
+## 一百八十八、服务写面的窗口准入，与一个被误判成"驱动 wedged"的真 bug
+
+**① 窗口准入** ✔：`POST /api/oc/power` / `oc/temp` 此前只解析参数，越界值要到设备上才失败；`oc/offset` 早已先问驱动公布的窗口。现在三者同一套判定 `core::limit_verdict`（两端闭区间、拒绝而非夹取、未公布窗口不拒绝任何值），越界在碰设备之前回 409。
+
+**② 真 bug（比本轮目标更重要）** ✔：服务起来后 `/api/oc` 从不回答，日志写着 `control thread wedged in a driver call`。`sample(1)` 证明**没有挂死**：主线程在等锁，HTTP 线程在 `MacosRmSession::open_with` / `read_snapshot` 里 `nanosleep`。实测 `get-settings` 3.72–4.66 s、`get-status` 0.65–0.96 s，一个 tick 要读 status + settings + monitor ≈ **6–7 s**，而 interval 是 1000 ms——tick 永远跑不完，锁不放，HTTP 全部排队：**服务在自我饿死**，watchdog 的"wedged"是误报。
+
+**③ 修法** ✔（`834e7a4`）：后端声明"我这个传输能 serve 的最短 tick"，运行时取 `max(配置, 下限)`，启动时一行 WARN 说明原因。RM 传输下限 **8000 ms**（实测 + 余量）。这是下限不是上限：配 30 s 仍是 30 s（单测钉住）。
+
+**④ 真机 HTTP 证据** ✔（`outputs/stage-srv-limits-20261125T211610Z/`）：150 W / 60 W / 95 °C / 40 °C 全部 409 且零写入；75 W、85 °C 写入 200 并经独立 CLI 读回确认；100 W / 83 °C exact restore 验回；`/api/oc` 公布 `power{70,100,100}` 与 `temp{65,83,87}`。
+
+**⑤ 诚实边界** ✔：一次 tick 仍持锁 6–7 s，落在 tick 中间的请求就要等这么久——这是"每读一次开一次会话"的代价，**会话复用本轮没做**；8000 ms 是工程下限不是最优值；失败在先的两次尝试（watchdog 误报日志、探针漏写 `method="POST"` 导致全 404）都保留在证据目录里。
+
+**⑥ 测试** ✔：`cargo test -p nvoc-srv --lib` 67 passed；`cargo test -p nvoc-core --lib macos_eval` 59 passed；`cargo xtask ci` = `CI_EXIT=0`。
