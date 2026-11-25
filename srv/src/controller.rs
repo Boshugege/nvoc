@@ -166,6 +166,26 @@ pub struct FanReading {
 /// methods still fail closed with a read-only error as a second line of
 /// defence (an HTTP write reaches the backend directly).
 pub trait ControlBackend: Send {
+    /// The locked min/max window this transport can report, if any.
+    ///
+    /// `Ok(None)` means the transport publishes no such window -- it is not a
+    /// window of zero, and the JSON says `null` for the same reason.
+    fn read_locked_window(&mut self, _gpu_index: usize) -> Result<Option<(u32, u32)>, String> {
+        Ok(None)
+    }
+
+    /// Write one locked window. The default refuses: most transports have no
+    /// private locked-clock control, and inventing one here would be a write
+    /// nobody verified.
+    fn write_locked_window(
+        &mut self,
+        _gpu_index: usize,
+        _min_mhz: u32,
+        _max_mhz: u32,
+    ) -> Result<(), String> {
+        Err("this backend publishes no locked-clock write".to_string())
+    }
+
     /// Number of GPUs this backend manages — the index space of every other
     /// method.
     fn gpu_count(&self) -> usize;

@@ -482,6 +482,32 @@ impl ControlBackend for MacosRmBackend {
         .map(|_| ())
     }
 
+    fn read_locked_window(&mut self, gpu_index: usize) -> Result<Option<(u32, u32)>, String> {
+        // A read on this transport needs the request the write would send (the
+        // driver answers by normalising it), so a window has to be asked for.
+        // The plane reports the span the driver publishes for a graphics vP8
+        // request only when it has one; there is no state read to invent.
+        let _ = gpu_index;
+        Ok(None)
+    }
+
+    fn write_locked_window(
+        &mut self,
+        gpu_index: usize,
+        min_mhz: u32,
+        max_mhz: u32,
+    ) -> Result<(), String> {
+        self.forget_readout();
+        let request = vec![nvoc_core::LockWindow {
+            domain: 0x1,
+            pstate: 8,
+            min_khz: min_mhz.saturating_mul(1000),
+            max_khz: max_mhz.saturating_mul(1000),
+        }];
+        self.run_op(gpu_index, nvoc_core::SetMacosRmLockedClocks { request })
+            .map(|_| ())
+    }
+
     fn reset_offset(&mut self, gpu_index: usize, domain: OffsetDomain) -> Result<(), String> {
         self.forget_readout();
         self.write_offset_khz(gpu_index, domain, 0)

@@ -252,6 +252,9 @@ fn handle_api(
             let window = backend.read_offset_window_mhz(index);
             let clock = backend.read_core_clock_mhz(index);
             let fan = backend.read_fan_window(index);
+            // The locked window the transport can report, if any. Null is "this
+            // plane publishes none", not a window of zero.
+            let locked = backend.read_locked_window(index).ok().flatten();
             json_response(
                 request,
                 &serde_json::json!({
@@ -280,6 +283,9 @@ fn handle_api(
                     // The plane the write side of this endpoint (`/api/fan`) works
                     // in. Null when the backend publishes none, so a caller can
                     // tell "no fan control here" from "a fan window of zero".
+                    "locked_window": locked.map(|(min_mhz, max_mhz)| {
+                        serde_json::json!({"min_mhz": min_mhz, "max_mhz": max_mhz})
+                    }),
                     "fan": fan.map(|f| {
                         serde_json::json!({
                             "min_percent": f.min_percent,
@@ -386,6 +392,36 @@ fn handle_api(
             }
             let response = audited_write(auth_user, "oc.temp", detail, || {
                 backend.write_temp_limit_c(index, c)
+            });
+            respond(request, response);
+        }
+        (&tiny_http::Method::Post, "oc/locked-clocks") => {
+            let index = match gpu_index() {
+                Ok(v) => v,
+                Err(e) => return text_response(request, 400, format!("Bad request: {e}")),
+            };
+            let parse = |key: &str| params.get(key).and_then(|s| s.parse::<u32>().ok());
+            let (Some(min_mhz), Some(max_mhz)) = (parse("min_mhz"), parse("max_mhz")) else {
+                return text_response(
+                    request,
+                    400,
+                    "Bad request: 'min_mhz' and 'max_mhz' required",
+                );
+            };
+            // The window is not clamped: the macOS write path refuses a span the
+            // driver does not hold and names it, and the flag pair has one
+            // ordering rule the request itself can state.
+            if let Some(refusal) = locked_window_refusal(min_mhz, max_mhz) {
+                log::warn!("oc.locked_clocks refused: {refusal}");
+                return text_response(request, 400, format!("Bad request: {refusal}"));
+            }
+            let mut guard = lock(backend);
+            let Some(backend) = guard.as_mut() else {
+                return text_response(request, 503, "backend not ready");
+            };
+            let detail = format!("gpu {index} {min_mhz}..{max_mhz} MHz");
+            let response = audited_write(auth_user, "oc.locked_clocks", detail, || {
+                backend.write_locked_window(index, min_mhz, max_mhz)
             });
             respond(request, response);
         }
@@ -1085,9 +1121,41 @@ fn handle_oc_global(
     }
 }
 
+/// Refuse a locked window the request itself can rule out.
+///
+/// The span is not clamped here: the macOS write path refuses a window the
+/// driver does not hold and names the span it does. What this checks is only
+/// what can be decided without asking the driver.
+fn locked_window_refusal(min_mhz: u32, max_mhz: u32) -> Option<String> {
+    if min_mhz == 0 || max_mhz == 0 {
+        return Some(format!(
+            "a locked window needs non-zero bounds, got {min_mhz}..{max_mhz} MHz; nothing was written"
+        ));
+    }
+    if min_mhz > max_mhz {
+        return Some(format!(
+            "min {min_mhz} MHz is above max {max_mhz} MHz; nothing was written"
+        ));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{limit_window_refusal, offset_window_refusal};
+    use super::{limit_window_refusal, locked_window_refusal, offset_window_refusal};
+
+    #[test]
+    fn a_locked_window_the_request_can_rule_out_is_refused_before_the_driver() {
+        assert!(locked_window_refusal(0, 1700).unwrap().contains("non-zero"));
+        assert!(locked_window_refusal(1700, 0).unwrap().contains("non-zero"));
+        assert!(
+            locked_window_refusal(1700, 1620)
+                .unwrap()
+                .contains("above max")
+        );
+        assert!(locked_window_refusal(1620, 1700).is_none());
+        assert!(locked_window_refusal(1620, 1620).is_none());
+    }
 
     #[test]
     fn a_published_span_refuses_an_offset_past_it() {
