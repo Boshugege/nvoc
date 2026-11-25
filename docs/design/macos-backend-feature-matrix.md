@@ -3484,3 +3484,18 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **④ 诚实边界** ✔：本轮证明的是**账本机制**（写后记账、跳过、不重复写）；它是"跨重启扫描"的**前提**，**不是**编排本身——自动 reboot 后再续跑仍然没有。10 s 窗口**不是**稳定性结论。
 
 **⑤ 证据** ✔：`outputs/stage-optimizer-resume-20261126T081500Z/`（`run1.json`、`run1.log`、`run2.json`、`run2.log`、`resume.jsonl`、`README.md`、`SHA256SUMS`；`shasum -c` 全 OK）。
+
+## 二百〇七、stage 12 的扫描机制落地：网格展开 + 每 boot 一写上限 + "还剩几个"——真机跑过
+
+**① 新能力** ✔：`--sweep-grid TARGET=START..STOP:STEP`（只在后端已校验的 additive 跨度内展开，拒绝 step=0 / 反向 range / START==STOP / 超过 64 点）、`--sweep-max-per-boot N`（本 boot 允许写几个，超出部分**报为 pending**）、`--resume-file`（上一轮的账本决定哪些已完成）。
+
+**② 真机结果** ✔：`--sweep-grid graphics=0..15000:15000 --sweep-max-per-boot 1`（账本里已有 `graphics=-15000` 一行）：
+- 输出 `this boot writes 1 candidate(s), 1 still pending -- one unknown write per boot, so the rest is the next boot's work`；
+- 实际跑的是 `graphics=0`：`settled=true`、`restore_verified=true`、`restored_khz=0`，跑完读回 **`Restore kHz: 0`**；
+- 账本变成两行（旧行保留 + 新行），**`graphics=15000` 留给下一个 boot**。
+
+**③ 这就是"不朴素循环"的样子** ✔：一次扫描被切成多个 boot，每个 boot 只写一个未知候选，进度落在账本里，剩下多少**当轮就说出来**，而不是跑完就说"sweep 完成"。
+
+**④ 边界** ✔：证明的是**机制**（展开、上限、pending 报告、账本续跑），**不是**自动编排——reboot 与"下个 boot 自动跑"仍需人工/外层调度；10 s 窗口**不是**稳定性结论；本轮只发生**一次**受控写（`graphics=0`，等价无偏移，仍走完整事务）。
+
+**⑤ 证据** ✔：`outputs/stage-optimizer-sweep-20261126T083000Z/`（`run1.json`、`run1.log`、`ev66-ledger.jsonl`、`README.md`、`SHA256SUMS`）。
