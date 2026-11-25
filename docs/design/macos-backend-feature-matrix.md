@@ -3042,3 +3042,26 @@ potential: window -18.75..18.75 MHz at clock 1530.0 MHz -> -1.225 % .. 1.225 %
 **④ 我自己的坑（留档）** ✔：第一次跑空是选卡参数错——`query_settings` 的第一参数要求字符串标识（`"0x0100"` 或 `"0"`），传 int 报 `'int' object is not an instance of 'str'`，传 PCI 地址报 `no GPU selected`；另外 `maturin develop` 需要 `~/.local/bin` 与 `~/.cargo/bin` 都在 PATH 里、且 `-m nvoc-python/Cargo.toml`（workspace 根的 `pyproject.toml` 没有 `build-system`，直接跑会报 `missing field build-system`）。
 
 **⑤ 证据** ✔：`outputs/stage-pynvoc-offsetwindow-20261125T203444Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
+
+## 一百七十九、TUI 用驱动给的跨度当上界
+
+**① UI 缺口** ✗→✔：OC 面板对偏移值没有任何上界提示，而 macOS 驱动**自报**了它接受的跨度（§一百七十二–一百七十八）。控制器现在把"driver span ±18.75 MHz (±1.23 % at 1530 MHz)"写在偏移行旁边，并在 `run_native_action` **之前**拒绝超界值。
+
+**② 真机输出** ✔（真实 settings 喂给真实控制器，不是模拟）：
+
+```
+pane_line           : "driver span ±18.75 MHz (±1.23 % at 1530 MHz)"
+refusal_for_40mhz   : "Offset refused, nothing was written: core +40 MHz is outside the span
+                       the driver itself accepts (...). A larger offset is rejected by the
+                       driver rather than clamped, and the realised gain is quantised to the
+                       clock's own step, so the whole span is the ceiling here."
+refusal_for_18mhz   : null
+```
+
+**③ 语义** ✔：一行超界 ⇒ **整轮不写**并逐行点名（不写半套偏移）；18 MHz 在跨度内 ⇒ 正常写；NVAPI/NVML 没有这条记录 ⇒ 行文为空、**不设上界**（"没被告知"≠"跨度为 0"）。
+
+**④ 测试** ✔：`tui/tests/test_controllers.py` 新增三条（拒且零调用、跨度内正常写、无窗口不设界）；`pytest -q tui/tests/` **232 passed**；`cargo xtask ci` = `CI_EXIT=0`。
+
+**⑤ 未做（不美化）** ✗：GUI 的 OC 段是滑条驱动、范围另有一处来源，本轮没接这条窗口；跑探针需要 `textual`，机器上的 `.venv` 没有，因此用 `uv run --locked --package nvoc-tui` 并把 `tui/` 与 `.venv` 的 site-packages 一起放进 `PYTHONPATH`。
+
+**⑥ 证据** ✔：`outputs/stage-tui-offsetwindow-20261125T203752Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
