@@ -1746,6 +1746,49 @@ fn settings_macos_rm_to_map(
             ),
         ]),
     );
+    // The board power policy's own window, in watts, from the same block the
+    // write path sets. Absent rather than zeroed when it was not read, with the
+    // block's reason carried next door, for the same reason the offset window is:
+    // a UI must not bound a slider on a number nobody published.
+    match &settings.power_limit_policy {
+        Some(policy) => map.insert(
+            "power_window".into(),
+            value_object([
+                ("min_w", u64_value((policy.minimum_mw / 1000) as u64)),
+                ("current_w", u64_value((policy.current_mw / 1000) as u64)),
+                ("default_w", u64_value((policy.default_mw / 1000) as u64)),
+                ("max_w", u64_value((policy.maximum_mw / 1000) as u64)),
+            ]),
+        ),
+        None => match settings.unavailable.get("power_limit_write") {
+            Some(reason) => map.insert("power_window_unavailable".into(), text(reason)),
+            None => None,
+        },
+    };
+    // The acoustic policy's own window, in Celsius: the block `set_temp_limit`
+    // writes. The GPU Max policy is a separate entry and is not flattened in
+    // here, so 65..87 is not mistaken for the card's thermal wall.
+    match &settings.thermal_policy {
+        Some(policy) => map.insert(
+            "thermal_window".into(),
+            value_object([
+                ("min_c", i64_value(policy.acoustic.minimum_celsius as i64)),
+                (
+                    "current_c",
+                    i64_value(policy.acoustic.current_celsius as i64),
+                ),
+                (
+                    "default_c",
+                    i64_value(policy.acoustic.default_celsius as i64),
+                ),
+                ("max_c", i64_value(policy.acoustic.maximum_celsius as i64)),
+            ]),
+        ),
+        None => match settings.unavailable.get("thermal_limit") {
+            Some(reason) => map.insert("thermal_window_unavailable".into(), text(reason)),
+            None => None,
+        },
+    };
     if !settings.unavailable.is_empty() {
         map.insert(
             "unavailable".into(),
@@ -7239,6 +7282,83 @@ mod tests {
             .as_str()
             .expect("the absence names its cause");
         assert!(reason.contains("0x3a"), "{reason}");
+    }
+
+    /// The two policy windows are the driver's own numbers, and each rides with
+    /// the block the write path sets — so `/oc` sliders and the CLI agree by
+    /// construction rather than by two conversions that happen to match.
+    #[test]
+    fn macos_rm_settings_publish_the_board_and_acoustic_windows() {
+        let settings = nvoc_core::DeviceSettings {
+            power_limit_policy: Some(nvoc_core::PowerPolicySettings {
+                policy_index: 1,
+                current_mw: 100_000,
+                minimum_mw: 70_000,
+                default_mw: 100_000,
+                maximum_mw: 100_000,
+            }),
+            thermal_policy: Some(nvoc_core::ThermalPolicySettings {
+                gpu_max: nvoc_core::ThermalPolicyEntry {
+                    policy_index: 0,
+                    minimum_celsius: 88,
+                    default_celsius: 88,
+                    maximum_celsius: 88,
+                    current_celsius: 88,
+                },
+                acoustic: nvoc_core::ThermalPolicyEntry {
+                    policy_index: 1,
+                    minimum_celsius: 65,
+                    default_celsius: 83,
+                    maximum_celsius: 87,
+                    current_celsius: 83,
+                },
+            }),
+            ..Default::default()
+        };
+        let value = settings_macos_rm_to_map(0x100, 0, &settings, Some(1_530_000));
+        let map = value.as_object().expect("settings map is an object");
+        let power = map["power_window"].as_object().expect("power window");
+        assert_eq!(power["min_w"], u64_value(70));
+        assert_eq!(power["current_w"], u64_value(100));
+        assert_eq!(power["default_w"], u64_value(100));
+        assert_eq!(power["max_w"], u64_value(100));
+        let thermal = map["thermal_window"].as_object().expect("thermal window");
+        assert_eq!(thermal["min_c"], i64_value(65));
+        assert_eq!(thermal["current_c"], i64_value(83));
+        assert_eq!(thermal["default_c"], i64_value(83));
+        // The acoustic window, not the separate GPU Max entry: 87 here is a
+        // noise target, and 88 would be the thing this must never report.
+        assert_eq!(thermal["max_c"], i64_value(87));
+    }
+
+    /// An unread policy is a reason next door, never a window of zero.
+    #[test]
+    fn the_policy_windows_report_absence_with_a_reason() {
+        let settings = nvoc_core::DeviceSettings {
+            unavailable: std::collections::BTreeMap::from([
+                (
+                    "power_limit_write".to_string(),
+                    "board power policy not read (0x3a)".to_string(),
+                ),
+                (
+                    "thermal_limit".to_string(),
+                    "thermal policy read failed: 0x1f".to_string(),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let value = settings_macos_rm_to_map(0x100, 0, &settings, Some(1_530_000));
+        let map = value.as_object().expect("settings map is an object");
+        assert!(!map.contains_key("power_window"), "{map:?}");
+        assert!(!map.contains_key("thermal_window"), "{map:?}");
+        assert_eq!(
+            map["power_window_unavailable"].as_str(),
+            Some("board power policy not read (0x3a)")
+        );
+        assert_eq!(
+            map["thermal_window_unavailable"].as_str(),
+            Some("thermal policy read failed: 0x1f")
+        );
     }
 
     /// The macOS settings projection must report what it reads, and must name

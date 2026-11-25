@@ -158,6 +158,14 @@ class OverclockController(PaneController):
         except Exception:
             return False
 
+    def _window_current(self, key: str, field: str) -> int | None:
+        """The driver's own current value from a published policy window."""
+        window = self.app.cache.settings.get(key)
+        if not isinstance(window, dict):
+            return None
+        value = window.get(field)
+        return value if isinstance(value, int) and value > 0 else None
+
     def prime_inputs(self) -> None:
         fields = {
             "#core-offset": str(
@@ -170,13 +178,20 @@ class OverclockController(PaneController):
                     "mem_clock_current", self.app.cache.info.get("mem_clock_min", 0)
                 )
             ),
+            # Anchored at the value the driver reports running now when a policy
+            # window was published: a slider sitting on its default is a wrong
+            # reading of the card, not a neutral one.
             "#power-limit": str(
-                self.app.cache.settings.get(
+                self._window_current("power_window", "current_w")
+                or self.app.cache.settings.get(
                     "power_limit_current",
                     self.app.cache.info.get("power_limit_default", 100),
                 )
             ),
-            "#thermal-limit": str(self.app.cache.info.get("thermal_limit_default", 83)),
+            "#thermal-limit": str(
+                self._window_current("thermal_window", "current_c")
+                or self.app.cache.info.get("thermal_limit_default", 83)
+            ),
             "#voltage-boost": str(
                 self.app.cache.settings.get("voltage_boost_current", 0)
             ),
@@ -346,6 +361,102 @@ class OverclockController(PaneController):
             f"driver itself accepts ({self.offset_window_summary()}). A larger offset "
             "is rejected by the driver rather than clamped, and the realised gain is "
             "quantised to the clock's own step, so the whole span is the ceiling here."
+        )
+
+    def power_window(self) -> dict | None:
+        """The board power window the driver published, or None.
+
+        macOS RM reports it (`power_window`, in watts) from the same policy block
+        `set_power_limit` writes; NVAPI/NVML publish no such record, so the key
+        is absent there and nothing is bounded. One end missing means no window:
+        a half-read span would bound the wrong direction.
+        """
+        window = self.app.cache.settings.get("power_window")
+        if not isinstance(window, dict):
+            return None
+        for key in ("min_w", "max_w"):
+            if not isinstance(window.get(key), int):
+                return None
+        return window
+
+    def power_window_bounds(self) -> tuple[int, int] | None:
+        """The published board power span in whole watts, or None."""
+        window = self.power_window()
+        if window is None:
+            return None
+        return window["min_w"], window["max_w"]
+
+    def power_window_summary(self) -> str:
+        window = self.power_window()
+        if window is None:
+            return ""
+        lo, hi = self.power_window_bounds()
+        text = f"driver span {lo}..{hi} W"
+        current = window.get("current_w")
+        if isinstance(current, int):
+            text += f", running {current} W"
+        return text
+
+    def thermal_window(self) -> dict | None:
+        """The acoustic target window the driver published, or None.
+
+        This is the block `set_thermal_limit` writes; it is *not* the GPU thermal
+        wall, which this driver does not expose. Both ends or nothing.
+        """
+        window = self.app.cache.settings.get("thermal_window")
+        if not isinstance(window, dict):
+            return None
+        for key in ("min_c", "max_c"):
+            if not isinstance(window.get(key), int):
+                return None
+        return window
+
+    def thermal_window_bounds(self) -> tuple[int, int] | None:
+        window = self.thermal_window()
+        if window is None:
+            return None
+        return window["min_c"], window["max_c"]
+
+    def thermal_window_summary(self) -> str:
+        window = self.thermal_window()
+        if window is None:
+            return ""
+        lo, hi = self.thermal_window_bounds()
+        text = f"driver span {lo}..{hi} C"
+        current = window.get("current_c")
+        if isinstance(current, int):
+            text += f", running {current} C"
+        return text
+
+    def limits_window_error(
+        self, power_limit: int | None, thermal_limit: int | None
+    ) -> str | None:
+        """Refuse limits the driver's own windows cannot hold, before writing.
+
+        Neither value is clamped: the driver rejects an out-of-window value, so
+        sending it would spend a write to learn what the window already said.
+        Nothing is written for either row when one row is out of span.
+        """
+        over: list[str] = []
+        power = self.power_window_bounds()
+        if power is not None and isinstance(power_limit, int):
+            if not (power[0] <= power_limit <= power[1]):
+                over.append(f"power limit {power_limit} W")
+        thermal = self.thermal_window_bounds()
+        if thermal is not None and isinstance(thermal_limit, int):
+            if not (thermal[0] <= thermal_limit <= thermal[1]):
+                over.append(f"thermal limit {thermal_limit} C")
+        if not over:
+            return None
+        spans = ", ".join(
+            text
+            for text in (self.power_window_summary(), self.thermal_window_summary())
+            if text
+        )
+        return (
+            f"Limits refused, nothing was written: {', '.join(over)} is outside what "
+            f"the driver itself accepts ({spans}). The driver rejects an out-of-window "
+            "value rather than clamping it."
         )
 
     def apply_oc(
@@ -2522,6 +2633,12 @@ class OverclockController(PaneController):
             power_limit = self.get_int("#power-limit")
             thermal_limit = self.get_int("#thermal-limit")
             voltage_boost = self.get_int("#voltage-boost")
+            # Before the write, not after the driver's refusal: the window is
+            # information the backend gave us, and a value past it can only fail.
+            window_error = self.limits_window_error(power_limit, thermal_limit)
+            if window_error is not None:
+                self.app.write_log(window_error)
+                return True
 
             def apply_limits(
                 native,

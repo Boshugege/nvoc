@@ -662,6 +662,74 @@ def test_overclock_needs_both_window_ends_to_bound_anything() -> None:
     assert controller.offset_window_error({"core": 500}) is None
 
 
+POWER_WINDOW = {"min_w": 70, "current_w": 100, "default_w": 100, "max_w": 100}
+THERMAL_WINDOW = {"min_c": 65, "current_c": 83, "default_c": 83, "max_c": 87}
+
+
+def test_overclock_refuses_a_power_limit_outside_the_board_window() -> None:
+    app = FakeApp()
+    app.cache.settings["power_window"] = POWER_WINDOW
+    controller = OverclockController(app)
+
+    assert controller.power_window_bounds() == (70, 100)
+    assert controller.power_window_summary() == "driver span 70..100 W, running 100 W"
+    error = controller.limits_window_error(120, 83)
+    assert error is not None
+    assert "power limit 120 W" in error
+    assert "70..100 W" in error
+    # Nothing is clamped: the driver would refuse it, so the writer must not send it.
+    assert controller.limits_window_error(100, 83) is None
+    assert controller.limits_window_error(70, 83) is None
+    assert controller.limits_window_error(69, 83) is not None
+
+
+def test_overclock_refuses_a_thermal_target_outside_the_acoustic_window() -> None:
+    app = FakeApp()
+    app.cache.settings["thermal_window"] = THERMAL_WINDOW
+    controller = OverclockController(app)
+
+    assert controller.thermal_window_bounds() == (65, 87)
+    error = controller.limits_window_error(100, 90)
+    assert error is not None
+    assert "thermal limit 90 C" in error
+    assert "65..87 C" in error
+    assert controller.limits_window_error(100, 87) is None
+    assert controller.limits_window_error(100, 64) is not None
+
+
+def test_overclock_names_every_out_of_window_row_at_once() -> None:
+    app = FakeApp()
+    app.cache.settings["power_window"] = POWER_WINDOW
+    app.cache.settings["thermal_window"] = THERMAL_WINDOW
+    controller = OverclockController(app)
+
+    error = controller.limits_window_error(150, 95)
+    assert error is not None
+    # Both rows, in one message: a half-reported refusal reads as a one-row bug.
+    assert "power limit 150 W" in error
+    assert "thermal limit 95 C" in error
+
+
+def test_overclock_needs_both_policy_window_ends_to_bound_anything() -> None:
+    app = FakeApp()
+    app.cache.settings["power_window"] = {"max_w": 100}
+    app.cache.settings["thermal_window"] = {"min_c": 65}
+    controller = OverclockController(app)
+
+    assert controller.power_window() is None
+    assert controller.thermal_window() is None
+    assert controller.limits_window_error(150, 95) is None
+
+
+def test_overclock_policy_windows_are_absent_when_unpublished() -> None:
+    app = FakeApp()
+    controller = OverclockController(app)
+
+    assert controller.power_window_summary() == ""
+    assert controller.thermal_window_summary() == ""
+    assert controller.limits_window_error(150, 95) is None
+
+
 def test_overclock_summary_is_empty_when_no_window_was_published() -> None:
     app = FakeApp()
     controller = OverclockController(app)
