@@ -2524,6 +2524,15 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
      * non-zero value dword -- that dword is a live field of this handler and
      * the first such one is the current-offset candidate G1 has been missing.
      */
+    /* The shape the product refuses to build: format word present, entry count
+     * zero.  It is the only way to ask the driver itself whether "no entries"
+     * means "reset"/"report everything" or is simply invalid -- the Rust side
+     * cannot reach this shape (build_block rejects NoEntries), so the earlier
+     * "count=0 -> 0x1f" record came from here and needs to name its control. */
+    static const NvU32 lock_request_count0[2][2] = {
+        { 0u, 1u },        /* +0  FORMAT_WORD */
+        { 4u, 0u },        /* +4  entry count zero */
+    };
     static const NvU32 lock_request[6][2] = {
         { 0u, 1u },        /* +0  FORMAT_WORD */
         { 4u, 1u },        /* +4  entry count */
@@ -2613,6 +2622,8 @@ int nvx_stage2_clkctl_hex(nvx_ctx *c)
          * vPstate 8, the graphics domain bit, and the window the CLI was asked
          * for (100 MHz .. 200 MHz).  If the driver normalises anything, this is
          * the shape that shows it. */
+        { "lock-query count0 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 0u,
+          lock_request_count0, 2u },
         { "lock-query vP8 100/200 0x20809014 @648", 0x20809014u, 648u, ~0u, 0u, 0u,
           lock_request, 6u },
         { "lock-query vP8 100/200 0x2080902E @648", 0x2080902eu, 648u, ~0u, 0u, 0u,
