@@ -189,6 +189,7 @@
 | `reset-pstate-global-freq-offset` | Reset clock offsets, optionally filtered by domain | **部分已实现且实测**：显式 `--domain core` 或 `--domain memory` 将该域偏移归零，保留另一域。无域/显式P-state拒绝；不冒充全域reset或解锁，见§137–138 |
 | `reset-pstate-lock` | Clear all native NVAPI P-State locks | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-freq-lock` | Lock core or memory clocks to a MHz range | 未实现：macOS RM 在访问驱动前拒绝 |
+| `get-gpu-locked-state` | 读驱动**存下来的**锁定表（`0x20809040`）：48 字节记录、起点 `+16`、最新一条带最近应用的窗口，外加 `+4`（= 48 × 载入以来 SET 次数） | **已实现**（core/CLI/Python/服务三处），**未硬件验证**：测试机自第 84 轮失联。布局来自 §二百二十一、§二百二十三、§二百二十四的实测 dump |
 | `set-gpu-locked-clocks` | NVML 锁定窗口写入（`nvmlDeviceSetGpuLockedClocks`, `0x2080d041`）：预检读作快照 → SET → 回读 → 不一致按快照原样写回并验回；root 门用驱动 `0x1b` | **已实现且实测**：`--min 1080 --max 1620` 回 `NV_OK` 并钉住 1619.5 MHz，ceiling 换到 2200 成功；floor 高于 ceiling 时预检拒绝。**解锁无通路**（count=0 全 `0x1f`，NVML 自身复位同样失败），连续 SET 会 `0x62` 楔死需重启，见§一百五十 |
 | `set-legacy-application-freq-lock` | Set NVML application clocks in MHz | 未实现：macOS RM 在访问驱动前拒绝 |
 | `set-legacy-freq` | Set an absolute clock for legacy (Kepler) GPUs in MHz: --domain core (default) or mem picks which clock the value targets | 未实现：macOS RM 在访问驱动前拒绝 |
@@ -3832,3 +3833,21 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **④ 单测** ✔：`LockedStateReport::stored_window()` 覆盖 有记录 / 默认空；`nvoc-core` lib 234 → **235** 通过；`cargo xtask ci` → `CI_EXIT=0`。
 
 **⑤ 未硬件验证** ✖：测试机自第 84 轮起一直失联（`No route to host`，子网重扫无果），所以这三处改动**只有编译、单测与 CI 绿**，**没有真机读数**。第 85 轮的 `set-gpu-locked-clocks` / `get_gpu_locked_state` 实测一开机就补。
+
+## 二百二十八、`get-gpu-locked-state`：读存下来的窗口，不必先写一次
+
+**① 动机** ✔：此前想看"驱动到底把什么存下来了"，唯一的办法是**写一次**再读写报告的 `twin_records`。而 §二百十三 已经证明 `0x20809014` 的回读是**归一化查询**、不是状态读。现在把状态读做成独立入口。
+
+**② 落地（四层）** ✔：
+| 层 | 内容 |
+| --- | --- |
+| core | `ReadMacosRmLockedState` op + `MacosRmDevice::locked_state()` + `macos_lock::LockedStateReport`（`count_at_4`、`records`、`stored_window()`） |
+| CLI | `get-gpu-locked-state`（无参数，`Group::Clock`），`output::format_locked_state` 按 MHz 打印；空表打印 `no stored window` 而不是什么都不打 |
+| pynvoc | `get_gpu_locked_state(gpu)` 返回 `count_at_4` / `records` / `stored_window_khz` |
+| srv | `GET /api/oc` 的 `locked_window` 由该读填充（此前 macOS 上恒为 `null`） |
+
+**③ 拒绝路径** ✔：其它后端在通用分发处明确拒绝并点出 `0x20809040`；macOS 后端的"支持清单"与不可用提示同步更新，`validate` 允许它**不带任何选项**通过（与必须成对给边界的归一化查询相反）。
+
+**④ 测试** ✔：`format_locked_state` 两条（MHz 渲染含 `6000.984`／空表打印 `no stored window`）；`validate(GetGpuLockedState)` 一条；`nvoc-cli` 106 passed；`cargo xtask ci` → `CI_EXIT=0`。
+
+**⑤ 未硬件验证** ✖：测试机仍未回来（`No route to host`，子网重扫仍是同样 7 台非目标机），本轮改动**只有编译、单测与 CI**。开机后第一批实测：`get-gpu-locked-state` 空表 → 写一次 → 再读（应出现一条记录，`+4` = 48）；以及 `GET /api/oc` 的 `locked_window` 不再为 `null`。
