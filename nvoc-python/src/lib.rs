@@ -3350,10 +3350,44 @@ fn set_gpu_locked_clocks(
             ("applied", Value::from(true)),
             ("windows", locked_windows_value(&report.applied)),
             ("snapshot", locked_windows_value(&report.snapshot)),
+            // True because the write path only returns Ok when the readback
+            // matched the expected window; a mismatch is rolled back and comes
+            // back as an error. The stored-table check below is the separate,
+            // independent one and is allowed to be false.
             ("readback_verified", Value::from(true)),
+            (
+                "storage_matches_applied",
+                report
+                    .storage_matches_applied
+                    .map_or(Value::Null, Value::from),
+            ),
+            ("records", locked_records_value(&report.twin_records)),
         ]))
     })?;
     py_value(py, &value)
+}
+
+/// The records the driver stores for the write, as the CLI publishes them.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn locked_records_value(records: &[nvoc_core::macos_lock::StateRecord]) -> Value {
+    Value::Array(
+        records
+            .iter()
+            .map(|record| {
+                value_object([
+                    ("offset", Value::from(record.offset)),
+                    ("type", Value::from(record.type_word())),
+                    ("count", Value::from(record.count())),
+                    ("min_khz", Value::from(record.min_khz())),
+                    ("max_khz", Value::from(record.max_khz())),
+                    (
+                        "memory_khz",
+                        record.memory_khz().map_or(Value::Null, Value::from),
+                    ),
+                ])
+            })
+            .collect(),
+    )
 }
 
 /// The one shared shape both locked-clock entries publish.
