@@ -119,12 +119,58 @@ fn audited_write(
     detail: String,
     op: impl FnOnce() -> Result<(), String>,
 ) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
+    audited_write_reported(auth_user, action, detail, op, || None)
+}
+
+/// `audited_write` plus one line the caller reads back *after* the write landed.
+///
+/// `report` runs only on success and only for what can still be read at that
+/// point -- a value that was written is not evidence it was stored, so the note
+/// exists to carry an independent read back to the client instead of trusting
+/// the write's own return value.
+fn audited_write_reported(
+    auth_user: &str,
+    action: &str,
+    detail: String,
+    op: impl FnOnce() -> Result<(), String>,
+    report: impl FnOnce() -> Option<String>,
+) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> {
     match op() {
         Ok(()) => {
             audit::record(auth_user, action, &detail);
-            text_response_body(format!("OK: {action} {detail}"))
+            match report() {
+                Some(note) => text_response_body(format!("OK: {action} {detail}\n{note}")),
+                None => text_response_body(format!("OK: {action} {detail}")),
+            }
         }
         Err(e) => text_response_body(format!("ERR: {e}")),
+    }
+}
+
+/// What the driver stores after a locked-clock write, as one line for the client.
+///
+/// `Ok(None)` and `Err` both mean "this backend cannot say", and say so: a
+/// backend that has no stored-state read must not be reported as agreeing with
+/// the write. Only a stored window that equals the request reads as a match.
+fn stored_window_note(
+    stored: Result<Option<(u32, u32)>, String>,
+    min_mhz: u32,
+    max_mhz: u32,
+) -> Option<String> {
+    match stored {
+        Ok(Some((stored_min, stored_max))) if (stored_min, stored_max) == (min_mhz, max_mhz) => {
+            Some(format!(
+                "stored window: {stored_min}..{stored_max} MHz (matches the request)"
+            ))
+        }
+        Ok(Some((stored_min, stored_max))) => Some(format!(
+            "stored window: {stored_min}..{stored_max} MHz (differs from the {}..{} MHz request)",
+            min_mhz, max_mhz
+        )),
+        Ok(None) => Some(
+            "stored window: none readable (this backend cannot report stored state)".to_string(),
+        ),
+        Err(e) => Some(format!("stored window: read failed ({e})")),
     }
 }
 
@@ -420,9 +466,16 @@ fn handle_api(
                 return text_response(request, 503, "backend not ready");
             };
             let detail = format!("gpu {index} {min_mhz}..{max_mhz} MHz");
-            let response = audited_write(auth_user, "oc.locked_clocks", detail, || {
-                backend.write_locked_window(index, min_mhz, max_mhz)
-            });
+            // The write happens first so the read-back below borrows the backend
+            // only after the write's borrow is over; the report runs on success.
+            let write = backend.write_locked_window(index, min_mhz, max_mhz);
+            let response = audited_write_reported(
+                auth_user,
+                "oc.locked_clocks",
+                detail,
+                || write,
+                || stored_window_note(backend.read_locked_window(index), min_mhz, max_mhz),
+            );
             respond(request, response);
         }
         (&tiny_http::Method::Post, "reset") => {
@@ -1142,7 +1195,35 @@ fn locked_window_refusal(min_mhz: u32, max_mhz: u32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{limit_window_refusal, locked_window_refusal, offset_window_refusal};
+    use super::{
+        limit_window_refusal, locked_window_refusal, offset_window_refusal, stored_window_note,
+    };
+
+    #[test]
+    fn a_post_write_note_reports_what_the_driver_stored() {
+        // Match, mismatch and "cannot say" must read differently: a client that
+        // sees only "OK" would take a write's own return value as evidence.
+        let same = stored_window_note(Ok(Some((1620, 1800))), 1620, 1800).expect("note");
+        assert!(same.contains("1620..1800 MHz"), "{same}");
+        assert!(same.contains("matches the request"), "{same}");
+
+        let other = stored_window_note(Ok(Some((1620, 1700))), 1620, 1800).expect("note");
+        assert!(other.contains("differs"), "{other}");
+        assert!(other.contains("1620..1800 MHz request"), "{other}");
+
+        // No readable stored state is said out loud, never reported as a match.
+        let unreadable = stored_window_note(Ok(None), 1620, 1800).expect("note");
+        assert!(
+            unreadable.contains("cannot report stored state"),
+            "{unreadable}"
+        );
+        assert!(!unreadable.contains("matches"), "{unreadable}");
+
+        let failed =
+            stored_window_note(Err("session refused".to_string()), 1620, 1800).expect("note");
+        assert!(failed.contains("read failed"), "{failed}");
+        assert!(failed.contains("session refused"), "{failed}");
+    }
 
     #[test]
     fn a_locked_window_the_request_can_rule_out_is_refused_before_the_driver() {
