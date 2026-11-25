@@ -781,6 +781,16 @@ fn offset_entry_json(
         // found. Printed before the write gate opens, so the target is not
         // invented later.
         "restore_khz": view.restore_khz,
+        // How much the whole span is worth at this clock, so a caller does not
+        // have to know that -18750..18750 kHz is under one percent here.
+        "potential": match (view.window_min_khz, view.window_max_khz) {
+            (Some(min), Some(max)) => serde_json::to_value(nvoc_core::offset_potential(
+                min,
+                max,
+                Some(view.frequency_khz).filter(|khz| *khz > 0),
+            ))?,
+            _ => serde_json::Value::Null,
+        },
         "plan": plan,
     }))
 }
@@ -831,6 +841,15 @@ mod tests {
             entry["plan"].is_null(),
             "no --plan-delta means no plan object"
         );
+        // The span as a share of the live clock: the entry answers "how much is
+        // there to win here" without the caller knowing the window is under one
+        // percent at boost clock.
+        assert_eq!(entry["potential"]["window_max_mhz"], 18.75);
+        let share = entry["potential"]["max_percent"]
+            .as_f64()
+            .expect("a clock was published");
+        assert!((share - 1.19).abs() < 0.01, "{share}");
+        assert!(entry["potential"]["note"].is_string(), "{entry}");
     }
 
     /// No span read: the keys stay null and the reason says why, so a missing

@@ -511,6 +511,47 @@ fn gap_as_null<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok
     }
 }
 
+/// What the whole offset window the driver accepts is worth at the clock the
+/// card is running right now.
+///
+/// This is the answer to "how much is there to win here", which the capability
+/// matrix can only state as a number of kHz otherwise. It is a property of the
+/// driver's own published span and the current clock, nothing measured: the
+/// measured part is [`ClockWindow`] and the promotion question is
+/// [`promotion_gate`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OffsetPotential {
+    pub window_min_mhz: f64,
+    pub window_max_mhz: f64,
+    pub clock_mhz: Option<f64>,
+    /// The full span as a percentage of the current clock, both ends. Absent
+    /// when there is no clock to divide by, never a zero that reads as "nothing".
+    pub min_percent: Option<f64>,
+    pub max_percent: Option<f64>,
+    pub note: &'static str,
+}
+
+pub fn offset_potential(
+    window_min_khz: i32,
+    window_max_khz: i32,
+    clock_khz: Option<u32>,
+) -> OffsetPotential {
+    let clock_mhz = clock_khz.map(|khz| f64::from(khz) / 1000.0);
+    let percent = |khz: i32| {
+        clock_mhz.and_then(|clock| (clock > 0.0).then(|| f64::from(khz) / 1000.0 / clock * 100.0))
+    };
+    OffsetPotential {
+        window_min_mhz: f64::from(window_min_khz) / 1000.0,
+        window_max_mhz: f64::from(window_max_khz) / 1000.0,
+        clock_mhz,
+        min_percent: percent(window_min_khz),
+        max_percent: percent(window_max_khz),
+        note: "this is the span the driver itself accepts, as a share of the current clock; a \
+               larger offset is refused rather than clamped, and the clock moves in discrete \
+               steps, so the realised gain can be one step less than this span suggests",
+    }
+}
+
 /// What one clock step is worth as a percentage, for comparing a measurement's
 /// resolution against the thing it is supposed to resolve.
 pub fn step_percent(clock_mhz: f64, step_mhz: f64) -> Option<f64> {
@@ -1056,6 +1097,22 @@ mod tests {
         let text = serde_json::to_string(fifteen).unwrap();
         assert!(text.contains("\"percent_per_round\":[null,0.68]"), "{text}");
         assert!(!text.contains("NaN"), "{text}");
+    }
+
+    #[test]
+    fn the_whole_window_is_about_one_percent_of_boost_clock() {
+        let potential = offset_potential(-18_750, 18_750, Some(1_935_000));
+        assert_eq!(potential.window_max_mhz, 18.75);
+        assert!((potential.max_percent.expect("clock") - 0.969).abs() < 0.001);
+        assert!((potential.min_percent.expect("clock") + 0.969).abs() < 0.001);
+        assert!(potential.note.contains("refused rather than clamped"));
+    }
+
+    #[test]
+    fn no_clock_means_no_potential_claim() {
+        let potential = offset_potential(-18_750, 18_750, None);
+        assert_eq!(potential.max_percent, None);
+        assert_eq!(potential.clock_mhz, None);
     }
 
     #[test]

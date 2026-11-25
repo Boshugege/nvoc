@@ -65,8 +65,9 @@ pub use macos_eval::{
     ReproducedVerdict, SWEEP_IDLE_NOTE, SWEEP_NOTE, Stats, SweepVerdict, THROUGHPUT_NOTE,
     ThrottleSummary, ThroughputDelta, candidate_outcome, clock_agreement, clock_delta_percent,
     clock_window, cooldown_expired, fps_tail, load_evidence, load_summary, metal_throughput,
-    needs_cooldown, noise_floor, parse_plan_requests, plan_document, promotion_gate, rank_sweep,
-    reproduce_sweeps, resolution_warning, stats, step_percent, throttle_summary, throughput_delta,
+    needs_cooldown, noise_floor, offset_potential, parse_plan_requests, plan_document,
+    promotion_gate, rank_sweep, reproduce_sweeps, resolution_warning, stats, step_percent,
+    throttle_summary, throughput_delta,
 };
 pub use macos_offset::{OffsetBlockRead, OffsetChannelSnapshot};
 pub use macos_rm::{
