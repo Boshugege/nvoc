@@ -3801,3 +3801,22 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **③ 单元测试** ✔：`parse_state_records` 三条（两条记录按序读出、空块/过短块读出零条、内存时钟两个 dword 不一致时不报值）；`nvoc-core` lib 229 → **232** 通过。
 
 **④ 证据** ✔：`outputs/stage-twin-records-20261126T133000Z/`（`twin-records.json`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百二十五、"内容没变的重复写会追加记录"被**实测否定**；旧异常仍未解释
+
+**① 实测** ✔：把与当前生效窗口**完全相同**的写（1620..1800）再发一次，`count_at_4` 由 **192 → 240**（+48），记录数 **4 → 5**。⇒ **重复写照样追加**，不是"只有改变状态才追加"。
+
+**② 仍然没解释的旧样本** ✖：上一轮那个长跑 boot 里 `count_at_4 = 288`（= 6 次写）时，整块 dump 里只有 **2** 条记录。本轮的否定把"重复写不追加"这一候选也排除了，**该样本仍无解释**，继续记为未解释。
+
+**③ 本轮没能做的** ✖：测试机在验证新字段的中途**掉线**（`No route to host`，子网重扫后 10.253.254.0/24 上没有任何一台能 `ssh mac@` 进去），所以 `storage_matches_applied` 与 CLI 的 `twin_records` **还没有硬件读数**——第 83 轮那次硬件验证的是 `twin_records`（解析结果），不是这个新字段。不把"代码与单测通过"冒充"硬件验证过"。
+
+## 二百二十六、产品侧再加一道**独立**校验：`storage_matches_applied`
+
+**① 为什么要有** ✔：`readback_verified` 只说明**驱动对同一请求的答复**和**驱动自己的归一化**一致，这仍然是同一个来源；`twin_records` 是驱动**存下来的表**，把它和应用窗口比对，才是第二个来源。所以做成独立字段，**不折进** `readback_verified`。
+
+**② 落地** ✔：
+- `core/src/macos_lock.rs`：`last_stored_window()`、`storage_matches(applied, records) -> Option<bool>`（`None` = 有一侧空；`Some(false)` = 驱动存的东西和它答复的应用窗口不一致）。
+- `LockedClockWriteReport` 增 `storage_matches_applied`，写路径改为调用该函数（原先内联在 `macos_rm.rs`，只有插着卡才能跑到）。
+- CLI JSON 输出 `storage_matches_applied`；`pynvoc.set_gpu_locked_clocks` 也输出它和 `records`（此前 Python 侧只给固定几个键，看不到驱动存了什么）。
+
+**③ 单测** ✔：`storage_matches` 覆盖 匹配 / 不匹配 / 任一侧为空 三种；`nvoc-core` lib 232 → **234** 通过；`cargo xtask ci` → `CI_EXIT=0`。
