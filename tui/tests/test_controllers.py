@@ -662,13 +662,21 @@ def test_overclock_needs_both_window_ends_to_bound_anything() -> None:
     assert controller.offset_window_error({"core": 500}) is None
 
 
-POWER_WINDOW = {"min_w": 70, "current_w": 100, "default_w": 100, "max_w": 100}
-THERMAL_WINDOW = {"min_c": 65, "current_c": 83, "default_c": 83, "max_c": 87}
+POWER_WINDOW = {
+    "power_limit_min": 70,
+    "power_limit_max": 100,
+    "power_limit_current": 100,
+}
+THERMAL_WINDOW = {
+    "acoustic_target_min_c": 65,
+    "acoustic_target_max_c": 87,
+    "acoustic_target_current_c": 83,
+}
 
 
 def test_overclock_refuses_a_power_limit_outside_the_board_window() -> None:
     app = FakeApp()
-    app.cache.settings["power_window"] = POWER_WINDOW
+    app.cache.settings.update(POWER_WINDOW)
     controller = OverclockController(app)
 
     assert controller.power_window_bounds() == (70, 100)
@@ -685,7 +693,7 @@ def test_overclock_refuses_a_power_limit_outside_the_board_window() -> None:
 
 def test_overclock_refuses_a_thermal_target_outside_the_acoustic_window() -> None:
     app = FakeApp()
-    app.cache.settings["thermal_window"] = THERMAL_WINDOW
+    app.cache.settings.update(THERMAL_WINDOW)
     controller = OverclockController(app)
 
     assert controller.thermal_window_bounds() == (65, 87)
@@ -699,8 +707,8 @@ def test_overclock_refuses_a_thermal_target_outside_the_acoustic_window() -> Non
 
 def test_overclock_names_every_out_of_window_row_at_once() -> None:
     app = FakeApp()
-    app.cache.settings["power_window"] = POWER_WINDOW
-    app.cache.settings["thermal_window"] = THERMAL_WINDOW
+    app.cache.settings.update(POWER_WINDOW)
+    app.cache.settings.update(THERMAL_WINDOW)
     controller = OverclockController(app)
 
     error = controller.limits_window_error(150, 95)
@@ -712,13 +720,31 @@ def test_overclock_names_every_out_of_window_row_at_once() -> None:
 
 def test_overclock_needs_both_policy_window_ends_to_bound_anything() -> None:
     app = FakeApp()
-    app.cache.settings["power_window"] = {"max_w": 100}
-    app.cache.settings["thermal_window"] = {"min_c": 65}
+    # One end only, and an inverted span: neither is a window.
+    app.cache.settings.update({"power_limit_max": 100})
+    app.cache.settings.update({"acoustic_target_min_c": 65})
     controller = OverclockController(app)
 
     assert controller.power_window() is None
     assert controller.thermal_window() is None
     assert controller.limits_window_error(150, 95) is None
+
+
+def test_overclock_rejects_an_inverted_policy_window() -> None:
+    # min > max is malformed, not a window: bounding a slider on it would refuse
+    # every value.
+    app = FakeApp()
+    app.cache.settings.update({
+        "power_limit_min": 120,
+        "power_limit_max": 70,
+        "acoustic_target_min_c": 90,
+        "acoustic_target_max_c": 60,
+    })
+    controller = OverclockController(app)
+
+    assert controller.power_window() is None
+    assert controller.thermal_window() is None
+    assert controller.limits_window_error(100, 83) is None
 
 
 def test_overclock_policy_windows_are_absent_when_unpublished() -> None:

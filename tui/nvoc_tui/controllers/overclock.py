@@ -158,14 +158,6 @@ class OverclockController(PaneController):
         except Exception:
             return False
 
-    def _window_current(self, key: str, field: str) -> int | None:
-        """The driver's own current value from a published policy window."""
-        window = self.app.cache.settings.get(key)
-        if not isinstance(window, dict):
-            return None
-        value = window.get(field)
-        return value if isinstance(value, int) and value > 0 else None
-
     def prime_inputs(self) -> None:
         fields = {
             "#core-offset": str(
@@ -182,15 +174,18 @@ class OverclockController(PaneController):
             # window was published: a slider sitting on its default is a wrong
             # reading of the card, not a neutral one.
             "#power-limit": str(
-                self._window_current("power_window", "current_w")
-                or self.app.cache.settings.get(
+                self.app.cache.settings.get(
                     "power_limit_current",
                     self.app.cache.info.get("power_limit_default", 100),
                 )
             ),
+            # Anchored at the acoustic target the driver reports running now,
+            # not at a factory default the card may not even be using.
             "#thermal-limit": str(
-                self._window_current("thermal_window", "current_c")
-                or self.app.cache.info.get("thermal_limit_default", 83)
+                self.app.cache.settings.get(
+                    "acoustic_target_current_c",
+                    self.app.cache.info.get("thermal_limit_default", 83),
+                )
             ),
             "#voltage-boost": str(
                 self.app.cache.settings.get("voltage_boost_current", 0)
@@ -366,18 +361,25 @@ class OverclockController(PaneController):
     def power_window(self) -> dict | None:
         """The board power window the driver published, or None.
 
-        macOS RM reports it (`power_window`, in watts) from the same policy block
-        `set_power_limit` writes; NVAPI/NVML publish no such record, so the key
-        is absent there and nothing is bounded. One end missing means no window:
+        macOS RM reports the board power policy through pynvoc as
+        `power_limit_min/-max/-current` (whole watts) — the same policy block
+        `set_power_limit` writes. NVAPI/NVML publish no such record, so the keys
+        are absent there and nothing is bounded. One end missing means no window:
         a half-read span would bound the wrong direction.
         """
-        window = self.app.cache.settings.get("power_window")
-        if not isinstance(window, dict):
+        settings = self.app.cache.settings
+        lo = settings.get("power_limit_min")
+        hi = settings.get("power_limit_max")
+        if not isinstance(lo, int) or not isinstance(hi, int):
             return None
-        for key in ("min_w", "max_w"):
-            if not isinstance(window.get(key), int):
-                return None
-        return window
+        if lo > hi:
+            return None
+        current = settings.get("power_limit_current")
+        return {
+            "min_w": lo,
+            "max_w": hi,
+            "current_w": current if isinstance(current, int) else None,
+        }
 
     def power_window_bounds(self) -> tuple[int, int] | None:
         """The published board power span in whole watts, or None."""
@@ -400,16 +402,25 @@ class OverclockController(PaneController):
     def thermal_window(self) -> dict | None:
         """The acoustic target window the driver published, or None.
 
-        This is the block `set_thermal_limit` writes; it is *not* the GPU thermal
-        wall, which this driver does not expose. Both ends or nothing.
+        macOS RM reports the acoustic policy as `acoustic_target_min_c`,
+        `-current_c` and `-max_c` — the block `set_thermal_limit` writes. It is
+        *not* the GPU thermal wall, which this driver does not expose, so the
+        separate `gpu_max_temperature_c` is never mixed in here. Both ends or
+        nothing.
         """
-        window = self.app.cache.settings.get("thermal_window")
-        if not isinstance(window, dict):
+        settings = self.app.cache.settings
+        lo = settings.get("acoustic_target_min_c")
+        hi = settings.get("acoustic_target_max_c")
+        if not isinstance(lo, int) or not isinstance(hi, int):
             return None
-        for key in ("min_c", "max_c"):
-            if not isinstance(window.get(key), int):
-                return None
-        return window
+        if lo > hi:
+            return None
+        current = settings.get("acoustic_target_current_c")
+        return {
+            "min_c": lo,
+            "max_c": hi,
+            "current_c": current if isinstance(current, int) else None,
+        }
 
     def thermal_window_bounds(self) -> tuple[int, int] | None:
         window = self.thermal_window()
