@@ -350,18 +350,24 @@ impl ControlBackend for MacosRmBackend {
         ))
     }
 
-    fn read_power_limit_w(&mut self, _gpu_index: usize) -> Result<Option<(u32, u32, u32)>, String> {
-        // The enforced limit is readable (and is reported through `/api/info`
-        // and pynvoc's settings), but min/max are not, and this slot exists
-        // for *writable* slider bounds. Reporting `(current, current, current)`
-        // would assert a window we cannot honour, so the window stays unknown.
-        Ok(None)
+    fn read_power_limit_w(&mut self, gpu_index: usize) -> Result<Option<(u32, u32, u32)>, String> {
+        // The board power policy publishes its own minimum, default, maximum
+        // and current milliwatts, and that policy is what the write path sets.
+        // So the slider window is the driver's, not one this client invented;
+        // an unread policy reports no window rather than (current, current,
+        // current), which would assert bounds we cannot honour.
+        let settings = self.settings(gpu_index)?;
+        Ok(settings.power_limit_policy.as_ref().map(power_window_w))
     }
 
-    fn read_temp_limit_c(&mut self, _gpu_index: usize) -> Result<Option<(i32, i32, i32)>, String> {
-        // Temperature sensors are readable; the thermal wall is not, and it
-        // is not writable either, so there is no window to report.
-        Ok(None)
+    fn read_temp_limit_c(&mut self, gpu_index: usize) -> Result<Option<(i32, i32, i32)>, String> {
+        // The thermal target on this transport is the acoustic policy, which
+        // publishes its own minimum, default, maximum and current Celsius — and
+        // that policy is exactly what `write_temp_limit_c` sets. The NVML
+        // thermal wall is what this driver does not expose; the acoustic policy
+        // is what it does, so the window is measured rather than assumed.
+        let settings = self.settings(gpu_index)?;
+        Ok(settings.thermal_policy.as_ref().map(acoustic_window_c))
     }
 
     fn write_offset_mhz(
@@ -466,6 +472,27 @@ impl ControlBackend for MacosRmBackend {
         // false `RestoreFailed` failsafe.
         Ok(())
     }
+}
+
+/// The board power policy as the OC slider's (min, current, max) in whole watts.
+///
+/// Milliwatts are the transport's unit; whole watts are the unit the sliders and
+/// `POST /api/oc/power` speak, so the conversion happens once, here.
+fn power_window_w(policy: &nvoc_core::PowerPolicySettings) -> (u32, u32, u32) {
+    (
+        policy.minimum_mw / 1000,
+        policy.current_mw / 1000,
+        policy.maximum_mw / 1000,
+    )
+}
+
+/// The acoustic policy as the thermal slider's (min, current, max) in Celsius.
+fn acoustic_window_c(policy: &nvoc_core::ThermalPolicySettings) -> (i32, i32, i32) {
+    (
+        policy.acoustic.minimum_celsius,
+        policy.acoustic.current_celsius,
+        policy.acoustic.maximum_celsius,
+    )
 }
 
 #[cfg(test)]
@@ -604,8 +631,11 @@ mod tests {
     #[test]
     fn unavailable_reads_report_a_reason_instead_of_a_fake_window() {
         let mut backend = MacosRmBackend { gpus: Vec::new() };
-        assert_eq!(backend.read_power_limit_w(0).unwrap(), None);
-        assert_eq!(backend.read_temp_limit_c(0).unwrap(), None);
+        // Power and thermal now read the driver's own policy blocks, so with no
+        // GPU attached they fail loudly instead of returning a window: a
+        // missing device must not read as "no window published".
+        assert!(backend.read_power_limit_w(0).is_err());
+        assert!(backend.read_temp_limit_c(0).is_err());
         assert_eq!(backend.read_freq_ceiling_mhz(0), None);
         // Still None with no GPU attached: the duty now comes from the driver's
         // own control record, so a missing device must not read as 0 percent.
@@ -618,5 +648,38 @@ mod tests {
         );
         // An out-of-range index is an error, not a silent default.
         assert!(backend.read_temps(0).is_err());
+    }
+
+    #[test]
+    fn the_power_slider_window_comes_from_the_board_policy() {
+        let policy = nvoc_core::PowerPolicySettings {
+            policy_index: 1,
+            current_mw: 100_000,
+            minimum_mw: 70_000,
+            default_mw: 100_000,
+            maximum_mw: 100_000,
+        };
+        assert_eq!(power_window_w(&policy), (70, 100, 100));
+    }
+
+    #[test]
+    fn the_thermal_slider_window_comes_from_the_acoustic_policy() {
+        let policy = nvoc_core::ThermalPolicySettings {
+            gpu_max: nvoc_core::ThermalPolicyEntry {
+                policy_index: 0,
+                minimum_celsius: 75,
+                default_celsius: 83,
+                maximum_celsius: 95,
+                current_celsius: 95,
+            },
+            acoustic: nvoc_core::ThermalPolicyEntry {
+                policy_index: 1,
+                minimum_celsius: 65,
+                default_celsius: 83,
+                maximum_celsius: 87,
+                current_celsius: 83,
+            },
+        };
+        assert_eq!(acoustic_window_c(&policy), (65, 83, 87));
     }
 }
