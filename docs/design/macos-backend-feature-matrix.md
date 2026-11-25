@@ -2757,3 +2757,13 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 两轮 `verified == iterations`、`failures: 0`、`verified_full_buffer: true`；带载时钟均 `1530 MHz`（n=13/16，min=mean=max）；复位后偏移 `0 kHz`、窗口 `1620/1700`、风扇 `auto`/2800、板卡 `100 W`、`ac`。
 
 **③ 读法（不美化）** ✗：粗粒度那格是**噪声**——20 s 只 5 次迭代，末位量化约 ±20%，-0.15% 不能说成"变慢"。细粒度那格量化约 ±2%，实测差 0.0099% ⇒ **这条 -15 MHz 偏移在这个功耗受限窗口里没有可测吞吐效果**。所以本轮补的是"能测"和"测出来是什么"，不是"候选没价值"；要判价值需要一个能放开功耗/锁频的窗口。20 秒窗口不是稳定性认证。证据：`outputs/stage-eval-score-20261125T163024Z/`（11 个文件 + `SHA256SUMS`）。
+
+## 一百六十、Python 侧的 fan 事务闭环：先修"三个写入口各报一半"，再证明过渡期转速不可信
+
+**① 修的真 bug** ✔：`set_fanstop_status` / `set_fan_rpm` / `reset_fan_speed` 在 macOS 上都返回同一个 `FanControlWriteReport`，却各自只发布碎片——stop 藏了 `slot` 与 `applied_target_percent`，rpm 藏了 `original_mode` 与 `other_bytes_preserved`，而 **`reset_fan_speed` 直接返回 `None`**：复位到底验没验过、其它字节保没保住，调用方无从得知。现三者共用一个映射，复位也返回报告；`None` 只留在 NVML 路由（那里本就没有 per-write 报告）。
+
+**② 真机事务** ✔（绑定在本机 `uv sync` + `maturin develop --release` 构建后跑）：`fanstop` 写入 `applied_mode fanstop` / `original_mode auto` / `readback_verified true` → 读回 `fanstop`；`reset_fan_speed` 返回 `applied_mode auto` / `readback_verified true` → 读回 `auto`；带载下 `set_fan_rpm(1500)` → `manual`、`applied_target_percent 53.572`、回读验证；复位报 `original_mode manual` / `original_target_percent 53.572` → 读回 `auto`/0 rpm。macOS 上 `pytest tests/test_validation.py` **57 passed**（含新增的"复位也先做参数校验"用例）。
+
+**③ 过渡期转速不可信（本轮最重要的实测结论）** ✗：从静止起转两次，`set_fan_rpm(1500)` 之后 2 s 分别读到 **2249** 与 **2491**，其中一次第 6 s 又掉到 **670**，之后才稳定在 **1484–1552**（12–13 个样本，目标 1500 ±2%）。即**模式切换后约 10 s 内的 tach 两个方向都不可信**（冲到 1.7 倍、跌到 0.45 倍），只有稳定后的样本有意义。`e5a5d5f` 的 `rpm_is_plausible()` 守卫本轮**未被触发**（早前会话读过 4273 > 2800 才是它的来源），所以那条守卫在真机上仍只有单测覆盖。
+
+**④ 边界** ✗：`rpm` 是开环请求（1500 → 53.572% 占空比写进控制记录，实际转速由固件闭环），±2% 只对这张卡/这个温度窗口成立；`readback_verified` 验的是寄存器回读，不是"风扇真转到了这个转速"；每次带载 ~45 s，不是稳定性认证。证据：`outputs/stage-python-fan-20261125T163721Z/`（7 个文件 + `SHA256SUMS`）。
