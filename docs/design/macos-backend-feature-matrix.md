@@ -2767,3 +2767,15 @@ B 段 11.95–11.98 W 对 A/A2 段 12.87–13.46 W，5/5 样本无重叠，且�
 **③ 过渡期转速不可信（本轮最重要的实测结论）** ✗：从静止起转两次，`set_fan_rpm(1500)` 之后 2 s 分别读到 **2249** 与 **2491**，其中一次第 6 s 又掉到 **670**，之后才稳定在 **1484–1552**（12–13 个样本，目标 1500 ±2%）。即**模式切换后约 10 s 内的 tach 两个方向都不可信**（冲到 1.7 倍、跌到 0.45 倍），只有稳定后的样本有意义。`e5a5d5f` 的 `rpm_is_plausible()` 守卫本轮**未被触发**（早前会话读过 4273 > 2800 才是它的来源），所以那条守卫在真机上仍只有单测覆盖。
 
 **④ 边界** ✗：`rpm` 是开环请求（1500 → 53.572% 占空比写进控制记录，实际转速由固件闭环），±2% 只对这张卡/这个温度窗口成立；`readback_verified` 验的是寄存器回读，不是"风扇真转到了这个转速"；每次带载 ~45 s，不是稳定性认证。证据：`outputs/stage-python-fan-20261125T163721Z/`（7 个文件 + `SHA256SUMS`）。
+
+## 一百六十一、服务侧写面在真机上写成了：HTTP → core 事务 → 驱动回读
+
+**① 之前为什么全拒** ✗：srv 的 macOS 后端把**每个**执行器都 fail-closed，读的是粗粒度开关 `SETTINGS_WRITE_SUPPORTED`——而那个开关回答的是"能不能整体应用/恢复 bulk 设置"，自然还是 `false`。两者混淆导致四个已有事务路由的族全部不可用。现 `supports_writes()` 按**后端自己能做什么**回答 `true`，四族改走与 CLI/pynvoc **同一条** core 操作（新增 `GpuTarget::macos_rm_only`，让持有 `Device` 的长驻消费者不必二次发现）：offset→`SetMacosRmClockOffset`、power→`SetMacosRmPowerLimit`（复位用 `Default`，驱动自己的限值）、fan→`SetMacosRmFanControl`、acoustic→`SetMacosRmAcousticTarget`。参数校验在触设备之前（单测钉住顺序）。
+
+**② 明确关着的** ✗：**频率上限**。窗口可写（`0x2080d041`）但复位孪生 `0x2080c535` 回 `0x40`，没有已验证的清除路由——单向锁会把卡锁死，所以服务不提供，理由写在常量里。
+
+**③ 真机** ✔：`POST /fan?percent=45` → CLI 读回 `manual` / `target_percent 44.9997` → `POST /restore` → CLI 读回 `auto` / 0；第二次 55% → `/status` 报 `fan_written_percent 55`、`fan_measured_percent 55`，CLI 同时读到 `rpm 2304`、`target_percent 55.0003`，恢复后 `/status` 回到 `auto`/0。收尾：风扇 `auto`/2800、板卡 `100 W`、`ac`、偏移 `0`、窗口 `1620/1700`。
+
+**④ 顺手修的读面** ✔：`read_fan` 以前恒 `None`（"RM 只给 rpm"），但占空比其实读得到——cooler0 控制记录的 `target_percent`，正是 `get-fan-info` 打印的那个数；现在进 `/status`，记录没给目标时仍是 unknown 而非 0。`/api/info` 也从 `read_only: true` 改成 `false` + `writable_families` 列表。
+
+**⑤ 边界** ✗：服务写 fan 是开环占空比；本轮只在服务里逐个打透了 fan 一族，另三族走同一段 `run_op` 但**未**用 HTTP 逐个验证（各有 CLI/pynvoc 真机证据）；服务只绑 `127.0.0.1`。证据：`outputs/stage-srv-writes-20261125T164928Z/`（6 个文件 + `SHA256SUMS`）。
