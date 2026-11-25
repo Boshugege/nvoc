@@ -255,7 +255,20 @@ impl ControlBackend for MacosRmBackend {
         let live = self.status(gpu_index).ok();
         if let Some(obj) = value.as_object_mut() {
             obj.insert("backend".to_string(), serde_json::json!("macos-rm"));
-            obj.insert("read_only".to_string(), serde_json::json!(true));
+            // The About page needs to know what it may offer. This backend is
+            // not read-only any more, and it is not fully writable either: list
+            // the families that have verified routes instead of one blanket
+            // boolean that would be wrong in one direction or the other.
+            obj.insert("read_only".to_string(), serde_json::json!(false));
+            obj.insert(
+                "writable_families".to_string(),
+                serde_json::json!([
+                    "clock_offset",
+                    "power_limit",
+                    "fan_percent",
+                    "acoustic_target"
+                ]),
+            );
             if let Some(status) = &live {
                 obj.insert(
                     "power_limit_w".to_string(),

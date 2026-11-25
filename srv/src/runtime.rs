@@ -78,9 +78,10 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Discover the platform backend: the read-only native macOS RM backend on
-/// macOS (no NVAPI/NVML runtime exists there), the NVAPI(+NVML) backend
-/// everywhere else. Both are returned as the same trait object so the whole
+/// Discover the platform backend: the native macOS RM backend on macOS (no
+/// NVAPI/NVML runtime exists there; it reads telemetry and drives the four
+/// families with verified write routes), the NVAPI(+NVML) backend everywhere
+/// else. Both are returned as the same trait object so the whole
 /// loop, watchdog and HTTP plane stay backend-agnostic.
 fn discover_backend() -> Result<Box<dyn ControlBackend>, String> {
     // `cfg!` rather than `#[cfg]` so both branches stay type-checked in every
