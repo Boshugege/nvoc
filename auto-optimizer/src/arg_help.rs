@@ -238,6 +238,33 @@ fn macos_eval_command() -> Command {
                 ),
         )
         .arg(
+            Arg::new("sweep-grid")
+                .long("sweep-grid")
+                .value_name("TARGET=START..STOP:STEP")
+                .num_args(1)
+                .action(clap::ArgAction::Append)
+                .help(
+                    "Expand a grid of additive-offset candidates, e.g. \
+                     graphics=-18750..18750:3750 for eleven points across the span this backend \
+                     validates. A step of zero, a reversed range, START equal to STOP, or more \
+                     than 64 points is refused. Use --sweep-max-per-boot to keep one unknown \
+                     write per boot and --resume-file so the next boot continues",
+                ),
+        )
+        .arg(
+            Arg::new("sweep-max-per-boot")
+                .long("sweep-max-per-boot")
+                .value_name("N")
+                .num_args(1)
+                .value_parser(clap::value_parser!(u32))
+                .default_value("0")
+                .help(
+                    "How many candidates this boot may write (0 = all of them). One is the \
+                     discipline: each candidate is an apply/hold/verify/restore transaction, and \
+                     the rest is reported as pending for the next boot",
+                ),
+        )
+        .arg(
             Arg::new("resume-file")
                 .long("resume-file")
                 .value_name("PATH")

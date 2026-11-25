@@ -88,6 +88,10 @@ pub struct StockEvalOptions {
     /// sweep that crosses a reboot has to be able to start where it stopped
     /// without redoing (and re-writing) the candidates already measured.
     pub resume_file: Option<PathBuf>,
+    /// How many candidates this boot may write. The probe discipline allows one
+    /// unknown write per boot, so a sweep is a sequence of boots, not a loop.
+    /// Zero means "no sweep cap" and is only sensible for a hand-written list.
+    pub sweep_max_per_boot: usize,
 }
 
 fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
@@ -129,7 +133,15 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         .get_many::<String>("apply-candidate")
         .map(|values| values.cloned().collect())
         .unwrap_or_default();
-    let candidates = parse_plan_requests(&candidate_values)?;
+    let mut expanded = candidate_values;
+    for grid in matches
+        .get_many::<String>("sweep-grid")
+        .map(|values| values.cloned().collect::<Vec<_>>())
+        .unwrap_or_default()
+    {
+        expanded.extend(expand_sweep_grid(&grid)?);
+    }
+    let candidates = parse_plan_requests(&expanded)?;
     // Every candidate is a full apply/measure/restore transaction, so the cap
     // is about how many writes one boot should carry, not about the channel.
     if candidates.len() > SWEEP_MAX_CANDIDATES {
@@ -138,6 +150,10 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
              apply/measure/restore transaction and more than that is a scanner's job"
         )));
     }
+    let sweep_max_per_boot = matches
+        .get_one::<u32>("sweep-max-per-boot")
+        .copied()
+        .unwrap_or(0) as usize;
     let resume_file = matches
         .get_one::<String>("resume-file")
         .filter(|path| !path.is_empty())
@@ -187,6 +203,7 @@ fn parse_options(matches: &ArgMatches) -> Result<StockEvalOptions, Error> {
         plan: parse_plan_requests(&plan_values)?,
         candidates,
         resume_file,
+        sweep_max_per_boot,
     })
 }
 
@@ -582,6 +599,66 @@ pub fn resume_skips(entries: &[ResumeEntry], target: &str, delta_khz: i32) -> bo
     })
 }
 
+/// Expand `TARGET=START..STOP:STEP` into one candidate per point, e.g.
+/// `graphics=-18750..18750:3750` -> eleven strings the plan parser accepts.
+///
+/// This only walks the additive-offset span the backend already validates; it
+/// is not a field scanner and it refuses a step of zero, a reversed range, or a
+/// grid longer than the sweep cap can ever finish.
+pub fn expand_sweep_grid(spec: &str) -> Result<Vec<String>, Error> {
+    let Some((target, range)) = spec.split_once('=') else {
+        return Err(error(format!(
+            "--sweep-grid wants TARGET=START..STOP:STEP, got {spec:?}"
+        )));
+    };
+    let Some((bounds, step)) = range.rsplit_once(':') else {
+        return Err(error(format!(
+            "--sweep-grid {spec:?} has no :STEP; refusing to guess a step"
+        )));
+    };
+    let (start, stop) = bounds
+        .split_once("..")
+        .ok_or_else(|| error(format!("--sweep-grid {spec:?} has no START..STOP")))?;
+    let parse = |text: &str, what: &str| -> Result<i64, Error> {
+        text.trim().parse::<i64>().map_err(|_| {
+            error(format!(
+                "--sweep-grid {spec:?}: {what} {text:?} is not an integer"
+            ))
+        })
+    };
+    let start = parse(start, "START")?;
+    let stop = parse(stop, "STOP")?;
+    let step = parse(step, "STEP")?;
+    if step == 0 {
+        return Err(error(format!("--sweep-grid {spec:?}: STEP is zero")));
+    }
+    if start == stop {
+        return Err(error(format!(
+            "--sweep-grid {spec:?}: START equals STOP, which is one hand-written candidate"
+        )));
+    }
+    let direction = if stop > start { 1 } else { -1 };
+    if step < 0 && direction > 0 {
+        return Err(error(format!(
+            "--sweep-grid {spec:?}: STEP moves away from STOP"
+        )));
+    }
+    let points = ((stop - start).abs() / step.abs()) + 1;
+    if points > 64 {
+        return Err(error(format!(
+            "--sweep-grid {spec:?} asks for {points} points; one boot per candidate makes that \
+             a scanner's job, not a sweep"
+        )));
+    }
+    let mut out = Vec::with_capacity(points as usize);
+    let mut value = start;
+    while (direction > 0 && value <= stop) || (direction < 0 && value >= stop) {
+        out.push(format!("{target}={value}khz"));
+        value += step.abs() * direction;
+    }
+    Ok(out)
+}
+
 fn append_resume_entry(path: &PathBuf, entry: &ResumeEntry) -> Result<(), Error> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new()
@@ -637,6 +714,42 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
     let mut round_runs: Vec<Vec<(PlanRequest, CandidateRun)>> = Vec::new();
     let mut round_repeats: Vec<Option<LoadRun>> = Vec::new();
     let mut round_starts: Vec<RoundStart> = Vec::new();
+    // The queue this boot is allowed to touch: everything the ledger has not
+    // already finished, then the per-boot cap. What is left over is reported so
+    // the next boot knows it still has work, instead of being told the sweep is
+    // complete because this boot ran out of budget.
+    let ledger_now = match &opts.resume_file {
+        Some(path) => std::fs::read_to_string(path)
+            .map(|text| parse_resume_ledger(&text))
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let mut pending: Vec<PlanRequest> = opts
+        .candidates
+        .iter()
+        .filter(|request| {
+            !resume_skips(
+                &ledger_now,
+                &target_label(&request.target),
+                request.delta_khz,
+            )
+        })
+        .cloned()
+        .collect();
+    if opts.sweep_max_per_boot > 0 && pending.len() > opts.sweep_max_per_boot {
+        let leftover = pending.len() - opts.sweep_max_per_boot;
+        pending.truncate(opts.sweep_max_per_boot);
+        eprintln!(
+            "macos-eval: this boot writes {} candidate(s), {leftover} still pending -- one unknown \
+             write per boot, so the rest is the next boot's work",
+            pending.len()
+        );
+    }
+    let sweep_queue: Vec<PlanRequest> = if pending.is_empty() {
+        opts.candidates.clone()
+    } else {
+        pending
+    };
     for _round in 0..rounds_wanted {
         let start = wait_for_cool(gpu, &opts)?;
         round_starts.push(start);
@@ -647,7 +760,7 @@ pub fn run_macos_eval(targets: &[GpuTarget<'_>], matches: &ArgMatches) -> Result
                 .unwrap_or_default(),
             None => Vec::new(),
         };
-        for request in &opts.candidates {
+        for request in &sweep_queue {
             let label = target_label(&request.target);
             if resume_skips(&ledger, &label, request.delta_khz) {
                 eprintln!(
@@ -1135,5 +1248,60 @@ mod resume_tests {
         assert!(parse_resume_ledger("").is_empty());
         assert!(parse_resume_ledger("\n  \n").is_empty());
         assert!(!resume_skips(&[], "graphics", 0));
+    }
+}
+
+#[cfg(test)]
+mod sweep_grid_tests {
+    use super::*;
+
+    #[test]
+    fn a_grid_across_the_validated_span_expands_in_order() {
+        let got = expand_sweep_grid("graphics=-18750..18750:3750").unwrap();
+        assert_eq!(got.len(), 11);
+        assert_eq!(got[0], "graphics=-18750khz");
+        assert_eq!(got[5], "graphics=0khz");
+        assert_eq!(got[10], "graphics=18750khz");
+    }
+
+    #[test]
+    fn a_descending_grid_walks_down() {
+        let got = expand_sweep_grid("memory=7500..-7500:3750").unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "memory=7500khz",
+                "memory=3750khz",
+                "memory=0khz",
+                "memory=-3750khz",
+                "memory=-7500khz"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_step_that_moves_away_from_stop_is_refused() {
+        assert!(expand_sweep_grid("graphics=0..1000:-100").is_err());
+    }
+
+    #[test]
+    fn a_zero_step_is_refused_rather_than_guessed() {
+        assert!(expand_sweep_grid("graphics=0..1000:0").is_err());
+    }
+
+    #[test]
+    fn a_single_point_is_a_hand_written_candidate_not_a_grid() {
+        assert!(expand_sweep_grid("graphics=0..0:100").is_err());
+    }
+
+    #[test]
+    fn an_oversized_grid_is_refused() {
+        assert!(expand_sweep_grid("graphics=-18750..18750:1").is_err());
+    }
+
+    #[test]
+    fn a_grid_without_a_step_is_refused() {
+        assert!(expand_sweep_grid("graphics=0..1000").is_err());
+        assert!(expand_sweep_grid("graphics").is_err());
     }
 }
