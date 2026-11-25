@@ -334,6 +334,19 @@ class OverclockTab:
                 volt_bit=2,
             )
         )
+        # The span the macOS RM driver publishes for the frequency plane,
+        # printed under the rows it bounds. Empty on NVAPI/NVML, which publish
+        # no such record — an empty line means "not told", not "no span".
+        self._offset_window_label = tk.Label(
+            page_core,
+            text="",
+            bg=_PANEL_BG,
+            fg=_TEXT_FG_DIM,
+            anchor="w",
+            font=_FONT_BODY,
+        )
+        self._offset_window_label.pack(fill="x", padx=4, pady=(0, 2))
+
         # The ClkDomains slot-1 volt plane (unit toggle) exists from Pascal —
         # page 0's Core/Mem chips start as STATIC "MHz" labels (unit visible,
         # no mV toggling) until _enable_oc_pager turns the toggle on. Hiding
@@ -1506,6 +1519,7 @@ class OverclockTab:
             power_limit_nvml_min_w, power_limit_nvml_max_w, [power_limit_nvml_current_w]
             thermal_limit_min, thermal_limit_max, thermal_limit_default, [thermal_limit_current]
             [voltage_boost_current]
+            [clock_offset_window]  (macOS RM: the span the driver accepts)
         """
         if self._is_resize_active:
             if self._pending_limits is None:
@@ -1513,6 +1527,8 @@ class OverclockTab:
             else:
                 self._pending_limits.update(limits)
             return
+
+        self._absorb_offset_window(limits)
 
         # Store current states of control widgets that may be disabled by check_capabilities
         plimit_entry_state = self._safe_get_state(self.plimit_entry)
@@ -2834,6 +2850,75 @@ class OverclockTab:
             ),
         )
 
+    # ── the driver's offset span (macOS RM) ──────────────────────────────
+    def _absorb_offset_window(self, limits: Dict[str, Any]) -> None:
+        """Keep the span the backend published, or drop a stale one.
+
+        macOS RM publishes the window it will accept. NVAPI/NVML publish no
+        such record, so the key is absent there and the rows stay unbounded:
+        an unseen window is not a window of zero.
+        """
+        window = limits.get("clock_offset_window")
+        self._offset_window = window if isinstance(window, dict) else None
+        try:
+            label = getattr(self, "_offset_window_label", None)
+            if label is not None:
+                label.configure(text=self._offset_window_summary())
+        except Exception:
+            pass
+
+    def _log_oc_message(self, message: str) -> None:
+        """Say something in the console the way every other refusal does."""
+        self.app.console.append(f"[GUI] {message}\n")
+
+    def _offset_window_summary(self) -> str:
+        window = getattr(self, "_offset_window", None)
+        if not isinstance(window, dict):
+            return ""
+        max_khz = window.get("max_khz")
+        if not isinstance(max_khz, int):
+            return ""
+        text = f"driver span ±{abs(max_khz) / 1000.0:g} MHz"
+        potential = window.get("potential")
+        if isinstance(potential, dict):
+            percent = potential.get("max_percent")
+            clock = potential.get("clock_mhz")
+            if isinstance(percent, (int, float)) and isinstance(clock, (int, float)):
+                text += f" (±{abs(percent):.2f} % at {clock:g} MHz)"
+        return text
+
+    def _offset_window_error(self, rows: Dict[str, float]) -> str | None:
+        """Refuse an offset the driver's own span cannot hold, before writing.
+
+        The driver rejects a larger offset rather than clamping it, so sending
+        one spends a write to learn what the window already said. Nothing is
+        applied for any row when one row is over: a half-applied offset set is
+        worse than none.
+        """
+        window = getattr(self, "_offset_window", None)
+        if not isinstance(window, dict):
+            return None
+        max_khz = window.get("max_khz")
+        if not isinstance(max_khz, int):
+            return None
+        max_mhz = abs(max_khz) / 1000.0
+        over = {
+            name: value
+            for name, value in rows.items()
+            if isinstance(value, (int, float)) and abs(value) > max_mhz
+        }
+        if not over:
+            return None
+        named = ", ".join(
+            f"{name} {value:+g} MHz" for name, value in sorted(over.items())
+        )
+        return (
+            f"Offset refused, nothing was written: {named} is outside the span the "
+            f"driver itself accepts ({self._offset_window_summary()}). A larger "
+            "offset is rejected by the driver rather than clamped, and the realised "
+            "gain is quantised to the clock's own step."
+        )
+
     def _apply_core_only(self):
         core_mhz = self.core_var.get().strip()
         if core_mhz == "Curve":
@@ -2849,6 +2934,15 @@ class OverclockTab:
             return
         gpu = self.app.selected_gpu_target()
         pstate = self._oc_pstate()
+
+        # The driver's own span bounds the frequency plane; a value past it is
+        # rejected rather than clamped, so refuse here and write nothing. (The
+        # mV plane is a different storage with its own ±300 mV wall.)
+        if not self._row_volt_mode(self.core_slider):
+            window_error = self._offset_window_error({"core": value})
+            if window_error:
+                self._log_oc_message(window_error)
+                return
 
         if self._row_volt_mode(self.core_slider):
             # mV mode: voltage-plane addend only — there is no public
@@ -2910,6 +3004,12 @@ class OverclockTab:
             return
         gpu = self.app.selected_gpu_target()
         pstate = self._oc_pstate()
+
+        if not self._row_volt_mode(self.mem_slider):
+            window_error = self._offset_window_error({"mem": value})
+            if window_error:
+                self._log_oc_message(window_error)
+                return
 
         if self._row_volt_mode(self.mem_slider):
             # mV mode: voltage-plane addend only (bit2 = WRITE memory M) —

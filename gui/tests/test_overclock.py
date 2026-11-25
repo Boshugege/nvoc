@@ -722,6 +722,81 @@ def test_vfp_state_does_not_replace_core_offset_display() -> None:
     assert tab.core_var.get() == "125"
 
 
+WINDOW = {
+    "min_khz": -18_750,
+    "max_khz": 18_750,
+    "records": 3,
+    "potential": {"clock_mhz": 1530.0, "max_percent": 1.2254},
+}
+
+
+def test_core_apply_is_refused_past_the_driver_span() -> None:
+    """macOS RM rejects a larger offset instead of clamping it, so a value past
+    the published span must not reach the driver at all."""
+    tab, app = make_tab()
+    tab._absorb_offset_window({"clock_offset_window": WINDOW})
+    tab.core_var.set("40")
+
+    tab._apply_core_only()
+
+    assert app.actions == [], "nothing may be written when the value is out of span"
+    assert app.native.calls == []
+    (message,) = app.console.messages
+    assert "core +40 MHz" in message
+    assert "±18.75 MHz" in message
+    assert "±1.23 % at 1530 MHz" in message
+    assert "nothing was written" in message
+
+
+def test_mem_apply_is_refused_past_the_driver_span() -> None:
+    tab, app = make_tab()
+    tab._absorb_offset_window({"clock_offset_window": WINDOW})
+    tab.mem_var.set("100")
+
+    tab._apply_mem_only()
+
+    assert app.actions == []
+    assert app.native.calls == []
+    assert "mem +100 MHz" in app.console.messages[0]
+
+
+def test_apply_inside_the_driver_span_still_writes() -> None:
+    tab, app = make_tab()
+    tab._absorb_offset_window({"clock_offset_window": WINDOW})
+    tab.core_var.set("18")
+
+    tab._apply_core_only()
+
+    assert app.actions == ["apply core offset"]
+    assert app.native.calls == [("set_clock_offset", "GPU0", "nvapi", "core", 18, "P0")]
+
+
+def test_no_published_window_leaves_the_rows_unbounded() -> None:
+    """NVAPI/NVML publish no span; absence is not a span of zero."""
+    tab, app = make_tab()
+    tab._absorb_offset_window({"power_limit_current": 100})
+    tab.core_var.set("500")
+
+    assert tab._offset_window_summary() == ""
+    assert tab._offset_window_error({"core": 500}) is None
+
+    tab._apply_core_only()
+
+    assert app.actions == ["apply core offset"]
+
+
+def test_a_window_that_disappears_stops_bounding_the_rows() -> None:
+    """Switching to a card/transport that publishes no span must drop the old
+    one, or the previous card's bounds would refuse this card's writes."""
+    tab, _app = make_tab()
+    tab._absorb_offset_window({"clock_offset_window": WINDOW})
+    assert tab._offset_window_error({"core": 40}) is not None
+
+    tab._absorb_offset_window({})
+
+    assert tab._offset_window_error({"core": 40}) is None
+
+
 def test_core_apply_still_runs_while_vfp_offset_exists() -> None:
     tab, app = make_tab()
     tab.set_vfp_state(True, None)
