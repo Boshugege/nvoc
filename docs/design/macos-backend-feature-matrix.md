@@ -3294,3 +3294,17 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **⑥ 保护项复核** ✔：风扇 `auto`/`max_rpm 2800`、板卡 100 W（窗口 70–100）、电源 `ac`、偏移 `Restore kHz: 0`、`nvoc-srv` 进程 0。
 
 **⑦ 测试** ✔：`cargo test -p nvoc-srv --lib` **69 passed**；`cargo xtask ci` = `CI_EXIT=0`。
+
+## 一百九十二、服务的"手动钉住"升级为三种形态，以及"配置面 200 ≠ 设备已写"这条分界
+
+**① 选择依据** ✔：`/fan` 只能说百分比，而 core 事务与 CLI 早就能要 **rpm 目标**（经 cooler 自报刻度换算）与**固件零转**（fanstop，mode 2）。同样是阶段 11 第 5 项那一类缺口：后端能做、入口做不出。
+
+**② 形态与拒绝** ✔：`manual_fan = percent | rpm | stop`（`manual_rpm` 配 `rpm`）。后端表达不了这个面时**默认实现直接拒绝并点名缺的那一层**（`an rpm target needs a cooler scale` / `the firmware stop mode is not exposed`），**不回落**到 `manual_percent`；配置校验拒绝 `manual_fan = rpm` 且 `manual_rpm = 0`。钉住形态与"上次钉了什么"单独记账（`last_fan_pin`），因为 PID 与频率两条路说的一直是百分比；形态不变则一拍只写一次。
+
+**③ 真机四步** ✔（`outputs/stage-fan-forms-20261125T215920Z/`，3 份哈希全 OK）：`/fan?rpm=1400` ⇒ `mode manual`、`target_percent 50.0`（1400/2800，换算自 cooler 自报刻度）、反馈 48.39 %/1355 rpm；`/fan?mode=stop` ⇒ `mode fanstop`、`target 0.0`、反馈 0 %/0 rpm；`/fan?rpm=6000` ⇒ 设备侧被**拒绝且风扇保持 auto**（`last_error` 原文点名 `0 .. 2800 rpm`），**没有夹到 100 %**；`/fan?percent=10&rpm=1400` ⇒ 400 `give one of 'percent', 'rpm' or 'mode=stop'`。每步之后 `/restore` 交回驱动，终态与起始一致。
+
+**④ 必须写清的分界** ✔：`/fan` 是**配置面**——HTTP 200 的含义是"形态被记下"，设备写由控制循环下一拍完成，所以第 3 步出现"200 但设备没写"不是谎言：拒绝在控制状态 `last_error` 里，风扇保持 auto。百分比那条路一直就是这个语义，本轮没有改变。
+
+**⑤ 测试** ✔：`cargo test -p nvoc-srv --lib` **73 passed**（新增 4 条：rpm 目标按 rpm 而非百分比下发、stop 是独立钉、无面后端被点名而非被给百分比、`rpm=0` 配置被拒）；`cargo xtask ci` = `CI_EXIT=0`（期间修掉 clippy `type_complexity` 与 `field_reassign_with_default` 两处，做法是把"取形态再执行"改成直接 match，而不是 `Box<dyn FnOnce>`）。
+
+**⑥ 保护项复核** ✔：风扇 `auto`/`max_rpm 2800`、板卡 100 W（窗口 70–100）、电源 `ac`、偏移 `Restore kHz: 0`、`nvoc-srv` 进程 0。
