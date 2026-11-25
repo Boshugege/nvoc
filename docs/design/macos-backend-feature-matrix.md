@@ -3087,3 +3087,23 @@ refusal_after_window_dropped  : null
 **⑤ 未做（不美化）** ✗："Apply all"（`_apply_oc`）与 fabric 行还没接这条界；GUI 探针需要 uv 的 nvoc-gui 环境（tkinter/customtkinter 只在那个环境）。
 
 **⑥ 证据** ✔：`outputs/stage-gui-offsetwindow-20261125T204127Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
+
+## 一百八十一、整页应用与 fabric 行也不再半 apply
+
+**① 上一轮漏掉的路** ✔：上一轮接的是 Core/Mem **单行**入口，但 Apply Section 走的是 `_apply_oc`，它自己拼 `actions` 链——整页应用仍可能把一行超界的值送进驱动。本轮把当页每个**频率面**行收集进 `frequency_rows`，在 `run_native_action_chain` **之前**检查：一行超界 ⇒ 整页零写入并点名越界行。fabric 四个单行入口（xbar/sys/msd/host）同步接上。
+
+**② 真机输出** ✔（真实 settings 喂真实 `OverclockTab`，`run_native_action_chain` 换成记录器，**无写入**）：
+
+```
+apply_all_40mhz              : chains [] ; "… nothing was written: core +40 MHz, mem +600 MHz is outside the span …"
+apply_all_18mhz              : [["apply core offset", "apply memory offset"]]
+apply_all_without_a_window   : [["apply core offset", "apply memory offset"]]
+```
+
+三条各自钉住一件事：超界整页零写入；界内照常成链；**没有窗口时不设界**（NVAPI/NVML，"没被告知"≠"跨度为 0"）。
+
+**③ 边界** ✔：仍只覆盖频率面（MHz），电压面（mV）另有一套墙；上界来自驱动自报窗口而非测量；本轮探针不写硬件，所以没有写后回读项。
+
+**④ 测试** ✔：`gui/tests/test_overclock.py` 新增四条；`pytest -q gui/tests/` **303 passed / 13 skipped**；`cargo xtask ci` = `CI_EXIT=0`。
+
+**⑤ 证据** ✔：`outputs/stage-gui-applyallwindow-20261125T204356Z/`（3 文件 + `SHA256SUMS` 全 OK）；收尾风扇 auto、板卡 100 W（70–100）、电源 ac、偏移 0 kHz。
