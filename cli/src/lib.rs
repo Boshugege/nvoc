@@ -154,6 +154,7 @@ pub enum Command {
     List,
     GetGpuList,
     GetGpuLockedClocks,
+    GetGpuLockedState,
     GetDisplayList,
     GetInfo,
     GetUuid,
@@ -570,6 +571,15 @@ fn command_specs() -> &'static [(Command, CommandSpec)] {
                     options: Box::leak(Box::new(["domain", "pstate", "min-mhz", "max-mhz"])),
                     formatter: Some(output::format_locked_clocks),
                     ..CommandSpec::new("get-gpu-locked-clocks", Group::Clock, "Read the locked min/max window the macOS RM driver answers for one domain and vPstate; needs both bounds because the driver validates the pair (macOS RM only)")
+                },
+            ),
+            (
+                Command::GetGpuLockedState,
+                CommandSpec {
+                    adapters: &NVML_ONLY,
+                    arity: (0, 0),
+                    formatter: Some(output::format_locked_state),
+                    ..CommandSpec::new("get-gpu-locked-state", Group::Clock, "Read the locked-clock table the macOS RM driver stores (0x20809040): the windows it was given, newest last, plus the dword at +4; no request to normalise and nothing written (macOS RM only)")
                 },
             ),
             (
@@ -3080,6 +3090,10 @@ fn execute_target(
         Command::SetGpuLockedClocks => Err(CliError::new(
             "set-gpu-locked-clocks is unavailable on this backend: it writes the macOS RM \
              locked min/max window (0x2080d041)",
+        )),
+        Command::GetGpuLockedState => Err(CliError::new(
+            "get-gpu-locked-state is unavailable on this backend: it reads the macOS RM \
+             locked-clock table (0x20809040)",
         )),
         Command::GetPStateLock => {
             // Native NVAPI P-State level table (the ref tool `-pstate` GET listing).
@@ -8779,6 +8793,7 @@ mod tests {
             | Command::GetPstateFreqRange
             | Command::GetClockDomain
             | Command::GetGpuLockedClocks
+            | Command::GetGpuLockedState
             | Command::SetGpuLockedClocks
             | Command::GetPstates20Private
             | Command::GetSupportedLegacyApplicationFreq

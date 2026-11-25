@@ -283,6 +283,45 @@ pub(super) fn format_pstate_freq_range(output: &Value) -> Vec<String> {
 /// Human renderer for `get-clock-domain` — the enumeration mask plus one row
 /// per reported bit. A refused bit prints its RM status in the kHz column
 /// instead of a blank, so "the driver said no" never looks like zero.
+/// Human renderer for `get-gpu-locked-state`: the windows the driver stores.
+///
+/// Empty is a real answer (a fresh boot stores nothing), so it is printed as
+/// such instead of as a missing table.
+pub(super) fn format_locked_state(output: &Value) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(count) = output.get("count_at_4").and_then(Value::as_u64) {
+        lines.push(format!("count at +4: {count}"));
+    }
+    let records: &[Value] = output
+        .get("records")
+        .and_then(Value::as_array)
+        .map_or(&[], Vec::as_slice);
+    if records.is_empty() {
+        lines.push("no stored window".to_string());
+        return lines;
+    }
+    lines.push(format!(
+        "{:>6} {:>10} {:>10} {:>10}",
+        "offset", "min MHz", "max MHz", "mem MHz"
+    ));
+    for record in records {
+        let khz = |key: &str| {
+            record.get(key).and_then(Value::as_u64).map_or_else(
+                || "-".to_string(),
+                |khz| format!("{:.3}", khz as f64 / 1000.0),
+            )
+        };
+        lines.push(format!(
+            "{:>6} {:>10} {:>10} {:>10}",
+            record.get("offset").and_then(Value::as_u64).unwrap_or(0),
+            khz("min_khz"),
+            khz("max_khz"),
+            khz("memory_khz"),
+        ));
+    }
+    lines
+}
+
 pub(super) fn format_clock_domain(output: &Value) -> Vec<String> {
     let mask = output
         .get("mask")
@@ -3705,6 +3744,30 @@ mod tests {
     use super::*;
     use crate::{Command, TargetResult, all_commands};
     use serde_json::json;
+
+    #[test]
+    fn a_stored_locked_window_is_rendered_in_mhz() {
+        let lines = format_locked_state(&json!({
+            "count_at_4": 48,
+            "records": [
+                {"offset": 16, "min_khz": 1_620_000u64, "max_khz": 1_800_000u64, "memory_khz": 6_000_984u64},
+            ],
+        }));
+        assert_eq!(lines[0], "count at +4: 48");
+        assert!(lines[1].contains("min MHz"), "{lines:?}");
+        assert!(lines[2].contains("1620.000"), "{lines:?}");
+        assert!(lines[2].contains("1800.000"), "{lines:?}");
+        assert!(lines[2].contains("6000.984"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_empty_stored_table_says_so_instead_of_printing_nothing() {
+        let lines = format_locked_state(&json!({"count_at_4": 0, "records": []}));
+        assert_eq!(
+            lines,
+            vec!["count at +4: 0".to_string(), "no stored window".to_string()]
+        );
+    }
 
     #[test]
     fn macos_get_settings_renders_the_per_domain_offsets() {

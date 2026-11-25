@@ -91,6 +91,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
             // The locked-clock pair is one private control in both directions;
             // the window itself is validated before discovery.
             | Command::GetGpuLockedClocks
+            | Command::GetGpuLockedState
             | Command::SetGpuLockedClocks
             | Command::GetPowerSource
             | Command::SetPowerSource
@@ -116,7 +117,7 @@ pub(super) fn validate(command: Command) -> CliResult<()> {
         )))
     } else {
         Err(CliError::new(format!(
-            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, set-fanstop-status on|off, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source, get-clock-domain, get-gpu-locked-clocks --min-mhz N --max-mhz N, set-gpu-locked-clocks --min-mhz N --max-mhz N. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
+            "{} is unavailable on macOS RM; supported commands: get-gpu-list, get-info, get-status, get-settings, get-throttle-reasons, get-pstate-global-freq-offset, set-pstate-global-freq-offset (core/memory), reset-pstate-global-freq-offset --domain core|memory, set-power-limit, reset-power-limit, get-temp-thresholds, set-temp-limit, reset-temp-limit, set-fan-speed (percent/manual), reset-fan-speed, set-fanstop-status on|off, get-fan-info, get-public-power-limit, get-legacy-temp-sensor, get-rated-tdp, set-rated-tdp CLIENT:ACTION, reset-rated-tdp CLIENT, get-power-source, set-power-source ac|battery, reset-power-source, get-clock-domain, get-gpu-locked-clocks --min-mhz N --max-mhz N, get-gpu-locked-state, set-gpu-locked-clocks --min-mhz N --max-mhz N. {}. Root is required for the validated clock SET 0x2080D01C; unprivileged callers receive 0x1b.",
             command.name(),
             nvoc_core::MACOS_RM_WRITE_GATE_REASON
         )))
@@ -194,6 +195,23 @@ pub(super) fn execute(invocation: &Invocation, command: Command) -> CliResult<Ex
                     let windows = run(&target, nvoc_core::QueryMacosRmLockedClocks { request })?.output;
                     json!({"applied": false, "backend": "macos-rm", "mode": "locked-clocks",
                         "windows": locked_windows_json(&windows)})
+                }
+                Command::GetGpuLockedState => {
+                    let report = run(&target, nvoc_core::ReadMacosRmLockedState)?.output;
+                    // The table this backend stores, read without a request to
+                    // normalise. A fresh boot answers an empty table, which is a
+                    // reading, not a refusal.
+                    json!({"backend": "macos-rm", "mode": "locked-state",
+                        "count_at_4": report.count_at_4,
+                        "stored_window_khz": report.stored_window().map(|(min, max)| json!({"min_khz": min, "max_khz": max})),
+                        "records": report.records.iter().map(|record| json!({
+                            "offset": record.offset,
+                            "type": record.type_word(),
+                            "count": record.count(),
+                            "min_khz": record.min_khz(),
+                            "max_khz": record.max_khz(),
+                            "memory_khz": record.memory_khz(),
+                        })).collect::<Vec<_>>()})
                 }
                 Command::SetGpuLockedClocks => {
                     let request = lock_write
@@ -1286,6 +1304,9 @@ mod tests {
     #[test]
     fn the_locked_clock_entries_are_allowed_and_parse_their_window() {
         assert!(validate(Command::GetGpuLockedClocks).is_ok());
+        // The stored-table read needs no window, so it validates with no options
+        // at all -- unlike the normalisation query above, which needs both bounds.
+        assert!(validate(Command::GetGpuLockedState).is_ok());
         assert!(validate(Command::SetGpuLockedClocks).is_ok());
         for command in [Command::GetGpuLockedClocks, Command::SetGpuLockedClocks] {
             assert!(matches!(command.spec().adapters, [BackendAdapter::Nvml]));
