@@ -3783,3 +3783,21 @@ No such file or directory (os error 2)
 **④ 剩下未知的** ✖：记录区为什么是两条、代表"最近两次"还是"某个域对"的当前值，尚未判定。
 
 **⑤ 证据** ✔：`outputs/stage-lock-table-counter-20261126T130000Z/`（重启后的只读 dump、两次写后的 dump、两次写的 JSON、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
+
+## 二百二十四、产品侧开始**解析**这张表：`twin_records` 上线，并在真机上验过
+
+**① 改了什么** ✔：`core/src/macos_lock.rs` 新增 `StateRecord` / `parse_state_records`（48 字节一条、起点 `+16`、遇到 type 为 0 的槽就停），`LockedClockWriteReport` 增 `twin_records`，CLI 的 JSON 在 `twin_block_head` 旁边输出 `twin_records`（`offset`、`type`、`count`、`min_khz`、`max_khz`、`memory_khz`、原始 `words`）。**它挨着 readback 放，不替代 readback**：`twin_records` 是驱动**存下来的表**，`readback_verified` 是驱动对请求的归一化，两者不是一回事。
+
+**② 真机验证（第 3、4 次写，产品路径）** ✔：
+```
+applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
+@16  type 0x1000002 count 1 min 1800000 max 1800000 mem 6000984
+@64  type 0x1000002 count 1 min 1750000 max 1750000 mem 6000984
+@112 type 0x1000002 count 1 min 1800000 max 1800000 mem 6000984
+（第 4 次写后多出 @160，`count_at_4` 相应 +48）
+```
+⇒ 记录区**随写增长**（本 boot 三次写 → 三条记录）。但仍有一条未解释：上一轮那个长跑 boot 里 `+4` 读到 288（= 6 次写）时只看到 **2** 条记录——**哪些写会追加、哪些不会，尚未确立**。
+
+**③ 单元测试** ✔：`parse_state_records` 三条（两条记录按序读出、空块/过短块读出零条、内存时钟两个 dword 不一致时不报值）；`nvoc-core` lib 229 → **232** 通过。
+
+**④ 证据** ✔：`outputs/stage-twin-records-20261126T133000Z/`（`twin-records.json`、`README.md`、`SHA256SUMS`；`shasum -c` OK）。
