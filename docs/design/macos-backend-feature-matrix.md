@@ -3218,3 +3218,17 @@ acoustic_target_min 65 / current 83 / default 83 / max 87
 **④ 诚实边界** ✔：这是**写前拒绝**，窗口数值全来自驱动已公布的两块策略，本轮**没有写任何东西**。`acoustic_target_*` 是**降噪温度目标**窗口，不是 GPU 温度墙（`gpu_max_temperature_c` 88 是独立条目，未混入）。真机探针跑在**控制器层**（真实 `query_settings` 输出喂进 `OverclockController`），不是在 macOS 上点过 TUI 按钮；Textual 绑定由 Linux 上单测覆盖。功耗 70–100 W 的上界就是 100 W 板卡上限锁死的数。
 
 **⑤ 测试** ✔：`pytest -q tui/tests/` **240 passed**（+7）；`cargo test -p pynvoc --no-default-features` **22 passed**；`cargo xtask ci` = `CI_EXIT=0`。
+
+## 一百八十七、GUI 的功耗/温度行：一个真 bug 与一对窗口
+
+**① 两个 bug（都能在哪台机器上复现都是 bug）** ✗→✔：
+- `Power & Thermal Limits` 的 API 下拉硬写 `["NVAPI","NVML"]`，而 `_selected_power_backend()` 把不认识的选项映射到 `"nvapi"`。macOS 上于是：滑条标 **%**、驱动公布 **W**、写入指向不存在的通道。
+- 温度行**从来没被锚定**：macOS 发布 `acoustic_target_min/-max/-current_c`，GUI 只认 `thermal_limit_*`，滑条一直停在构造值 60..95/83。
+
+**② 改法** ✔：下拉用 `api_labels()`（macOS 只有 `RM`），后端字符串 `macos-rm`；平面由传输决定而不是"哪个键在不在"（NVAPI 同名键是百分比，macOS 是瓦特——用键是否存在来定单位，正是 100 W 卡给出 100 % 滑条的来路）；平面到达后**记住**（一次不带策略块的刷新对窗口什么都没说）；`_apply_limits` 与两条单行 apply 都在写前拒绝，只点名与越界行有关的窗口；`gpu_max_temperature_c`（88）被显式排除在 acoustic 平面之外。
+
+**③ 真机数据** ✔（`outputs/stage-gui-limitwindows-20261125T210955Z/`）：`selector labels ['RM']`、`power plane ('W',70,100,100)`、`thermal plane (65,87,83)`、`selected power backend macos-rm`；(120,83)/(100,95)/(120,95) 各自点名正确行与窗口，(100,83)/(70,65) 放行。
+
+**④ 诚实边界** ✔：**GUI 没有在 macOS 上点过**——tkinter 需要窗口服务器，测试机是 headless SSH 会话。本轮真机证据是"真实 `query_settings` 输出喂进真实 GUI 代码（纯函数 + 未挂窗口的 tab 方法）"，**不是**"在 Aqua 里点了按钮"。探针没有写任何东西。
+
+**⑤ 测试** ✔：`pytest -q gui/tests/` **320 passed / 13 skipped**（+11）；`pytest -q tui/tests/` **240 passed**；`cargo xtask ci` = `CI_EXIT=0`。
