@@ -3176,3 +3176,24 @@ CLI 读         → Offset MHz: 0.0 / Restore kHz: 0
 **⑤ 测试** ✔：`cargo test -p nvoc-cli --lib macos_rm` **29 passed**（+3）；`cargo xtask ci` = `CI_EXIT=0`。
 
 **⑥ 证据** ✔：`outputs/stage-cli-windowgate-20261125T205449Z/`（4 文件 + `SHA256SUMS` 全 OK）；收尾偏移 0 kHz、风扇 auto/2800 rpm、板卡 100 W（70–100）、电源 ac、srv 进程 0。
+
+## 一百八十五、服务面的 power / temp 窗口：从"读不到"改成读驱动自己的策略块
+
+**① 缺口** ✔：`/api/oc` 的 `power`、`temp` 一直为 `null`，两个读取器的注释都写着"min/max 读不到"。这条结论在板卡功耗策略块与 acoustic 策略块验证之后**已经不成立**——两块都公布 `minimum / default / maximum / current`，而且**正是写入口所设的两块**。
+
+**② 改法** ✔：`read_power_limit_w` 读 `settings.power_limit_policy`（mW→W），`read_temp_limit_c` 读 `settings.thermal_policy.acoustic`；映射抽成纯函数 `power_window_w` / `acoustic_window_c` 各一条单测。读不到的策略仍报 `None`（不编窗口），**没有设备则报错**——原单测因此从 `unwrap() == None` 改为 `is_err()`：缺少设备不该伪装成"这块后端什么都不公布"。
+
+**③ 真机一致** ✔（`outputs/stage-srv-policywindows-20261125T205906Z/`）：
+
+```
+CLI get-public-power-limit → Max 100.0 W, Current 100.0 W, Default 100.0 W, Min 70.0 W
+CLI get-temp-thresholds    → AcousticMin 65 C, AcousticCurr 83 C, AcousticMax 87 C
+GET /api/oc?gpu=0          → "power":{"current_w":100,"max_w":100,"min_w":70}
+                             "temp":{"current_c":83,"max_c":87,"min_c":65}
+```
+
+两边逐项相同：不是各算一遍，而是同一次 `QueryMacosRmSettings` 里的同一块。
+
+**④ 诚实边界** ✔：这是**读**的修正，写入口不变（功耗 70–100 W、acoustic 65–87 ℃ 的写入早前已验证）。`max_w = 100` 就是这张卡被 100 W 板卡上限锁死的那个数，**不是**"能放开到更高"的许可。acoustic 65–87 ℃ 是**降噪温度目标**窗口，不是 GPU 温度墙（Shutdown/Slowdown 在本驱动读不到，仍为 null）。
+
+**⑤ 测试** ✔：`cargo test -p nvoc-srv --lib macos` **10 passed**（+2 映射，1 改）；`cargo xtask ci` = `CI_EXIT=0`。
