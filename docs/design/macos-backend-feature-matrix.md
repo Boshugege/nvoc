@@ -4049,3 +4049,17 @@ applied: graphics vP8 1620000-1800000 kHz      count_at_4: 144
 **⑤ 边界** ✖：**这个检查还没跑在真数据上**——它只是把人的判断写成了程序。真机第一次跑 `get-gpu-locked-state` 时，`anomaly` 应为 `null`；若不为 null，那就是本次适配的新发现。
 
 **⑥ 未硬件验证** ✖：测试机第 14 轮失联。
+
+## 二百四十、服务把"表不自洽"的原话一起发：`locked_history.anomaly`
+
+**① 缺口是我上一轮自己造的** ✗：§二百三十九 只把 `anomaly` 加在 CLI 上，`GET /api/oc` 仍然只发 `count_at_4` 与 `windows`。于是**同一个后端，命令行能看见"表不自洽"，服务客户端看不见**——客户端只能看到几行记录，无从判断"是表短了，还是计数器跑在前面"。
+
+**② 改动** ✔：`controller::LockedHistory` 增 `anomaly: Option<String>`；`srv/src/macos.rs` 的投影从 `report.table_anomaly()` 填；`/api/oc` 的 `locked_history` JSON 里多一个 `"anomaly"`（自洽时为 `null`）。
+
+**③ 语义** ✔：`null` = **自洽**，也包含**这个传输不检查**（例如别的后端不实现这段）。两者合成 `null` 是刻意的：客户端不该把"没人检查"读成"检查通过"，所以文档和字段注释都写明"null 表示无可报告"，而真正的判断依据是**行与计数器本身**——客户端能算，`anomaly` 只是替它先算好。
+
+**④ 测试** ✔：`a_table_that_disagrees_with_its_counter_reaches_the_client`（288 对 2 条 → 原话透出；96 对 2 条 → `null`）+ `locked_history_json` 的三处断言（自洽 `null`、无计数、不自洽时行与原话同时发出）。`nvoc-srv` lib **81 → 82 passed**；`cargo xtask ci` → `CI_EXIT=0`。
+
+**⑤ 边界** ✖：仍无真机。真机第一次 GET 时 `anomaly` 应为 `null`；不为 `null` 就是新发现。
+
+**⑥ 未硬件验证** ✖：测试机第 15 轮失联。
