@@ -264,6 +264,7 @@ fn locked_history(
             .iter()
             .map(|record| (record.min_khz() / 1000, record.max_khz() / 1000))
             .collect(),
+        anomaly: report.table_anomaly(),
     })
 }
 
@@ -755,6 +756,44 @@ mod tests {
         let history = locked_history(&report).expect("history");
         assert_eq!(history.count_at_4, Some(96));
         assert_eq!(history.windows, vec![(1700, 1700), (1620, 1800)]);
+    }
+
+    #[test]
+    fn a_table_that_disagrees_with_its_counter_reaches_the_client() {
+        // The service publishes the rows and the complaint: a client that saw
+        // only rows could not tell a short table from a counter that ran ahead.
+        let record = |offset: usize| nvoc_core::macos_lock::StateRecord {
+            offset,
+            words: [
+                0x0100_0002,
+                1,
+                1_620_000,
+                1_800_000,
+                0,
+                0,
+                16,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ],
+        };
+        let report = nvoc_core::macos_lock::LockedStateReport {
+            count_at_4: Some(288),
+            records: vec![record(16), record(64)],
+        };
+        let history = locked_history(&report).expect("history");
+        assert_eq!(history.windows.len(), 2);
+        let anomaly = history.anomaly.expect("anomaly");
+        assert!(anomaly.contains("288"), "{anomaly}");
+        assert!(anomaly.contains("6 writes"), "{anomaly}");
+
+        let agreeing = nvoc_core::macos_lock::LockedStateReport {
+            count_at_4: Some(96),
+            records: vec![record(16), record(64)],
+        };
+        assert_eq!(locked_history(&agreeing).expect("history").anomaly, None);
     }
 
     #[test]

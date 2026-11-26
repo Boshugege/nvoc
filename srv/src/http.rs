@@ -176,6 +176,8 @@ fn locked_history_json(history: Option<&crate::controller::LockedHistory>) -> se
     };
     serde_json::json!({
         "count_at_4": history.count_at_4,
+        // Null when the table and its counter agree; see LockedHistory::anomaly.
+        "anomaly": history.anomaly,
         "windows": history
             .windows
             .iter()
@@ -1254,6 +1256,7 @@ mod tests {
         let history = LockedHistory {
             count_at_4: Some(96),
             windows: vec![(1_700, 1_700), (1_620, 1_800)],
+            anomaly: None,
         };
         assert_eq!(
             locked_window_from_history(Some(&history)),
@@ -1265,6 +1268,7 @@ mod tests {
             locked_window_from_history(Some(&LockedHistory {
                 count_at_4: Some(0),
                 windows: Vec::new(),
+                anomaly: None,
             })),
             None
         );
@@ -1273,6 +1277,7 @@ mod tests {
             locked_window_from_history(Some(&LockedHistory {
                 count_at_4: Some(48),
                 windows: vec![(0, 1_800)],
+                anomaly: None,
             })),
             None
         );
@@ -1285,9 +1290,11 @@ mod tests {
         let history = LockedHistory {
             count_at_4: Some(96),
             windows: vec![(1_700, 1_700), (1_620, 1_800)],
+            anomaly: None,
         };
         let value = locked_history_json(Some(&history));
         assert_eq!(value["count_at_4"], serde_json::json!(96));
+        assert_eq!(value["anomaly"], serde_json::Value::Null);
         assert_eq!(
             value["windows"],
             serde_json::json!([
@@ -1300,8 +1307,24 @@ mod tests {
         let no_counter = locked_history_json(Some(&LockedHistory {
             count_at_4: None,
             windows: vec![(1_620, 1_800)],
+            anomaly: None,
         }));
         assert_eq!(no_counter["count_at_4"], serde_json::Value::Null);
+
+        // A table that disagrees with its counter is published with the rows and
+        // with the complaint -- never silently.
+        let suspicious = locked_history_json(Some(&LockedHistory {
+            count_at_4: Some(288),
+            windows: vec![(1_620, 1_800)],
+            anomaly: Some("+4 reads 288, which is 6 writes of 48, but the block holds 1".into()),
+        }));
+        assert_eq!(suspicious["windows"].as_array().map(Vec::len), Some(1));
+        assert!(
+            suspicious["anomaly"]
+                .as_str()
+                .is_some_and(|text| text.contains("288")),
+            "{suspicious}"
+        );
     }
 
     #[test]

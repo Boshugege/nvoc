@@ -173,6 +173,13 @@ pub struct LockedHistory {
     pub count_at_4: Option<u32>,
     /// One entry per stored record, oldest first.
     pub windows: Vec<(u32, u32)>,
+    /// What does not fit the layout the dumps established, when the transport
+    /// noticed something: a counter that is not a multiple of the record stride,
+    /// a counter that disagrees with the number of records, a record off the
+    /// stride. `None` means "nothing to report", which includes a transport that
+    /// does not check. A client that sees rows without this cannot tell a short
+    /// table from a counter that ran ahead of it.
+    pub anomaly: Option<String>,
 }
 
 pub trait ControlBackend: Send {
